@@ -173,7 +173,7 @@ app.add_middleware(
 
 ### Auto-generated client SDK
 
-FastAPI's `/docs` endpoint generates an OpenAPI spec that can produce a TypeScript client automatically:
+FastAPI exposes an OpenAPI spec at `/openapi.json` (also used by the `/docs` Swagger UI), which can be used to generate a TypeScript client automatically:
 
 ```bash
 # Generate TypeScript client for React
