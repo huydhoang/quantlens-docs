@@ -193,7 +193,7 @@ const results = await BacktestService.runBacktest({
 
 ### PyPortfolioOpt integration
 
-Both FastAPI and PyPortfolioOpt use Pydantic, providing seamless compatibility:
+FastAPI uses Pydantic for request/response models, and you can pass the validated data directly into PyPortfolioOpt:
 
 ```python
 from pypfopt.efficient_frontier import EfficientFrontier
