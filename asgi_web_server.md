@@ -396,10 +396,14 @@ class TradingGateway:
 ```python
 class DataIngestionManager:
     def __init__(self):
-        self.timescale_pool = asyncpg.create_pool(dsn="postgresql://...")
+        # Pool is initialized asynchronously in `setup`
+        self.timescale_pool = None
         self.quest_client = QuestDBClient()
         self.signal_queue = asyncio.Queue(maxsize=10000)  # Backpressure
 
+    async def setup(self):
+        # Create TimescaleDB connection pool
+        self.timescale_pool = await asyncpg.create_pool(dsn="postgresql://...")
     async def finnhub_ingest(self):
         async with websockets.connect("wss://ws.finnhub.io") as ws:
             await ws.send('{"type":"subscribe","symbol":"AAPL"}')
