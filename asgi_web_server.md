@@ -58,7 +58,7 @@ Based on public TechEmpower-style benchmarks for a JSON API endpoint (parse para
 | **FastAPI** | 5,882 | 8.36 ms |
 | **Vanilla Uvicorn** | ~11,000* | ~3 ms* |
 
-*\* Estimated based on Uvicorn's single-query leadership.*
+\* Estimated based on Uvicorn's single-query leadership.
 
 **Key insight**: FastAPI adds ~30% overhead vs Starlette alone. Vanilla ASGI can approach BlackSheep/Sanic speeds.
 
