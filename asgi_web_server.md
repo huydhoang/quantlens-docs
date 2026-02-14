@@ -509,7 +509,7 @@ async def run_backtest(config: BacktestConfig):
 @app.get("/fundamentals/{ticker}")
 async def get_fundamentals(ticker: str):
     """MongoDB Atlas query"""
-    return await mongo.fundamentals.find_one({"ticker": ticker})
+    return await mongo.fundamentals.find_one({"ticker": ticker}, {"_id": 0})
 ```
 
 ### Granian gateway (real-time hot path)
