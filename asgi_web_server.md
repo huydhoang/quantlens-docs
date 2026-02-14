@@ -358,7 +358,7 @@ That 4–8 ms FastAPI overhead matters when you're competing with other algos.
 ```python
 import asyncio
 import msgpack
-from granian.rsgi import RSGIProtocol  # public API; falls back to granian._granian in older versions
+from granian.rsgi import RSGIProtocol  # public API (requires a Granian version that exposes RSGIProtocol here)
 
 class TradingGateway:
     def __init__(self):
