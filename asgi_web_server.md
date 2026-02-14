@@ -358,7 +358,7 @@ That 4–8 ms FastAPI overhead matters when you're competing with other algos.
 ```python
 import asyncio
 import msgpack
-from granian._granian import RSGIProtocol
+from granian.rsgi import RSGIProtocol  # public API; falls back to granian._granian in older versions
 
 class TradingGateway:
     def __init__(self):
@@ -522,7 +522,7 @@ from datetime import datetime
 import aioredis
 import asyncpg
 import websockets
-from granian._granian import RSGIProtocol
+from granian.rsgi import RSGIProtocol  # public API; falls back to granian._granian in older versions
 
 class RealtimeGateway:
     def __init__(self):
@@ -544,7 +544,7 @@ class RealtimeGateway:
         while True:
             try:
                 async with websockets.connect(
-                    "wss://ws.finnhub.io?token=" + FINNHUB_KEY
+                    f"wss://ws.finnhub.io?token={FINNHUB_KEY}"
                 ) as ws:
                     await ws.send(json.dumps({
                         "type": "subscribe",
@@ -555,9 +555,9 @@ class RealtimeGateway:
                         tick = json.loads(message)
 
                         # Redis pub + TimescaleDB async insert
-                        pipe = self.redis.pipeline()
-                        pipe.publish("market:ticks", msgpack.packb(tick))
-                        pipe.execute()
+                        await self.redis.publish(
+                            "market:ticks", msgpack.packb(tick)
+                        )
 
                         # TimescaleDB hypertable insert
                         await self.timescale_pool.execute(
