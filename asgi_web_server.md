@@ -692,7 +692,7 @@ async def get_fundamentals(ticker: str) -> dict:
 
 | Use Case | Recommendation | Reason |
 |----------|---------------|--------|
-| **Research / backtesting platform** | FastAPI on Uvicorn | Developer experience, docs, validation |
+| **Research / backtesting platform** | FastAPI on Granian or Uvicorn | Developer experience, docs, validation |
 | **Your use case** (backtest + React) | **FastAPI** on Granian | 90% of vanilla performance with 10% of the code |
 | **Building multiple ASGI services** | Starlette + Pydantic | Lighter framework, reusable components |
 | **Live trading with < 10 ms latency** | Vanilla Granian | Sub-millisecond HTTP, direct kernel integration |
