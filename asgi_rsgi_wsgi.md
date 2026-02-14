@@ -2,7 +2,7 @@
 
 ## Decision Summary
 
-**ASGI** is the web server interface for QuantLens backend services. We will use **FastAPI** as the ASGI framework, with **Uvicorn** for local development and **Granian** for production.
+**ASGI** is the web server interface for QuantLens backend services. We will use **FastAPI** as the ASGI framework, with **Granian** as the ASGI server for all environments (development, CI, staging, and production).
 
 ---
 
@@ -85,33 +85,36 @@ async def optimize_portfolio(holdings: dict):
 
 ---
 
-## Server Choice: Uvicorn (Dev) vs Granian (Prod)
+## Server Choice: Granian
 
-Uvicorn is suggested for local development primarily for **developer experience (DX)**:
+**Granian** is the ASGI server for all environments (development, CI, staging, and production).
 
-- Stable hot reload and rapid iteration loop
-- Simpler debugging behavior during local API work
-- Familiar defaults across the FastAPI ecosystem
+### Why Granian for All Environments
 
-Granian is suggested for production primarily for runtime characteristics:
+- **Rust-based server implementation** tuned for high-throughput ASGI workloads, providing a strong fit with a NautilusTrader-centric, performance-oriented backend
+- **Hot reload support** via optional reload dependency (see [Granian documentation](https://deepwiki.com/emmett-framework/granian/1-overview)), providing comparable developer experience to Uvicorn during local development
+- **Runtime parity across all environments** — using one server eliminates behavioral differences (timeouts, worker defaults, connection handling) and simplifies configuration management
+- **Reduced operational complexity** — maintaining a single server configuration reduces maintenance burden and testing surface area
 
-- Rust-based server implementation tuned for high-throughput ASGI workloads
-- Strong fit with a NautilusTrader-centric, performance-oriented backend
+### Trade-offs
 
-### Trade-offs in a Hybrid Async + CPU-Bound Architecture
+The primary trade-off is **Granian's smaller community** compared to Uvicorn. However, for standard ASGI/FastAPI usage, this is a minor concern:
 
-| Area | Trade-off / Potential issue | Mitigation |
-|------|-----------------------------|------------|
-| **Runtime parity** | Dev on Uvicorn and prod on Granian can expose behavioral differences (timeouts, worker defaults, connection handling) | Keep app ASGI-pure (no server-specific APIs), pin explicit server settings, and run pre-release smoke tests on Granian |
+- Granian implements the ASGI 3.0 specification fully
+- FastAPI and Starlette applications are server-agnostic
+- The Granian project is actively maintained and production-ready
+
+### Operational Considerations in a Hybrid Async + CPU-Bound Architecture
+
+| Area | Consideration / Potential issue | Mitigation |
+|------|--------------------------------|------------|
 | **Long-lived streams** | WebSocket/SSE behavior can degrade under conservative timeout or keepalive defaults | Explicitly configure keepalive/timeouts and add reconnect + heartbeat logic at clients |
 | **CPU-heavy optimization** | PyPortfolioOpt jobs can starve event-loop responsiveness if executed in-process | Always offload optimization to process/thread executors and enforce concurrency limits |
 | **Backpressure under load** | Market-data bursts can flood WebSocket consumers | Use bounded queues, drop/coalesce non-critical updates, and emit snapshots on intervals |
-| **Observability differences** | Metrics and logs may differ between dev/prod servers | Standardize app-level structured logging, health checks, and latency/error metrics independent of server |
 
 ### Practical Mitigation Checklist
 
 1. Pin explicit worker, timeout, keepalive, and max-request settings in deployment config.
 2. Keep WebSocket handlers non-blocking; move compute work to executors/workers.
-3. Validate both HTTP and WebSocket paths in CI smoke tests against Granian.
-4. Add readiness/liveness probes and monitor event-loop lag, p95/p99 latency, and dropped stream events.
+3. Add readiness/liveness probes and monitor event-loop lag, p95/p99 latency, and dropped stream events.
 
