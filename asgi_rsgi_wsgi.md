@@ -85,14 +85,7 @@ async def optimize_portfolio(holdings: dict):
 
 ---
 
-## Deployment Recommendation
-
-- **Development:** `uvicorn` (debugging ergonomics, reload support)
-- **Production:** `granian` (Rust implementation, high-performance ASGI serving)
-
----
-
-## Uvicorn (Dev) vs Granian (Prod): Trade-offs and Mitigations
+## Server Choice: Uvicorn (Dev) vs Granian (Prod)
 
 Uvicorn is suggested for local development primarily for **developer experience (DX)**:
 
@@ -122,8 +115,3 @@ Granian is suggested for production primarily for runtime characteristics:
 3. Validate both HTTP and WebSocket paths in CI smoke tests against Granian.
 4. Add readiness/liveness probes and monitor event-loop lag, p95/p99 latency, and dropped stream events.
 
----
-
-## Final Decision
-
-Adopt **ASGI** for QuantLens backend services to align with NautilusTrader's async design, support required WebSocket workflows, and safely integrate CPU-bound PyPortfolioOpt workloads.
