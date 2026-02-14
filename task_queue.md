@@ -42,7 +42,7 @@ Dramatiq is a well-designed alternative with better defaults than Celery and a c
 
 ### Why Not RQ
 
-RQ is the simplest option — minimal configuration, easy to learn. However, it lacks **rate limiting**, **task routing**, and **priority queues** — all important for managing backtest workloads across multiple worker pools. RQ is best suited for simple background jobs, not the orchestration this platform requires.
+RQ is the simplest option — minimal configuration, easy to learn. However, it lacks **rate limiting** and **task routing** — both important for managing backtest workloads across multiple worker pools with different concurrency models. RQ is best suited for simple background jobs, not the orchestration this platform requires.
 
 ### Why Not Taskiq
 
