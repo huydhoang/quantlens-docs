@@ -523,14 +523,14 @@ import msgpack
 import os
 from datetime import datetime
 
-import aioredis
+from redis import asyncio as redis
 import asyncpg
 import websockets
-from granian.rsgi import RSGIProtocol  # public API; requires Granian >= 1.5.0
+from granian.rsgi import RSGIProtocol  # public API; falls back to granian._granian in older versions
 
 class RealtimeGateway:
     def __init__(self):
-        self.redis = aioredis.from_url("redis://localhost")
+        self.redis = redis.from_url("redis://localhost")
         self.timescale_pool = None
         self.nautilus = None
 
