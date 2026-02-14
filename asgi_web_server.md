@@ -526,7 +526,7 @@ from datetime import datetime
 import aioredis
 import asyncpg
 import websockets
-from granian.rsgi import RSGIProtocol  # public API; falls back to granian._granian in older versions
+from granian.rsgi import RSGIProtocol  # public API; requires Granian >= 1.5.0
 
 class RealtimeGateway:
     def __init__(self):
