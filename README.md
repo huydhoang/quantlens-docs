@@ -37,6 +37,7 @@ TanStack Start (Frontend + API)
 | **Time-series DB (Phase 1)** | TimescaleDB | Full PostgreSQL compatibility, mutable data for corrections, mature tooling — sufficient at free-tier scale |
 | **Time-series DB (Phase 2+)** | QuestDB | Native `SAMPLE BY`, `ASOF JOIN`, 11M+ rows/sec ingestion for when scale demands it |
 | **Frontend** | TanStack Start + React | Server functions, streaming backtest progress, Monaco Editor for strategy authoring |
+| **Task queue** | Celery | Battle-tested reliability, canvas workflows for backtest pipelines, Redis broker (no new infrastructure), Flower monitoring |
 
 ## Documents
 
@@ -46,6 +47,7 @@ TanStack Start (Frontend + API)
 | [python_rust_or_go.md](python_rust_or_go.md) | Server language decision analysis — why Python wins given NautilusTrader's hybrid Rust/Python architecture, with ecosystem comparisons across Python, Rust, and Go |
 | [data_providers.md](data_providers.md) | Multi-provider strategy for free-tier data — Tiingo, Alpaca, Finnhub, and Alpha Vantage compared on rate limits, data quality, and coverage, plus the validation pipeline |
 | [ohlcv_database.md](ohlcv_database.md) | Time-series database evaluation — QuestDB vs TimescaleDB vs InfluxDB vs MongoDB for OHLCV storage, with a phased adoption plan |
+| [task_queue.md](task_queue.md) | Task queue decision analysis — why Celery over Dramatiq, RQ, and Taskiq, with configuration for NautilusTrader backtest workers |
 
 ## Tech Stack
 
