@@ -92,7 +92,7 @@ async def optimize_portfolio(holdings: dict):
 ### Why Granian for All Environments
 
 - **Rust-based server implementation** tuned for high-throughput ASGI workloads, providing a strong fit with a NautilusTrader-centric, performance-oriented backend
-- **Hot reload support** via optional reload dependency (see [Granian documentation](https://deepwiki.com/emmett-framework/granian/1-overview)), providing comparable developer experience to Uvicorn during local development
+- **Hot reload support** via optional reload dependency (see [Granian documentation](https://github.com/emmett-framework/granian#reload)), providing comparable developer experience to Uvicorn during local development
 - **Runtime parity across all environments** — using one server eliminates behavioral differences (timeouts, worker defaults, connection handling) and simplifies configuration management
 - **Reduced operational complexity** — maintaining a single server configuration reduces maintenance burden and testing surface area
 
