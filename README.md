@@ -23,6 +23,7 @@ TanStack Start (Frontend + API)
    Storage
         ├── PostgreSQL ──────── Strategies, results, users
         ├── TimescaleDB ─────── OHLCV market data
+        ├── MongoDB Atlas ───── Fundamentals, economic indicators
         ├── Redis ───────────── Cache, task queue
         └── Parquet Catalog ─── Immutable validated datasets
 ```
@@ -37,6 +38,7 @@ TanStack Start (Frontend + API)
 | **Time-series DB (Phase 1)** | TimescaleDB | Full PostgreSQL compatibility, mutable data for corrections, mature tooling — sufficient at free-tier scale |
 | **Time-series DB (Phase 2+)** | QuestDB | Native `SAMPLE BY`, `ASOF JOIN`, 11M+ rows/sec ingestion for when scale demands it |
 | **Frontend** | TanStack Start + React | Server functions, streaming backtest progress, Monaco Editor for strategy authoring |
+| **NoSQL DB** | MongoDB Atlas (M0) | Flexible document model for semi-structured fundamentals and economic data; aggregation framework for screening queries; 512 MB free tier sufficient for MVP |
 | **Task queue** | Celery | Battle-tested reliability, canvas workflows for backtest pipelines, Redis broker (no new infrastructure), Flower monitoring |
 
 ## Documents
@@ -48,6 +50,7 @@ TanStack Start (Frontend + API)
 | [python_rust_or_go.md](python_rust_or_go.md) | Server language decision analysis — why Python wins given NautilusTrader's hybrid Rust/Python architecture, with ecosystem comparisons across Python, Rust, and Go |
 | [data_providers.md](data_providers.md) | Multi-provider strategy for free-tier data — Tiingo, Alpaca, Finnhub, and Alpha Vantage compared on rate limits, data quality, and coverage, plus the validation pipeline |
 | [ohlcv_database.md](ohlcv_database.md) | Time-series database evaluation — QuestDB vs TimescaleDB vs InfluxDB vs MongoDB for OHLCV storage, with a phased adoption plan |
+| [nosql_database.md](nosql_database.md) | NoSQL database evaluation — MongoDB vs DataStax Astra vs Cosmos DB vs Firestore for stock fundamentals and economic indicators, leveraging flexible schemas for semi-structured financial data |
 | [task_queue.md](task_queue.md) | Task queue decision analysis — why Celery over Dramatiq, RQ, and Taskiq, with configuration for NautilusTrader backtest workers |
 | [asgi_rsgi_wsgi.md](asgi_rsgi_wsgi.md) | Web interface decision analysis — why ASGI over WSGI/RSGI for NautilusTrader real-time streaming + PyPortfolioOpt optimization workloads |
 | [asgi_web_server.md](asgi_web_server.md) | ASGI framework & architecture decision — FastAPI vs Starlette vs vanilla Granian, performance benchmarks, hybrid two-tier architecture for research and real-time trading |
@@ -62,6 +65,6 @@ TanStack Start (Frontend + API)
 
 **Data:** Tiingo (primary EOD), Alpaca (intraday/paper trading), Finnhub (fundamentals)
 
-**Storage:** PostgreSQL, TimescaleDB, Redis, Apache Parquet
+**Storage:** PostgreSQL, TimescaleDB, MongoDB Atlas, Redis, Apache Parquet
 
 **Optimization:** PyPortfolioOpt, Polars
