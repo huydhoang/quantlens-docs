@@ -1,7 +1,8 @@
 # Remaining Verification Tasks
 
 ## Completed
-- [x] **TanStack Start** — Verified server functions, server routes, file routing conventions, streaming patterns
+- [x] **Local Desktop Frontend** — Evaluated Tauri vs Electron, Vite vs Rspack, and Vite SPA vs TanStack Start vs Next.js vs Astro. Decision: Tauri + Vite + React + TanStack Query/Router. See [local_frontend.md](local_frontend.md)
+- [x] **WebSocket Support** — Resolved by switching from TanStack Start to Vite + React SPA. WebSocket is native in the browser — connections managed directly in React and integrated with TanStack Query cache via `queryClient.setQueryData()`. No framework abstraction needed. See [local_frontend.md](local_frontend.md)
 - [x] **NautilusTrader** — Verified architecture (library not service), BacktestEngine/BacktestNode API, ParquetDataCatalog, one-node-per-process constraint, no REST/gRPC/SQLAlchemy
 - [x] **Monaco Editor** — Verified Python has syntax colorization only (no IntelliSense/validation), onValidate doesn't fire for Python, Pyodide viable for client-side AST parsing
 - [x] **PyPortfolioOpt** — `add_sector_constraints(sector_mapper, sector_lower, sector_upper)` confirmed on `BaseConvexOptimizer`. Black-Litterman fully supported via `BlackLittermanModel` (absolute/relative views, Idzorek confidence method, posterior returns/covariance, `bl_weights()`). No built-in ESG-specific API, but generic `add_constraint()` handles any linear constraint. **Riskfolio-Lib** is a significantly more comprehensive alternative: 24 convex risk measures, Risk Parity, HRP/HERC hierarchical clustering, Black-Litterman (standard + Augmented + Bayesian), built-in constraint builders for asset classes/sectors/risk factors, and graph-based constraints. Consider Riskfolio-Lib over PyPortfolioOpt for production.
@@ -10,7 +11,6 @@
 ## Not Started
 - [ ] **TimescaleDB** — Verify hypertable configuration for OHLCV storage, chunk interval recommendations for financial data, compression policies, continuous aggregates for multi-timeframe rollups.
 - [ ] **Redis** — Verify pub/sub vs Streams for real-time backtest progress broadcasting, Celery broker configuration, cache eviction strategies for market data.
-- [ ] **Deployment Architecture** — Verify Vercel/Edge feasibility when backend is Python (Celery workers, NautilusTrader). TanStack Start on Vercel may need serverless functions that proxy to a separate Python backend. Evaluate if a single-server deployment (e.g., Granian serving TanStack Start SSR + FastAPI) is simpler for MVP.
-- [ ] **WebSocket Support** — Verify how TanStack Start handles WebSocket connections for real-time backtest progress. The current diagram shows WebSocket but TanStack Start may not natively support WS — may need a separate endpoint via FastAPI or Socket.IO.
+- [ ] **Deployment Architecture** — Verify Docker Compose configuration for backend services (FastAPI, Celery workers, databases, Redis) that the Tauri desktop app connects to. Evaluate if a simplified setup (e.g., bundled Python backend) is feasible for MVP distribution.
 - [ ] **Custom Dataset Upload** — User story mentions "bring-your-own data" but system_design.md has no upload flow. Design file upload → validation → Parquet conversion → ParquetDataCatalog registration pipeline.
 - [ ] **Strategy Sandboxing** — Verify Python sandboxing approach (RestrictedPython, nsjail, Docker isolation, or Pyodide server-side). Current doc says "restricted environment, no network access" but doesn't specify mechanism.

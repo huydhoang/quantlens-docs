@@ -1,12 +1,12 @@
 ## System Architecture Overview
 
-QuantLens is a **local-first** application for alpha research, strategy backtesting, and portfolio optimization — Dockerized for easy setup. A future **platform app** (deployed React app on Neon) will allow quants to submit backtesting results and deploy strategies live to track and showcase real-world performance.
+QuantLens is a **local-first** desktop application for alpha research, strategy backtesting, and portfolio optimization — powered by a **Tauri** shell wrapping a **Vite + React** SPA, with backend services Dockerized for easy setup. A future **platform app** (deployed React app on Neon) will allow quants to submit backtesting results and deploy strategies live to track and showcase real-world performance.
 
 ### Local App (Dockerized)
 
 ```mermaid
 flowchart TD
-    subgraph Frontend["Frontend — TanStack Start + React"]
+    subgraph Frontend["Frontend — Tauri + Vite + React SPA"]
         direction LR
         B["Strategy Editor<br/>Monaco · Templates · Linting"]
         C["Backtest Dashboard<br/>Config · Date Range · Assets"]
@@ -14,7 +14,7 @@ flowchart TD
         E["Portfolio Analytics<br/>Sharpe · Drawdown · Stats"]
     end
 
-    subgraph API["API Layer · TanStack Start Routes"]
+    subgraph API["API Layer · FastAPI REST + WebSocket"]
         direction LR
         G[Strategy Endpoints]
         H[Backtest Engine Proxy]
@@ -63,11 +63,9 @@ flowchart TD
 
 ```mermaid
 graph LR
-    subgraph "TanStack Start File Structure"
+    subgraph "Vite + React SPA File Structure"
         A[src/routes] --> B[strategies.tsx]
         A --> C[backtest.$id.tsx]
-        A --> D[strategies.server.ts]
-        A --> E[backtest.server.ts]
         
         F[components] --> G[MonacoStrategyEditor.tsx]
         F --> H[BacktestConfigForm.tsx]
@@ -84,8 +82,8 @@ graph LR
     end
     
     G -->|uses| P
-    J -->|calls| D
-    K -->|calls| E
+    J -->|calls| N
+    K -->|calls| N
     H -->|uses| J
     H1 -->|uses| K
 ```
@@ -98,7 +96,7 @@ sequenceDiagram
     participant React as React Component
     participant Monaco as Monaco Editor
     participant PyLinter as Python Linter<br/>Pyodide WASM
-    participant TSStart as TanStack Start Server Fn
+    participant TSStart as FastAPI Backend
     participant Nautilus as NautilusTrader
     
     User->>React: Open Strategy Editor
@@ -137,8 +135,8 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     autonumber
-    participant UI as TanStack UI
-    participant API as TanStack API
+    participant UI as React UI
+    participant API as FastAPI
     participant Queue as Task Queue<br/>Celery/Redis
     participant Worker as Celery Worker<br/>prefork pool
     participant Nautilus as NautilusTrader<br/>BacktestEngine
@@ -205,7 +203,7 @@ graph TB
     end
     
     subgraph "Live Data for UI"
-        T -->|IEX Quotes| J[TanStack Start API]
+        T -->|IEX Quotes| J[FastAPI WebSocket]
         F -->|Quotes| J
         A -->|Quotes| J
         J -->|WebSocket| K[Market Data Hook]
@@ -344,7 +342,7 @@ All services run locally via `docker compose up`:
 ```mermaid
 graph TB
     subgraph "Docker Compose (Local)"
-        A[TanStack Start<br/>Frontend + API]
+        A[Tauri Desktop App<br/>Vite + React SPA]
         B[Celery Workers<br/>Backtest Engine]
         C[Redis<br/>Queue + Cache]
 
@@ -404,11 +402,11 @@ Based on this architecture, here are critical implementation points:
 - NautilusTrader is a **library, not a service** — there is no REST/gRPC API. The API layer enqueues jobs to Celery; workers import and call `nautilus_trader` directly in-process.
 - Implement adapter pattern for Tiingo/Finnhub/Alpaca data normalization to Nautilus `Bar`/`QuoteTick`/`TradeTick` types
 
-**3. TanStack Start Patterns** (currently RC / v0, not stable v1)
-- Use `createServerFn()` for strategy validation (compile Python without execution) — server functions use `@tanstack/react-start`, not file-prefixed API routes
-- API routes use `createFileRoute` with a `server: { handlers: { GET, POST } }` property, not the legacy `api.*` file prefix convention
-- Implement streaming for real-time backtest progress via **streaming server functions** (see TanStack Start streaming data guide) — `createEventStream` does not exist
-- Leverage TanStack Query for optimistic UI updates on backtest submission
+**3. Tauri + Vite + React Patterns**
+- Use TanStack Router with file-based routing for type-safe navigation
+- Use TanStack Query for REST data fetching with automatic caching and invalidation
+- WebSocket connections are managed directly in React — no framework abstraction needed. Push real-time updates into TanStack Query cache via `queryClient.setQueryData()` for unified state management.
+- See [local_frontend.md](local_frontend.md) for the full tech stack decision and architecture
 
 **4. Data Management**
 - Use QuestDB for time-series market data — native `SAMPLE BY` for OHLCV bar generation, `ASOF JOIN` for trade/quote correlation, and `LATEST ON` for efficient last-value-per-symbol queries. Running locally in Docker eliminates the free-tier constraints that previously favored TimescaleDB, and QuestDB's append-only columnar architecture with 11M+ rows/sec ingestion is purpose-built for financial market data.
