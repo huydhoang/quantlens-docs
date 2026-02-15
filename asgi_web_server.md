@@ -348,7 +348,7 @@ Multiple streaming sources need backpressure handling to stay resilient:
 ```python
 class DataIngestionManager:
     def __init__(self):
-        self.questdb_pool = asyncpg.create_pool(dsn="postgresql://...")
+        self.questdb_pool = asyncpg.create_pool(dsn="postgresql://localhost:8812/qdb")
         self.signal_queue = asyncio.Queue(maxsize=10_000)
 
     async def finnhub_ingest(self):
@@ -560,7 +560,7 @@ async def questdb_query(pool, symbol: str, start: str, end: str):
 ```python
 from motor.motor_asyncio import AsyncIOMotorClient
 
-mongo = AsyncIOMotorClient(os.getenv("MONGODB_URI"))
+mongo = AsyncIOMotorClient(os.getenv("MONGODB_URI"))  # e.g. mongodb://localhost:27017
 db = mongo.trading
 
 async def get_fundamentals(ticker: str) -> dict:
