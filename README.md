@@ -1,8 +1,12 @@
 # QuantLens — Architecture & Design Docs
 
-QuantLens is a web-based backtesting platform that lets users write, test, and analyze quantitative trading strategies. It combines a **TanStack Start + React** frontend with a **Python/FastAPI** backend powered by **NautilusTrader**'s Rust core, providing institutional-grade simulation performance with an accessible browser-based workflow.
+QuantLens is a **local-first** alpha research, strategy backtesting, and portfolio optimization application. It combines a **TanStack Start + React** frontend with a **Python/FastAPI** backend powered by **NautilusTrader**'s Rust core, providing institutional-grade simulation performance with an accessible browser-based workflow. The entire application is **Dockerized** for easy setup — a single `docker compose up` starts all services.
+
+The project will evolve into a **platform** where quants can submit their backtesting results and deploy strategies live to track and showcase real-world performance. The deployed platform app uses **Neon** (managed PostgreSQL) as its database.
 
 ## Architecture at a Glance
+
+### Local App (Dockerized)
 
 ```
 TanStack Start (Frontend + API)
@@ -13,33 +17,50 @@ TanStack Start (Frontend + API)
         │
    API Layer (REST / WebSocket)
         │
-   Python Backend (FastAPI / Granian)
+   Python Backend (FastAPI / Uvicorn)
         │
         ├── NautilusTrader ──── Rust core via PyO3
         ├── Celery Workers ──── Distributed backtest execution
         ├── Data Providers ──── Tiingo, Alpaca, Finnhub
         └── skfolio ─────────── Portfolio optimization
         │
-   Storage
+   Storage (all local Docker containers)
         ├── PostgreSQL ──────── Strategies, results, users
-        ├── TimescaleDB ─────── OHLCV market data
-        ├── MongoDB Atlas ───── Fundamentals, economic indicators
+        ├── QuestDB ─────────── OHLCV market data (SAMPLE BY, ASOF JOIN, LATEST ON)
+        ├── MongoDB ─────────── Fundamentals, economic indicators
         ├── Redis ───────────── Cache, task queue
         └── Parquet Catalog ─── Immutable validated datasets
+```
+
+### Future Platform App (Deployed)
+
+```
+React Platform App
+        │
+        ├── Strategy Showcase ── Leaderboards, performance tracking
+        ├── Live Deployment ──── Real-world strategy monitoring
+        └── Quant Profiles ───── Portfolio showcases
+        │
+   Neon PostgreSQL ──────────── User profiles, submitted results, live tracking
+        │
+   QuantLens Local App ─────── Submit results, deploy strategies
 ```
 
 ## Key Decisions
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
+| **Architecture** | Local-first, Dockerized | Single `docker compose up` starts all services — no cloud accounts or managed services required for core functionality; Dockerized for consistent environments |
 | **Server language** | Python | NautilusTrader's hot path is already Rust via PyO3; Python orchestrates the engine and provides access to the unmatched quant ecosystem |
 | **Backtest engine** | NautilusTrader | Rust-powered event-driven engine with Python strategy API — institutional speed without sacrificing usability |
 | **Primary data source** | Tiingo | Most generous free-tier limits (1,000 req/day, 30+ years EOD per call) for bulk historical data |
-| **Time-series DB (Phase 1)** | TimescaleDB | Full PostgreSQL compatibility, mutable data for corrections, mature tooling — sufficient at free-tier scale |
-| **Time-series DB (Phase 2+)** | QuestDB | Native `SAMPLE BY`, `ASOF JOIN`, 11M+ rows/sec ingestion for when scale demands it |
+| **Time-series DB** | QuestDB | Native `SAMPLE BY`, `ASOF JOIN`, `LATEST ON`, 11M+ rows/sec ingestion — purpose-built for financial market data. Running locally in Docker removes the free-tier constraints that previously favored TimescaleDB |
 | **Frontend** | TanStack Start + React | Server functions, streaming backtest progress, Monaco Editor for strategy authoring |
-| **NoSQL DB** | MongoDB Atlas (M0) | Flexible document model for semi-structured fundamentals and economic data; aggregation framework for screening queries; 512 MB free tier sufficient for MVP |
+| **NoSQL DB** | MongoDB (local Docker) | Flexible document model for semi-structured fundamentals and economic data; aggregation framework for screening queries |
 | **Task queue** | Celery | Battle-tested reliability, canvas workflows for backtest pipelines, Redis broker (no new infrastructure), Flower monitoring |
+| **Platform DB** | Neon (managed PostgreSQL) | Serverless PostgreSQL for the deployed platform app — user profiles, submitted results, live strategy tracking |
+| **Deployment (local)** | Docker Compose | All services (frontend, backend, databases, Redis, workers) start with a single command |
+| **Deployment (platform)** | Cloud (TBD) | Future deployed React app for strategy showcasing and live performance tracking |
 
 ## Documents
 
@@ -49,7 +70,7 @@ TanStack Start (Frontend + API)
 | [system_design.md](system_design.md) | Full system architecture — frontend components, backtest execution flow, data flow, NautilusTrader integration, database schema, and deployment topology |
 | [python_rust_or_go.md](python_rust_or_go.md) | Server language decision analysis — why Python wins given NautilusTrader's hybrid Rust/Python architecture, with ecosystem comparisons across Python, Rust, and Go |
 | [data_providers.md](data_providers.md) | Multi-provider strategy for free-tier data — Tiingo, Alpaca, Finnhub, and Alpha Vantage compared on rate limits, data quality, and coverage, plus the validation pipeline |
-| [ohlcv_database.md](ohlcv_database.md) | Time-series database evaluation — QuestDB vs TimescaleDB vs InfluxDB vs MongoDB for OHLCV storage, with a phased adoption plan |
+| [ohlcv_database.md](ohlcv_database.md) | Time-series database evaluation — QuestDB vs TimescaleDB vs InfluxDB vs MongoDB for OHLCV storage, with rationale for QuestDB as the local-first default |
 | [nosql_database.md](nosql_database.md) | NoSQL database evaluation — MongoDB vs DataStax Astra vs Cosmos DB vs Firestore for stock fundamentals and economic indicators, leveraging flexible schemas for semi-structured financial data |
 | [task_queue.md](task_queue.md) | Task queue decision analysis — why Celery over Dramatiq, RQ, and Taskiq, with configuration for NautilusTrader backtest workers |
 | [asgi_rsgi_wsgi.md](asgi_rsgi_wsgi.md) | Web interface decision analysis — why ASGI over WSGI/RSGI for NautilusTrader real-time streaming + skfolio optimization workloads |
@@ -60,12 +81,16 @@ TanStack Start (Frontend + API)
 
 **Frontend:** TanStack Start, React, Monaco Editor, TanStack Query
 
-**Backend:** Python, FastAPI, Granian (Rust ASGI), Celery
+**Backend:** Python, FastAPI, Uvicorn (uvloop), Celery
 
 **Engine:** NautilusTrader (Rust core + Python bindings via PyO3)
 
 **Data:** Tiingo (primary EOD), Alpaca (intraday/paper trading), Finnhub (fundamentals)
 
-**Storage:** PostgreSQL, TimescaleDB, MongoDB Atlas, Redis, Apache Parquet
+**Storage (Local App):** PostgreSQL, QuestDB, MongoDB, Redis, Apache Parquet
+
+**Storage (Platform App):** Neon (managed PostgreSQL)
 
 **Optimization:** skfolio, Polars
+
+**Infrastructure:** Docker Compose (local), Cloud TBD (platform)

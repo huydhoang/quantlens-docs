@@ -1,8 +1,12 @@
 ## System Architecture Overview
 
+QuantLens is a **local-first** application for alpha research, strategy backtesting, and portfolio optimization — Dockerized for easy setup. A future **platform app** (deployed React app on Neon) will allow quants to submit backtesting results and deploy strategies live to track and showcase real-world performance.
+
+### Local App (Dockerized)
+
 ```mermaid
 flowchart TD
-    subgraph Frontend["Frontend - Tanstack Start + React"]
+    subgraph Frontend["Frontend — TanStack Start + React"]
         direction LR
         B["Strategy Editor<br/>Monaco · Templates · Linting"]
         C["Backtest Dashboard<br/>Config · Date Range · Assets"]
@@ -10,7 +14,7 @@ flowchart TD
         E["Portfolio Analytics<br/>Sharpe · Drawdown · Stats"]
     end
 
-    subgraph API["API Layer · Tanstack Start Routes"]
+    subgraph API["API Layer · TanStack Start Routes"]
         direction LR
         G[Strategy Endpoints]
         H[Backtest Engine Proxy]
@@ -34,14 +38,14 @@ flowchart TD
         L3[Redis Cache]
     end
 
-    subgraph PG["PostgreSQL"]
+    subgraph PG["PostgreSQL (Local Docker)"]
         direction LR
         M1[Strategies]
         M2[Backtest Results]
         M3[User Data]
     end
 
-    subgraph TSDB["TimeSeries DB"]
+    subgraph TSDB["QuestDB (Local Docker)"]
         direction LR
         N1[Market Data]
         N2[Tick Data]
@@ -188,7 +192,7 @@ graph TB
         A[Alpaca API] -->|WebSocket/REST| C
         
         C -->|Raw Data| D[Data Normalizer]
-        D -->|Standardized| E[(TimescaleDB<br/>OHLCV + Tick)]
+        D -->|Standardized| E[(QuestDB<br/>OHLCV + Tick)]
         D -->|Cache| R[(Redis<br/>Hot Data)]
     end
     
@@ -333,22 +337,22 @@ erDiagram
 
 ## Deployment Architecture
 
+### Local App (Docker Compose)
+
+All services run locally via `docker compose up`:
+
 ```mermaid
 graph TB
-    subgraph "Vercel/Edge"
+    subgraph "Docker Compose (Local)"
         A[TanStack Start<br/>Frontend + API]
-    end
-    
-    subgraph "AWS/GCP"
-        B[ECS/K8s<br/>Backtest Workers]
+        B[Celery Workers<br/>Backtest Engine]
         C[Redis<br/>Queue + Cache]
-        
-        D[RDS PostgreSQL<br/>Primary DB]
-        E[TimescaleDB<br/>Market Data]
-        
-        F[S3<br/>Strategy Files<br/>Large Results]
+
+        D[PostgreSQL<br/>Strategies · Results · Users]
+        E[QuestDB<br/>OHLCV Market Data]
+        F[MongoDB<br/>Fundamentals · Economic Indicators]
     end
-    
+
     subgraph "External APIs"
         G[Finnhub]
         H[Alpaca Markets]
@@ -364,6 +368,25 @@ graph TB
     B -->|Fetch| TI
     A -->|Query| D
     A -->|Query| E
+```
+
+### Future Platform App (Deployed)
+
+The project will evolve into a platform where quants submit backtesting results and deploy strategies live to track and showcase real-world performance.
+
+```mermaid
+graph TB
+    subgraph "Cloud (Deployed Platform)"
+        PA[React Platform App<br/>Strategy Showcase · Leaderboards]
+        NeonDB[Neon PostgreSQL<br/>User Profiles · Submitted Results<br/>Live Strategy Tracking]
+    end
+
+    subgraph "Local (Quant's Machine)"
+        LA[QuantLens Local App<br/>Docker Compose]
+    end
+
+    LA -->|Submit Results · Deploy Strategy| PA
+    PA -->|Read/Write| NeonDB
 ```
 
 ## Key Implementation Recommendations
@@ -388,12 +411,13 @@ Based on this architecture, here are critical implementation points:
 - Leverage TanStack Query for optimistic UI updates on backtest submission
 
 **4. Data Management**
-- Use TimescaleDB for time-series market data (hypertables for performance)
-- Implement data warming strategy - prefetch likely-needed data into Redis
+- Use QuestDB for time-series market data — native `SAMPLE BY` for OHLCV bar generation, `ASOF JOIN` for trade/quote correlation, and `LATEST ON` for efficient last-value-per-symbol queries. Running locally in Docker eliminates the free-tier constraints that previously favored TimescaleDB, and QuestDB's append-only columnar architecture with 11M+ rows/sec ingestion is purpose-built for financial market data.
+- Implement data warming strategy — prefetch likely-needed data into Redis
 - Cache API responses to respect rate limits: Tiingo limits are plan-dependent (hourly requests + daily requests + monthly bandwidth — see [pricing page](https://www.tiingo.com/pricing)); Finnhub free tier: 60 calls/min with a hard 30 calls/sec cap; Alpaca free tier: ~200 calls/min
 - **Finnhub OHLCV caveat:** Stock Candles and Tick Data endpoints are **Premium-only**. On the free tier, Finnhub is useful for fundamentals, news, quotes, and recommendation data — not historical OHLCV ingestion. Tiingo (EOD + IEX intraday) and Alpaca should be the primary free-tier sources for historical price data.
 - Tiingo provides **WebSocket streams** for IEX (US equities intraday), Crypto, and Forex — not just REST. Use these for real-time data instead of polling.
 - Store validated datasets in Parquet format for NautilusTrader's `ParquetDataCatalog` — this is the primary backtest data path, not live API calls
+- For OHLCV data corrections, use QuestDB's insert-new-row pattern (append a corrected row with a later processing timestamp) rather than in-place updates. The `LATEST ON` clause efficiently retrieves the most recent version per symbol.
 
 **5. Security Considerations**
 - Sandbox Python execution (restricted environment, no network access)

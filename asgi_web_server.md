@@ -11,7 +11,7 @@
 QuantLens serves two distinct workload profiles through its web layer:
 
 1. **Research, backtesting & dashboards** — REST endpoints for running NautilusTrader simulations, portfolio optimization via skfolio, strategy CRUD, and serving results to a React frontend. These are compute-bound and database-heavy; the HTTP framework is not the bottleneck.
-2. **Real-time trading** — WebSocket streaming of market data from multiple providers (Finnhub, Alpaca), live signal processing, TimescaleDB writes, and order execution. These are I/O-bound and latency-sensitive.
+2. **Real-time trading** — WebSocket streaming of market data from multiple providers (Finnhub, Alpaca), live signal processing, QuestDB writes, and order execution. These are I/O-bound and latency-sensitive.
 
 This document evaluates server architectures based on TechEmpower benchmark data, the internal mechanics of Uvicorn and Granian, and QuantLens's specific workload profile.
 
@@ -136,8 +136,8 @@ FastAPI adds ~30% overhead versus Starlette alone. Vanilla ASGI on Uvicorn appro
 
 QuantLens is **database-heavy and I/O-bound** in both tiers:
 
-- **Tier 1 (backtesting/dashboards):** Reads/writes to PostgreSQL (strategy configs, backtest results), MongoDB Atlas (fundamentals), and TimescaleDB (historical OHLCV). Uvicorn's benchmark lead on database queries directly applies.
-- **Tier 2 (real-time trading):** Continuous TimescaleDB writes, asyncpg connection pool under sustained load, WebSocket streaming to the React frontend. Uvicorn's lower tail latency and single-event-loop architecture deliver more predictable performance.
+- **Tier 1 (backtesting/dashboards):** Reads/writes to PostgreSQL (strategy configs, backtest results), MongoDB (fundamentals), and QuestDB (historical OHLCV). Uvicorn's benchmark lead on database queries directly applies.
+- **Tier 2 (real-time trading):** Continuous QuestDB writes, asyncpg connection pool under sustained load, WebSocket streaming to the React frontend. Uvicorn's lower tail latency and single-event-loop architecture deliver more predictable performance.
 
 Granian's JSON serialization advantage is irrelevant here — QuantLens endpoints are never "return a static JSON string." Every request involves database I/O, compute, or both.
 
@@ -155,7 +155,7 @@ For the real-time path, the overhead matters:
 |-----------|--------|-------------------|-----------------|
 | Market data ingest (Finnhub/Alpaca) | < 5 ms | +2–5 ms | +0.3 ms |
 | Signal calculation (NautilusTrader) | 10–50 ms | same | same |
-| DB write (TimescaleDB) | 5–10 ms | same | same |
+| DB write (QuestDB) | 5–10 ms | same | same |
 | WebSocket push to React | < 10 ms | +2–3 ms | +0.3 ms |
 | **Total round-trip** | **~30–75 ms** | **+4–8 ms (10–25%)** | **Minimal** |
 
@@ -176,7 +176,7 @@ Uvicorn's uvloop delivers **lower tail latency** than Granian's Tokio-to-asyncio
 
 ### Why Uvicorn (Not Granian) for This Tier
 
-1. **Database queries dominate.** Backtest results, strategy configs, historical OHLCV, and fundamentals all hit PostgreSQL/TimescaleDB/MongoDB. Uvicorn wins on every database benchmark.
+1. **Database queries dominate.** Backtest results, strategy configs, historical OHLCV, and fundamentals all hit PostgreSQL/QuestDB/MongoDB. Uvicorn wins on every database benchmark.
 2. **asyncpg runs natively.** No Tokio → asyncio context switches. Connection pool performance is optimal.
 3. **Mixed sync/async workload.** skfolio's CPU-heavy optimization runs in process pools via `loop.run_in_executor` — Uvicorn's executor integration is well-optimized and battle-tested.
 4. **NautilusTrader is async-native Python/Rust.** It integrates directly with Python's asyncio ecosystem without an extra FFI layer.
@@ -301,7 +301,7 @@ When the system handles multiple streaming data sources, live signal processing,
 ### Why Uvicorn (Not Granian) for This Tier
 
 1. **WebSocket streaming is the bottleneck.** Uvicorn's uvloop has mature, low-variance WebSocket performance. Granian's Tokio → asyncio bridge adds scheduling jitter under sustained streaming load.
-2. **TimescaleDB writes on every tick.** asyncpg connection pools perform better under Uvicorn's single event loop than under Granian's dual-runtime architecture.
+2. **QuestDB writes on every tick.** QuestDB's high-performance Influx Line Protocol (ILP) over TCP handles writes efficiently under Uvicorn's single event loop, while PGWire queries for reads integrate cleanly with asyncio-native drivers.
 3. **Lower tail latency.** For real-time trading, p99 latency matters more than peak throughput. Uvicorn's libuv foundation delivers more predictable I/O scheduling.
 4. **Ecosystem maturity.** The `websockets` library, asyncpg, and aioredis are all optimized for asyncio/uvloop — no FFI friction.
 
@@ -326,7 +326,7 @@ class TradingGateway:
 
         if signal:
             await asyncio.gather(
-                self.persist_to_timescaledb(signal, tick),
+                self.persist_to_questdb(signal, tick),
                 self.broadcast_signal(signal),
             )
 
@@ -348,7 +348,7 @@ Multiple streaming sources need backpressure handling to stay resilient:
 ```python
 class DataIngestionManager:
     def __init__(self):
-        self.timescale_pool = asyncpg.create_pool(dsn="postgresql://...")
+        self.questdb_pool = asyncpg.create_pool(dsn="postgresql://localhost:8812/qdb")
         self.signal_queue = asyncio.Queue(maxsize=10_000)
 
     async def finnhub_ingest(self):
@@ -364,7 +364,7 @@ class DataIngestionManager:
         while True:
             source, data = await self.signal_queue.get()
             await asyncio.gather(
-                self.write_ohlcv_timescaledb(data),
+                self.write_ohlcv_questdb(data),
                 self.check_strategy_signals(data),
             )
 ```
@@ -384,11 +384,11 @@ import websockets
 class RealtimeGateway:
     def __init__(self):
         self.redis = aioredis.from_url("redis://localhost")
-        self.timescale_pool = None
+        self.questdb_pool = None
         self.nautilus = None
 
     async def setup(self):
-        self.timescale_pool = await asyncpg.create_pool("postgresql://localhost/timescale")
+        self.questdb_pool = await asyncpg.create_pool("postgresql://localhost:8812/qdb")
         self.nautilus = await NautilusKernel.create()
         asyncio.create_task(self.finnhub_ingest())
         asyncio.create_task(self.alpaca_ingest())
@@ -409,7 +409,7 @@ class RealtimeGateway:
                         pipe.publish("market:ticks", msgpack.packb(tick))
                         await pipe.execute()
 
-                        await self.timescale_pool.execute(
+                        await self.questdb_pool.execute(
                             "INSERT INTO ohlcv_1m (time, symbol, price, volume) "
                             "VALUES ($1, $2, $3, $4)",
                             datetime.fromtimestamp(tick["t"] / 1000),
@@ -479,7 +479,7 @@ flowchart TD
         T1B["GET  /backtest/&lbrace;id&rbrace; — Query results"]
         T1C["WS   /backtest/stream — Real-time progress"]
         T1D["POST /optimize — skfolio"]
-        T1E["GET  /fundamentals/&lbrace;ticker&rbrace; — MongoDB Atlas"]
+        T1E["GET  /fundamentals/&lbrace;ticker&rbrace; — MongoDB"]
         T1F["Pydantic validation · OpenAPI docs · JWT auth"]
     end
 
@@ -488,7 +488,7 @@ flowchart TD
         T2B["WS /ws/signals"]
         T2C["WS /ws/execution"]
         T2D["Finnhub ingest · Alpaca ingest"]
-        T2E["Signal processing · TimescaleDB writes"]
+        T2E["Signal processing · QuestDB writes"]
     end
 
     tier1 --> shared
@@ -502,9 +502,8 @@ flowchart TD
     shared --> storage
 
     subgraph storage["Storage"]
-        DB1["TimescaleDB — OHLCV"]
-        DB2["QuestDB — backup / alt"]
-        DB3["MongoDB Atlas — fundamentals"]
+        DB1["QuestDB — OHLCV"]
+        DB3["MongoDB — fundamentals"]
         DB4["PostgreSQL — strategies · results"]
     end
 ```
@@ -523,41 +522,45 @@ flowchart TD
 
 ## Database-Specific Patterns
 
-### TimescaleDB (Primary OHLCV)
+### QuestDB (Primary OHLCV)
 
 ```python
-async def batch_insert_ohlcv(pool, ticks: list[dict]):
-    """Copy-style insert for high-throughput ingestion."""
-    async with pool.acquire() as conn:
-        await conn.copy_records_to_table(
-            "ohlcv_1m",
-            records=[
-                (t["time"], t["symbol"], t["open"], t["high"],
-                 t["low"], t["close"], t["volume"])
-                for t in ticks
-            ],
-        )
-```
-
-### QuestDB (Alternative/Backup)
-
-```python
-async def questdb_insert(session, tick: dict):
-    """Influx Line Protocol for QuestDB."""
+async def questdb_insert_ilp(session, tick: dict):
+    """Influx Line Protocol (ILP) for high-throughput QuestDB ingestion."""
     line = (
         f"ohlcv,symbol={tick['symbol']} "
-        f"price={tick['price']},volume={tick['volume']} "
+        f"open={tick['open']},high={tick['high']},"
+        f"low={tick['low']},close={tick['close']},"
+        f"volume={tick['volume']} "
         f"{tick['timestamp']}\n"
     )
     await session.post("http://localhost:9000/write", data=line)
 ```
 
-### MongoDB Atlas (Fundamentals)
+```python
+async def questdb_query(pool, symbol: str, start: str, end: str):
+    """PGWire protocol for QuestDB reads — native SAMPLE BY and LATEST ON."""
+    async with pool.acquire() as conn:
+        return await conn.fetch(
+            """
+            SELECT timestamp, symbol,
+                   first(price) as open, max(price) as high,
+                   min(price) as low, last(price) as close,
+                   sum(volume) as volume
+            FROM trades
+            WHERE symbol = $1 AND timestamp BETWEEN $2 AND $3
+            SAMPLE BY 1m
+            """,
+            symbol, start, end,
+        )
+```
+
+### MongoDB (Fundamentals)
 
 ```python
 from motor.motor_asyncio import AsyncIOMotorClient
 
-mongo = AsyncIOMotorClient(os.getenv("MONGODB_ATLAS_URI"))
+mongo = AsyncIOMotorClient(os.getenv("MONGODB_URI"))  # e.g. mongodb://localhost:27017
 db = mongo.trading
 
 async def get_fundamentals(ticker: str) -> dict:
@@ -598,7 +601,7 @@ For QuantLens specifically — backtesting NautilusTrader strategies, running sk
 | Research / backtest API | FastAPI on Uvicorn | Developer experience, docs, validation, DB query performance |
 | Real-time market data gateway | Vanilla ASGI on Uvicorn | Low-latency WebSocket streaming, native asyncpg, single event loop |
 | Signal processing | Vanilla ASGI + NautilusTrader | Direct kernel integration, no FFI overhead |
-| Data persistence | TimescaleDB primary, QuestDB backup | Time-series optimized, high ingest rate |
+| Data persistence | QuestDB primary | Time-series optimized, 11M+ rows/sec ingestion, native OHLCV features |
 | Cross-service communication | Redis pub/sub | Decoupling, backpressure handling |
 | Frontend | React + WebSocket (msgpack) | Binary framing for efficiency |
 

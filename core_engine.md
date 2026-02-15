@@ -234,7 +234,7 @@ NautilusTrader as the sole engine aligns cleanly with every existing architectur
 |-----------|-------------|
 | **Celery workers** ([task_queue.md](task_queue.md)) | One `BacktestNode` per prefork worker process — NautilusTrader's singleton constraint matches Celery's process isolation model |
 | **FastAPI on Uvicorn** ([asgi_web_server.md](asgi_web_server.md)) | API layer enqueues backtest jobs; NautilusTrader runs in workers, not in the web process — clean separation |
-| **TimescaleDB → ParquetDataCatalog** ([ohlcv_database.md](ohlcv_database.md)) | Historical OHLCV stored in TimescaleDB, exported to Parquet for NautilusTrader's native data catalog |
+| **QuestDB → ParquetDataCatalog** ([ohlcv_database.md](ohlcv_database.md)) | Historical OHLCV stored in QuestDB (local Docker), exported to Parquet for NautilusTrader's native data catalog |
 | **skfolio** ([portfolio_opt.md](portfolio_opt.md)) | Portfolio optimization runs independently of the backtest engine — NautilusTrader produces trade results, skfolio optimizes allocations |
 | **Monaco Editor** ([system_design.md](system_design.md)) | Strategy templates target NautilusTrader's `TradingStrategy` API exclusively — one template system, one validation path |
 | **Data providers** ([data_providers.md](data_providers.md)) | Single adapter pattern normalizing Tiingo/Alpaca/Finnhub data to NautilusTrader `Bar`/`QuoteTick` types |
@@ -299,7 +299,7 @@ flowchart LR
 
 2. **Execution realism from day one.** VectorBT's simplified fill model (fills at price, no slippage modeling beyond a flat fee) produces backtest results that diverge from real-world performance. NautilusTrader's matching engine simulates partial fills, queue position, and latency — research results are trustworthy without a separate validation step.
 
-3. **Architectural simplicity.** One data pipeline (TimescaleDB → Parquet → `ParquetDataCatalog`), one strategy API (`TradingStrategy`), one results schema, one set of templates, one validation path. Every additional engine multiplies integration and maintenance cost.
+3. **Architectural simplicity.** One data pipeline (QuestDB → Parquet → `ParquetDataCatalog`), one strategy API (`TradingStrategy`), one results schema, one set of templates, one validation path. Every additional engine multiplies integration and maintenance cost.
 
 4. **Parameter sweeps are solved by infrastructure, not by the engine.** Celery's prefork pool parallelizes NautilusTrader backtests across workers. The speed difference versus VectorBT's in-process broadcasting is marginal for QuantLens's scale (hundreds of parameter combinations, not millions).
 
