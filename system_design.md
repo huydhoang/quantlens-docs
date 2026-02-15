@@ -28,6 +28,7 @@ flowchart TD
 
     subgraph DataProv["Data Providers"]
         direction LR
+        L0[Tiingo Client]
         L1[Finnhub Client]
         L2[Alpaca Client]
         L3[Redis Cache]
@@ -47,9 +48,9 @@ flowchart TD
     end
 
     Frontend -.->|HTTP / WebSocket| API
-    API -.->|REST / gRPC| Nautilus
+    API -.->|Celery / Redis| Nautilus
     API -.->|REST| DataProv
-    Nautilus -.->|SQLAlchemy| PG
+    Nautilus -.->|psycopg / asyncpg| PG
     DataProv -.->|Write| TSDB
     Nautilus -.->|Read| TSDB
 ```
@@ -61,8 +62,8 @@ graph LR
     subgraph "TanStack Start File Structure"
         A[src/routes] --> B[strategies.tsx]
         A --> C[backtest.$id.tsx]
-        A --> D[api.strategies.ts]
-        A --> E[api.backtest.ts]
+        A --> D[strategies.server.ts]
+        A --> E[backtest.server.ts]
         
         F[components] --> G[MonacoStrategyEditor.tsx]
         F --> H[BacktestConfigForm.tsx]
@@ -92,13 +93,13 @@ sequenceDiagram
     participant User
     participant React as React Component
     participant Monaco as Monaco Editor
-    participant PyLinter as Python Linter
-    participant TSStart as TanStack Start API
+    participant PyLinter as Python Linter<br/>Pyodide WASM
+    participant TSStart as TanStack Start Server Fn
     participant Nautilus as NautilusTrader
     
     User->>React: Open Strategy Editor
     React->>Monaco: Initialize Editor
-    Monaco->>Monaco: Load Python Language Mode
+    Monaco->>Monaco: Load Python Syntax Colorization
     
     alt New Strategy
         React->>TSStart: GET /api/strategies/template
@@ -111,9 +112,9 @@ sequenceDiagram
     end
     
     User->>Monaco: Type Code
-    Monaco->>PyLinter: Request Validation
-    PyLinter->>PyLinter: Syntax Check
-    PyLinter-->>Monaco: Return Diagnostics
+    Monaco->>PyLinter: Debounced Syntax Check
+    PyLinter->>PyLinter: AST Parse via Pyodide
+    PyLinter-->>Monaco: Set Model Markers
     
     User->>React: Click "Validate Strategy"
     React->>TSStart: POST /api/strategies/validate
@@ -134,10 +135,10 @@ sequenceDiagram
     autonumber
     participant UI as TanStack UI
     participant API as TanStack API
-    participant Queue as Task Queue<br/>BullMQ/Redis
-    participant Worker as Backtest Worker
-    participant Nautilus as NautilusTrader
-    participant Data as Data Provider<br/>Finnhub/Alpaca
+    participant Queue as Task Queue<br/>Celery/Redis
+    participant Worker as Celery Worker<br/>prefork pool
+    participant Nautilus as NautilusTrader<br/>BacktestEngine
+    participant Data as Data Provider<br/>Tiingo/Alpaca/Finnhub
     participant DB as PostgreSQL
     
     UI->>API: POST /api/backtest/run
@@ -182,7 +183,8 @@ sequenceDiagram
 ```mermaid
 graph TB
     subgraph "Market Data Ingestion"
-        F[Finnhub API] -->|WebSocket/REST| C[Data Ingestion Service]
+        T[Tiingo API] -->|WebSocket/REST| C[Data Ingestion Service]
+        F[Finnhub API] -->|WebSocket/REST| C
         A[Alpaca API] -->|WebSocket/REST| C
         
         C -->|Raw Data| D[Data Normalizer]
@@ -191,7 +193,7 @@ graph TB
     end
     
     subgraph "Backtest Data Access"
-        E -->|Historical| G[Nautilus Data Catalog]
+        E -->|Historical| G[Nautilus ParquetDataCatalog]
         R -->|Real-time| G
         
         G -->|Backtest Venues| H[Nautilus Engine]
@@ -199,7 +201,8 @@ graph TB
     end
     
     subgraph "Live Data for UI"
-        F -->|Quotes| J[TanStack Start API]
+        T -->|IEX Quotes| J[TanStack Start API]
+        F -->|Quotes| J
         A -->|Quotes| J
         J -->|WebSocket| K[Market Data Hook]
         K -->|Real-time| L[Price Ticker Component]
@@ -218,8 +221,8 @@ graph TB
 ```mermaid
 classDiagram
     class NautilusBacktestService {
-        +Engine engine
-        +DataCatalog catalog
+        +BacktestEngine engine
+        +ParquetDataCatalog catalog
         +StrategyFactory factory
         +run_backtest(config)
         +validate_strategy(code)
@@ -234,6 +237,7 @@ classDiagram
     }
     
     class DataProviderAdapter {
+        +TiingoAdapter tiingo
         +FinnhubAdapter finnhub
         +AlpacaAdapter alpaca
         +fetch_historical(symbols, start, end)
@@ -348,14 +352,16 @@ graph TB
     subgraph "External APIs"
         G[Finnhub]
         H[Alpaca Markets]
+        TI[Tiingo]
     end
-    
+
     A -->|Enqueue Jobs| C
     B -->|Consume| C
     B -->|Read/Write| D
     B -->|Read| E
     B -->|Fetch| G
     B -->|Fetch| H
+    B -->|Fetch| TI
     A -->|Query| D
     A -->|Query| E
 ```
@@ -365,24 +371,29 @@ graph TB
 Based on this architecture, here are critical implementation points:
 
 **1. Monaco Editor Setup**
-- Use `@monaco-editor/react` with Python language support
-- Implement custom completion providers for NautilusTrader APIs
-- Add Python linting via WebAssembly (Pyodide) or backend validation endpoint
+- Use `@monaco-editor/react` — Python gets **syntax colorization only** (no built-in IntelliSense or validation; Monaco's `onValidate` fires only for JS/TS/CSS/JSON/HTML)
+- Implement custom `CompletionItemProvider` for NautilusTrader APIs via `monaco.languages.registerCompletionItemProvider`
+- Add Python linting via Pyodide (WASM) for client-side AST parsing, with markers set via `monaco.editor.setModelMarkers`; deep validation (NautilusTrader import resolution) must happen server-side
 
 **2. NautilusTrader Integration**
-- Run backtests in isolated worker processes (Docker containers recommended)
-- Use NautilusTrader's `BacktestEngine` with custom `DataCatalog`
-- Implement adapter pattern for Finnhub/Alpaca data normalization to Nautilus `QuoteTick`/`TradeTick`
+- Run backtests in isolated worker processes — **one `BacktestNode` per process** (NautilusTrader enforces this due to global singleton state: force-stop flag, logger mode, Tokio runtime). Celery `prefork` pool satisfies this naturally.
+- Use `BacktestEngine` (low-level, fine-grained control) or `BacktestNode` with `BacktestRunConfig` objects (high-level, recommended for production). The catalog class is `ParquetDataCatalog`, not `DataCatalog`.
+- NautilusTrader is a **library, not a service** — there is no REST/gRPC API. The API layer enqueues jobs to Celery; workers import and call `nautilus_trader` directly in-process.
+- Implement adapter pattern for Tiingo/Finnhub/Alpaca data normalization to Nautilus `Bar`/`QuoteTick`/`TradeTick` types
 
-**3. TanStack Start Patterns**
-- Use server functions for strategy validation (compile Python without execution)
-- Implement streaming for real-time backtest progress via `createEventStream`
+**3. TanStack Start Patterns** (currently RC / v0, not stable v1)
+- Use `createServerFn()` for strategy validation (compile Python without execution) — server functions use `@tanstack/react-start`, not file-prefixed API routes
+- API routes use `createFileRoute` with a `server: { handlers: { GET, POST } }` property, not the legacy `api.*` file prefix convention
+- Implement streaming for real-time backtest progress via **streaming server functions** (see TanStack Start streaming data guide) — `createEventStream` does not exist
 - Leverage TanStack Query for optimistic UI updates on backtest submission
 
 **4. Data Management**
 - Use TimescaleDB for time-series market data (hypertables for performance)
 - Implement data warming strategy - prefetch likely-needed data into Redis
-- Cache Finnhub/Alpaca API responses to respect rate limits
+- Cache API responses to respect rate limits: Tiingo limits are plan-dependent (hourly requests + daily requests + monthly bandwidth — see [pricing page](https://www.tiingo.com/pricing)); Finnhub free tier: 60 calls/min with a hard 30 calls/sec cap; Alpaca free tier: ~200 calls/min
+- **Finnhub OHLCV caveat:** Stock Candles and Tick Data endpoints are **Premium-only**. On the free tier, Finnhub is useful for fundamentals, news, quotes, and recommendation data — not historical OHLCV ingestion. Tiingo (EOD + IEX intraday) and Alpaca should be the primary free-tier sources for historical price data.
+- Tiingo provides **WebSocket streams** for IEX (US equities intraday), Crypto, and Forex — not just REST. Use these for real-time data instead of polling.
+- Store validated datasets in Parquet format for NautilusTrader's `ParquetDataCatalog` — this is the primary backtest data path, not live API calls
 
 **5. Security Considerations**
 - Sandbox Python execution (restricted environment, no network access)
