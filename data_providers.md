@@ -1,6 +1,6 @@
 # Data Providers — Comprehensive Analysis
 
-This document consolidates the analysis of free-tier data providers for the backtesting service built on NautilusTrader and PyPortfolioOpt. It covers provider capabilities, API constraints, data quality concerns, and a multi-provider integration strategy aligned with the system architecture defined in `system_design.md`.
+This document consolidates the analysis of free-tier data providers for the backtesting service built on NautilusTrader and skfolio. It covers provider capabilities, API constraints, data quality concerns, and a multi-provider integration strategy aligned with the system architecture defined in `system_design.md`.
 
 ---
 
@@ -106,7 +106,7 @@ graph LR
 
 - **Why**: 60 calls/min supports screening and signal generation
 - **Use for**: Company profiles, earnings calendars, news sentiment
-- **PyPortfolioOpt integration**: Use for Black-Litterman views or constraints (sector limits from profile data)
+- **skfolio integration**: Use for factor-aware portfolio constraints and optimization inputs (sector limits from profile data)
 - **Strategy**: Batch download fundamentals monthly, not daily
 
 ### 4. Alpha Vantage — Avoid for Primary Use
@@ -200,7 +200,7 @@ flowchart TB
     subgraph Consumers["Consumers"]
         direction LR
         NT[NautilusTrader<br/>BacktestEngine]
-        PPO[PyPortfolioOpt<br/>Portfolio Optimization]
+        PPO[skfolio<br/>Portfolio Optimization]
     end
 
     T -->|"30+ yr daily per call"| BULK
@@ -273,7 +273,7 @@ flowchart TB
 
     subgraph ConsumerLayer["Backtesting & Optimization"]
         B1["NautilusTrader BacktestEngine"]
-        B2["PyPortfolioOpt Optimization"]
+        B2["skfolio Optimization"]
         B3["Consistent fill models"]
     end
 
@@ -387,28 +387,23 @@ def ingest_validated_data():
 - Configure `TradingNode` with Alpaca for paper trading only
 - Implement custom `DataCatalog` that prioritizes local storage over API calls
 
-### PyPortfolioOpt Integration
+### skfolio Integration
 
 ```python
-from pypfopt import EfficientFrontier, risk_models, expected_returns
+from skfolio.optimization import MeanRisk, CVaR
 
-def robust_optimization(prices_df):
-    """prices_df: DataFrame from validated Tiingo data."""
+def cvar_optimization(prices_df, confidence_level=0.95):
+    """prices_df: DataFrame with datetime index and asset tickers as columns."""
     if prices_df.isnull().sum().sum() > 0:
         raise DataQualityError("Missing values in price data")
 
-    zero_volume_days = (prices_df['volume'] == 0).sum()
-    if zero_volume_days > len(prices_df) * 0.05:
-        log.warning("High proportion of zero-volume days detected")
+    if prices_df.shape[1] < 2:
+        raise DataQualityError("Expected multiple asset columns for portfolio optimization")
 
-    returns = expected_returns.mean_historical_return(prices_df['close'])
-    cov_matrix = risk_models.sample_cov(prices_df['close'])
-
-    sectors = fetch_finnhub_sectors(prices_df.columns)
-    ef = EfficientFrontier(returns, cov_matrix)
-    ef.add_sector_constraints(sector_mapper=sectors)
-
-    return ef.max_sharpe()
+    returns = prices_df.pct_change().dropna()
+    optimizer = MeanRisk(risk_measure=CVaR(confidence_level))
+    optimizer.fit(returns)
+    return optimizer.weights_
 ```
 
 ---

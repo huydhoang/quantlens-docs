@@ -6,7 +6,7 @@
 
 - As a quant, I need the NautilusTrader package for backtesting and trade execution to leverage its performance advantages thanks to a Rust core and event-driven processing, while maintaining excellent ecosystem compatibility with Python bindings.
 
-- As a quant, I need the system to integrate efficiently with PyPortfolioOpt or a better alternative for ready-to-use portfolio optimization functions.
+- As a quant, I need the system to integrate efficiently with skfolio for ready-to-use portfolio optimization functions.
 
 - As a quant, I need the system to ingest data from various API sources like Tiingo for EOD history, Finnhub for fundamental data and cross-validation of historical prices, Alpaca for near-real-time intraday data, and last but not least, bring-your-own data (custom datasets I upload via the app UI).
 

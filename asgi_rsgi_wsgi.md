@@ -11,7 +11,7 @@
 QuantLens integrates:
 
 - **NautilusTrader** (Rust core + async tokio networking, REST/WebSocket adapter model)
-- **PyPortfolioOpt** (synchronous, CPU-bound portfolio optimization via scipy/cvxpy stack)
+- **skfolio** (synchronous, CPU-bound portfolio optimization via cvxpy with scikit-learn-native APIs)
 
 This creates a mixed workload profile:
 
@@ -22,11 +22,11 @@ This creates a mixed workload profile:
 
 ## Comparison
 
-| Factor | NautilusTrader | PyPortfolioOpt | Implication |
+| Factor | NautilusTrader | skfolio | Implication |
 |--------|---------------|----------------|-------------|
-| **Architecture** | Rust core + async tokio networking | Pure Python, CPU-bound optimization | Nautilus aligns with async runtime; optimization needs sync wrapper |
+| **Architecture** | Rust core + async tokio networking | Python + CVXPY, CPU-bound optimization | Nautilus aligns with async runtime; optimization needs sync wrapper |
 | **Real-time Requirements** | WebSocket streaming, live trading, market data | Batch portfolio optimization | WebSocket support is required |
-| **Concurrency Model** | Event-driven, high-frequency capable | Synchronous scipy/cvxpy solvers | Need mixed async + sync execution model |
+| **Concurrency Model** | Event-driven, high-frequency capable | Synchronous CVXPY solvers | Need mixed async + sync execution model |
 | **Integration Pattern** | Modular adapters for REST/WebSocket | Library-style function calls | Need both HTTP API and WebSocket endpoints |
 
 ---
@@ -40,7 +40,7 @@ This creates a mixed workload profile:
    Live market data, P&L streams, and order status updates require WebSocket endpoints.
 
 3. **Handles mixed sync/async workloads**  
-   ASGI servers can run synchronous, CPU-heavy PyPortfolioOpt calls in worker pools without blocking the main event loop.
+   ASGI servers can run synchronous, CPU-heavy skfolio calls in worker pools without blocking the main event loop.
 
 4. **Strong performance options**  
    ASGI-native servers (Uvicorn, Granian) provide high throughput for I/O-heavy APIs and streaming use cases.
@@ -82,5 +82,4 @@ async def optimize_portfolio(holdings: dict):
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(executor, run_optimization_sync, holdings)
 ```
-
 

@@ -399,3 +399,8 @@ Based on this architecture, here are critical implementation points:
 - Sandbox Python execution (restricted environment, no network access)
 - Validate all strategy code before execution (AST parsing)
 - Implement resource limits (max backtest duration, memory caps)
+
+**6. Portfolio Optimization (skfolio)**
+- Use `skfolio` as the optimization engine with a scikit-learn-native `fit/predict/transform` workflow for clean FastAPI dependency injection.
+- Default to downside-aware risk objectives (`CVaR`) and monitor drawdown-focused metrics (max drawdown, conditional drawdown, tracking error).
+- Use walk-forward cross-validation for optimization endpoints to reduce overfitting in production allocation workflows.

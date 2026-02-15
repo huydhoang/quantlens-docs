@@ -100,7 +100,7 @@ Python's quantitative finance ecosystem is unmatched:
 | **Technical Indicators** | TA-Lib (12k+ stars, 200+ indicators), Pandas TA (115+ indicators) |
 | **Data Handling** | Pandas, Polars (Rust-based), ArcticDB, PyArrow |
 | **ML/Stats** | Scikit-learn, PyTorch, Statsmodels, MLfinlab |
-| **Risk/Portfolio** | PyPortfolioOpt, Riskfolio-Lib, Empyrical, QuantStats |
+| **Risk/Portfolio** | skfolio, Riskfolio-Lib, Empyrical, QuantStats |
 | **Data Sources** | alpaca-py, finnhub-python (official SDKs), yfinance, polygon-io |
 
 By comparison, Rust has a handful of early-stage finance crates and Go has effectively zero actively maintained quant libraries (see detailed breakdowns in [Why Not Rust or Go](#why-not-rust-or-go) below).
