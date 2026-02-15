@@ -23,7 +23,7 @@ Stock fundamentals (10-K/10-Q filings) and economic indicators (GDP, CPI, unempl
 | Database | Storage | Throughput/Operations | Key Limitation | Overage Risk |
 |----------|---------|----------------------|----------------|--------------|
 | **MongoDB Atlas (M0)** | 512 MB–5 GB | Shared vCPU/RAM | 512 MB–5 GB hard limit | **None** (hard stops) |
-| **DataStax Astra** | 80 GB | 20M ops/month ($25 credit) | Credit exhaustion | **Medium** (pay-as-you-go kicks in) |
+| **DataStax Astra** | 80 GB | 20M ops/month | Operation limit | **None** (service stops, no credit card required) |
 | **Azure Cosmos DB** | 25 GB | 1,000 RU/s | RU/s throttling | **High** (silent throttling, then charges) |
 | **Google Firestore** | 1 GB | 50K reads/20K writes/day | Daily reset | **Low** (hard daily caps) |
 | **Couchbase Capella** | 8 GB | 1 node, limited | Single node | **Low** (requires upgrade) |
@@ -33,7 +33,7 @@ Stock fundamentals (10-K/10-Q filings) and economic indicators (GDP, CPI, unempl
 DataStax Astra (80 GB) and Azure Cosmos DB (25 GB) monetize **throughput, not capacity**. They can afford generous storage because:
 
 1. **Operation-based pricing**: High storage usage increases the likelihood of exceeding RU/operation limits due to larger index scans.
-2. **Cassandra's LSM Tree architecture** (Astra): Append-only writes make storage cheap, but compaction and high-volume operations burn through credits quickly.
+2. **Cassandra's LSM Tree architecture** (Astra): Append-only writes make storage cheap, but compaction and high-volume operations consume the 20M ops/month allowance quickly.
 3. **Lock-in economics**: Querying 25 GB of data with complex aggregations consumes RUs rapidly. At ~$0.008 per 100 RU/s/hour, exceeding Cosmos DB's 1,000 RU/s limit costs ~$6/month per 100 RU/s.
 
 ### Architectural Differences
@@ -187,7 +187,7 @@ For our use case, **both fundamentals and economic indicators fit well in MongoD
 | Database | Verdict | Reason |
 |----------|---------|--------|
 | **Azure Cosmos DB** | Use only if global multi-region writes with strict SLAs are needed from day one | RU-based pricing is unpredictable for analytical workloads; a complex aggregation can consume 1,000+ RUs per execution |
-| **DataStax Astra** | Overkill for low-frequency fundamentals | Eventual consistency adds complexity without benefit; query-driven denormalization is unnecessary overhead |
+| **DataStax Astra** | Practical alternative but higher learning curve | Cassandra's query-driven denormalization and partition key design add significant complexity; eventual consistency is unnecessary for low-frequency fundamentals |
 | **Google Firestore** | Too restrictive | Daily operation limits (50K reads) break backtesting workflows |
 | **Couchbase Capella** | Insufficient | 8 GB limiting; N1QL query optimization requires significant tuning |
 
@@ -236,7 +236,7 @@ For our use case, **both fundamentals and economic indicators fit well in MongoD
 
 1. **Cosmos DB "Free Tier" Trap**: The 1,000 RU/s is a provisioned limit. If exceeded, you get charged — not throttled gracefully. A single unoptimized query scanning 25 GB can consume 10,000+ RUs instantly.
 
-2. **DataStax Astra Credit Mechanics**: The $25 credit covers 20M operations. At 1M writes/day (common for financial data), the credit is exhausted in 20 days. Standard rates apply immediately after.
+2. **DataStax Astra Free Tier**: No credit card required — the service stops at 20M operations/month. At 1M writes/day (common for financial data), the limit is reached in 20 days, after which the service is unavailable until the next billing cycle. The 80 GB storage and zero overage risk make it a practical alternative to MongoDB Atlas, but Cassandra's learning curve (partition key design, compaction strategies, consistency tuning) is a significant trade-off.
 
 3. **MongoDB M0 Limitations**:
    - No backup/restore (manual export only)
