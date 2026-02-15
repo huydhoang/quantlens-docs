@@ -194,7 +194,7 @@ flowchart TB
         direction LR
         PARQ[(Parquet Catalog<br/>Immutable · Versioned)]
         REDIS[(Redis<br/>Hot Data · Rate Limit<br/>Protection)]
-        TSDB[(TimescaleDB<br/>OHLCV · Tick Data)]
+        TSDB[(QuestDB<br/>OHLCV · Tick Data)]
     end
 
     subgraph Consumers["Consumers"]
