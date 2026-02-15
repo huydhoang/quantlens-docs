@@ -22,7 +22,7 @@ Stock fundamentals (10-K/10-Q filings) and economic indicators (GDP, CPI, unempl
 
 | Database | Storage | Throughput/Operations | Key Limitation | Overage Risk |
 |----------|---------|----------------------|----------------|--------------|
-| **MongoDB Atlas (M0)** | 512 MB–5 GB | Shared vCPU/RAM | 512MB–5GB hard limit | **None** (hard stops) |
+| **MongoDB Atlas (M0)** | 512 MB–5 GB | Shared vCPU/RAM | 512 MB–5 GB hard limit | **None** (hard stops) |
 | **DataStax Astra** | 80 GB | 20M ops/month ($25 credit) | Credit exhaustion | **Medium** (pay-as-you-go kicks in) |
 | **Azure Cosmos DB** | 25 GB | 1,000 RU/s | RU/s throttling | **High** (silent throttling, then charges) |
 | **Google Firestore** | 1 GB | 50K reads/20K writes/day | Daily reset | **Low** (hard daily caps) |
@@ -178,7 +178,7 @@ For our use case, **both fundamentals and economic indicators fit well in MongoD
 1. **Data characteristics match**: Fundamentals are low-frequency, high-structure, requiring complex queries (screening, aggregations, cross-sectional analysis). MongoDB's document model maps naturally to SEC filing structures.
 2. **Query power**: MongoDB's aggregation framework excels at calculating ratios, growth rates, and multi-dimensional analysis — the core operations for stock screening.
 3. **Schema evolution**: Economic indicators change definitions over time (e.g., GDP calculation methodology revisions). MongoDB's flexible schema handles this without migrations.
-4. **Free tier is sufficient**: 512 MB accommodates ~5 years of quarterly fundamentals for 3,000+ stocks and ~20 years of monthly economic indicators for major economies.
+4. **Free tier is sufficient**: 512 MB accommodates ~5 years of quarterly fundamentals for 3,000+ stocks and ~20 years of monthly economic indicators for major economies. (A typical fundamentals document with 100+ metrics is ~2 KB; 3,000 stocks × 20 quarters × 2 KB ≈ 120 MB, leaving ample room for indexes and economic data.)
 5. **No overage risk**: M0 hard-stops at limits — no surprise charges.
 6. **Clear upgrade path**: M10 ($0.08/hr) when capacity demands it.
 
