@@ -2,7 +2,7 @@
 
 An evaluation of the leading Python portfolio optimization libraries — their architectures, feature sets, performance characteristics, and trade-offs — to inform QuantLens's technology selection.
 
-**Decision**: Riskfolio-Lib as the primary package, with skfolio as a strong alternative for ML research workflows and enterprise support, and a finalytics fork as the path toward the performance frontier.
+**Decision**: skfolio as the primary package for QuantLens portfolio optimization, with Riskfolio-Lib as a specialized alternative for niche constraint-heavy use cases and a finalytics fork as the path toward the performance frontier.
 
 ---
 
@@ -48,7 +48,7 @@ An evaluation of the leading Python portfolio optimization libraries — their a
 
 ---
 
-## 2. skfolio — Emerging Leader for ML Workflows
+## 2. skfolio — Primary Choice for FastAPI + ML Workflows
 
 **Architecture**: Built natively on the scikit-learn API (`fit-predict-transform` paradigm). Modular design with estimators inheriting from `BaseEstimator`. Python 3.10+, BSD 3-clause license, backed by Skfolio Labs (enterprise support available).
 
@@ -175,24 +175,23 @@ Currently no mature open-source Rust portfolio optimization library matches Risk
 
 ## Decision
 
-### Primary: Riskfolio-Lib
+### Primary: skfolio
 
-Riskfolio-Lib is the primary choice for QuantLens portfolio optimization due to its unmatched breadth of risk measures (24+), advanced constraint support (graph-based, cardinality, mutual exclusion), robust optimization with uncertainty sets, and full factor modeling capabilities. It covers the widest range of academic and practitioner use cases in a single library.
+skfolio is the primary choice for QuantLens portfolio optimization because its scikit-learn-native API integrates cleanly with FastAPI dependency injection and production ML workflows. It provides built-in cross-validation (including Walk Forward), native pipeline/grid-search compatibility, and strong support for downside-aware risk modeling such as CVaR and drawdown-centric analysis.
 
 **Trade-offs accepted**:
-- Steeper learning curve (mitigated by good technical docs)
-- Single maintainer risk (mitigated by CVXPY-based architecture — models are portable)
-- CVXPY performance ceiling (mitigated by commercial solver support and the high-performance path below)
+- Fewer total risk measures than Riskfolio-Lib
+- Newer library with a shorter production track record
+- Still subject to CVXPY performance ceilings for large optimization problems
 
-### Alternative: skfolio (Research & Enterprise)
+### Alternative: Riskfolio-Lib (Constraint-Heavy Research)
 
-skfolio is the preferred alternative when ML pipeline integration, reproducible research workflows, or enterprise support are required. Its native scikit-learn compatibility makes it ideal for hyperparameter tuning, cross-validation, and model stacking — capabilities Riskfolio-Lib lacks.
+Riskfolio-Lib remains a strong alternative for specialized quantitative workflows that need its broader catalog of risk measures and advanced constraint tooling (graph constraints, mutual exclusion, robust uncertainty sets).
 
 **Use when**:
-- Building ML-driven allocation strategies (GridSearchCV, Pipeline)
-- Requiring Combinatorial Purged Cross-Validation or Walk Forward analysis
-- Needing enterprise support (Skfolio Labs)
-- Working with ensemble/stacking optimization methods
+- Requiring niche convex risk measures not available in skfolio
+- Prioritizing advanced constraint engineering over sklearn-style pipelines
+- Leveraging commercial solver support for large CVXPY optimization workloads
 
 ### Alternative: finalytics Fork (Performance Frontier)
 
@@ -207,4 +206,4 @@ A fork of finalytics provides the path toward Rust-powered optimization for perf
 
 ### Not Selected: PyPortfolioOpt
 
-PyPortfolioOpt has the best engineering practices (near-100% test coverage, JOSS publication, stable API, active community) and the cleanest API for classical methods. However, its limited risk measure coverage (5-6) and lack of advanced constraints, factor models, or ML integration make it insufficient for QuantLens's requirements. It remains an excellent educational and prototyping tool but is superseded by Riskfolio-Lib and skfolio for production and research use cases respectively.
+PyPortfolioOpt has the best engineering practices (near-100% test coverage, JOSS publication, stable API, active community) and the cleanest API for classical methods. However, its limited risk measure coverage (5-6) and lack of advanced cross-validation and ML pipeline integration make it insufficient for QuantLens's requirements. It remains an excellent educational and prototyping tool but is superseded by skfolio for primary production and research workflows.

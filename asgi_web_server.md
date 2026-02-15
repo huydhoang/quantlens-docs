@@ -10,7 +10,7 @@
 
 QuantLens serves two distinct workload profiles through its web layer:
 
-1. **Research, backtesting & dashboards** — REST endpoints for running NautilusTrader simulations, portfolio optimization via PyPortfolioOpt, strategy CRUD, and serving results to a React frontend. These are compute-bound and database-heavy; the HTTP framework is not the bottleneck.
+1. **Research, backtesting & dashboards** — REST endpoints for running NautilusTrader simulations, portfolio optimization via skfolio, strategy CRUD, and serving results to a React frontend. These are compute-bound and database-heavy; the HTTP framework is not the bottleneck.
 2. **Real-time trading** — WebSocket streaming of market data from multiple providers (Finnhub, Alpaca), live signal processing, TimescaleDB writes, and order execution. These are I/O-bound and latency-sensitive.
 
 This document evaluates server architectures based on TechEmpower benchmark data, the internal mechanics of Uvicorn and Granian, and QuantLens's specific workload profile.
@@ -171,14 +171,14 @@ Uvicorn's uvloop delivers **lower tail latency** than Granian's Tokio-to-asyncio
 |--------|------|------|
 | **Development Speed** | Automatic OpenAPI docs, Pydantic validation, dependency injection, auto-generated client SDKs | ~30% overhead vs Starlette (irrelevant for compute-bound backtests) |
 | **Code Clarity** | Declarative route definitions, type hints drive validation, clean separation of concerns | "Magic" can obscure control flow for advanced use |
-| **Trading System Fit** | Native Pydantic matches NautilusTrader data models, WebSocket support, seamless PyPortfolioOpt integration | Extra layers versus vanilla ASGI |
+| **Trading System Fit** | Native Pydantic matches NautilusTrader data models, WebSocket support, seamless skfolio integration | Extra layers versus vanilla ASGI |
 | **Maintenance** | Large community, extensive documentation, battle-tested in production | Framework updates may break APIs |
 
 ### Why Uvicorn (Not Granian) for This Tier
 
 1. **Database queries dominate.** Backtest results, strategy configs, historical OHLCV, and fundamentals all hit PostgreSQL/TimescaleDB/MongoDB. Uvicorn wins on every database benchmark.
 2. **asyncpg runs natively.** No Tokio → asyncio context switches. Connection pool performance is optimal.
-3. **Mixed sync/async workload.** PyPortfolioOpt's CPU-heavy optimization runs in process pools via `loop.run_in_executor` — Uvicorn's executor integration is well-optimized and battle-tested.
+3. **Mixed sync/async workload.** skfolio's CPU-heavy optimization runs in process pools via `loop.run_in_executor` — Uvicorn's executor integration is well-optimized and battle-tested.
 4. **NautilusTrader is async-native Python/Rust.** It integrates directly with Python's asyncio ecosystem without an extra FFI layer.
 
 ### React Frontend Integration
@@ -211,28 +211,24 @@ const results = await BacktestService.runBacktest({
 });
 ```
 
-### PyPortfolioOpt Integration
+### skfolio Integration
 
-Both FastAPI and PyPortfolioOpt use Pydantic, giving seamless compatibility:
+FastAPI request/response models remain Pydantic-based, while skfolio provides the optimization engine:
 
 ```python
-from pypfopt.efficient_frontier import EfficientFrontier
+from skfolio.optimization import MeanRisk, CVaR
 from pydantic import BaseModel
 
 class OptimizationRequest(BaseModel):
     returns: list[list[float]]
-    risk_free_rate: float = 0.02
+    confidence_level: float = 0.95
 
 @app.post("/optimize")
 async def optimize_portfolio(request: OptimizationRequest):
-    ef = EfficientFrontier(
-        expected_returns=request.returns,
-        cov_matrix=calculate_covariance(request.returns),
-    )
-    ef.max_sharpe()
+    optimizer = MeanRisk(risk_measure=CVaR(request.confidence_level))
+    optimizer.fit(request.returns)
     return {
-        "weights": ef.clean_weights(),
-        "performance": ef.portfolio_performance(),
+        "weights": optimizer.weights_,
     }
 ```
 
@@ -480,7 +476,7 @@ flowchart TD
         T1A["POST /backtest — Run NautilusTrader"]
         T1B["GET  /backtest/&lbrace;id&rbrace; — Query results"]
         T1C["WS   /backtest/stream — Real-time progress"]
-        T1D["POST /optimize — PyPortfolioOpt"]
+        T1D["POST /optimize — skfolio"]
         T1E["GET  /fundamentals/&lbrace;ticker&rbrace; — MongoDB Atlas"]
         T1F["Pydantic validation · OpenAPI docs · JWT auth"]
     end
@@ -593,7 +589,7 @@ If any of these become a priority, benchmark against Uvicorn on QuantLens's actu
 | **Small team, rapid development** | FastAPI on Uvicorn (single tier, add Tier 2 when needed) |
 | **Multiple real-time data sources** | Build the vanilla ASGI gateway on Uvicorn from day one |
 
-For QuantLens specifically — backtesting NautilusTrader strategies, running PyPortfolioOpt, and serving dashboards to a React frontend — start with **FastAPI on Uvicorn**. Uvicorn's Cython/C architecture (uvloop + httptools + asyncpg) delivers benchmark-leading database query performance, and FastAPI's developer experience (OpenAPI docs, Pydantic validation, CORS middleware) eliminates boilerplate. When live trading is added, extract real-time endpoints to a vanilla ASGI service on a second Uvicorn process using the hybrid architecture above.
+For QuantLens specifically — backtesting NautilusTrader strategies, running skfolio optimization, and serving dashboards to a React frontend — start with **FastAPI on Uvicorn**. Uvicorn's Cython/C architecture (uvloop + httptools + asyncpg) delivers benchmark-leading database query performance, and FastAPI's developer experience (OpenAPI docs, Pydantic validation, CORS middleware) eliminates boilerplate. When live trading is added, extract real-time endpoints to a vanilla ASGI service on a second Uvicorn process using the hybrid architecture above.
 
 | Component | Technology | Reason |
 |-----------|-----------|--------|
