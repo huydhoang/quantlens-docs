@@ -96,7 +96,7 @@ sequenceDiagram
     participant React as React Component
     participant Monaco as Monaco Editor
     participant PyLinter as Python Linter<br/>Pyodide WASM
-    participant TSStart as FastAPI Backend
+    participant FastAPI as FastAPI Backend
     participant Nautilus as NautilusTrader
     
     User->>React: Open Strategy Editor
@@ -104,12 +104,12 @@ sequenceDiagram
     Monaco->>Monaco: Load Python Syntax Colorization
     
     alt New Strategy
-        React->>TSStart: GET /api/strategies/template
-        TSStart-->>React: Return template code
+        React->>FastAPI: GET /api/strategies/template
+        FastAPI-->>React: Return template code
         React->>Monaco: Set Value
     else Existing Strategy
-        React->>TSStart: GET /api/strategies/:id
-        TSStart-->>React: Return strategy code
+        React->>FastAPI: GET /api/strategies/:id
+        FastAPI-->>React: Return strategy code
         React->>Monaco: Set Value
     end
     
@@ -119,15 +119,15 @@ sequenceDiagram
     PyLinter-->>Monaco: Set Model Markers
     
     User->>React: Click "Validate Strategy"
-    React->>TSStart: POST /api/strategies/validate
-    TSStart->>Nautilus: Dry-run parse
-    Nautilus-->>TSStart: Validation Result
-    TSStart-->>React: Success/Error
+    React->>FastAPI: POST /api/strategies/validate
+    FastAPI->>Nautilus: Dry-run parse
+    Nautilus-->>FastAPI: Validation Result
+    FastAPI-->>React: Success/Error
     
     User->>React: Save Strategy
-    React->>TSStart: POST /api/strategies
-    TSStart->>Nautilus: Register Strategy Class
-    TSStart-->>React: Strategy ID
+    React->>FastAPI: POST /api/strategies
+    FastAPI->>Nautilus: Register Strategy Class
+    FastAPI-->>React: Strategy ID
 ```
 
 ## Backtest Execution Flow
