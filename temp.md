@@ -1,312 +1,217 @@
-## Architecture Overview
+# Deep Dive: Why Uvicorn Beats Granian in Database Queries (But Loses in JSON Serialization)
 
-### **PyPortfolioOpt** 
-- **Core Philosophy**: Scikit-learn inspired, modular and extensible
-- **Architecture Flow**: Historical Data → Expected Returns/Risk Models → Optimizers (Efficient Frontier, Black-Litterman, HRP) → Post-processing
-- **Dependencies**: Built on `cvxpy` (convex optimization), `scipy`, `pandas`, `numpy`
-- **Design Goal**: Ease of use with swappable components for casual investors and professionals
+## The Architectural Paradox
 
-### **Riskfolio-Lib** 
-- **Core Philosophy**: Comprehensive quantitative strategic asset allocation
-- **Architecture**: Single integrated framework with 24+ risk measures across multiple optimization paradigms
-- **Dependencies**: `cvxpy` ≥1.7.2, `scipy` ≥1.16.0, `clarabel` ≥0.11.1, `scs` ≥3.2.7, `pybind11` ≥2.10.1
-- **Design Goal**: Academic and practitioner-grade portfolio construction with advanced risk metrics
+Your benchmark results reveal a fascinating paradox that challenges the assumption "Rust = faster." Let me explain the architectural reasons why **Uvicorn (Python + Cython)** outperforms **Granian (Rust)** in database queries, but falls behind in raw JSON serialization.
 
 ---
 
-## Feature Set Comparison
+## 1. Uvicorn's Architecture: The "Optimized Python" Approach
 
-| Feature | PyPortfolioOpt | Riskfolio-Lib |
-|---------|---------------|---------------|
-| **Risk Measures** | 5-6 basic (Std Dev, Semi-var, CVaR, CDaR) | **24 convex risk measures** including Entropic VaR, Relativistic VaR, Tail Gini, Kurtosis |
-| **Optimization Types** | Mean-Variance, Black-Litterman, HRP, CLA | Mean-Risk, Logarithmic Mean Risk (Kelly), Risk Parity, HRP, HERC, NCO, OWA, Worst Case |
-| **Hierarchical Methods** | HRP only | HRP + HERC with **35 risk measures** |
-| **Drawdown Metrics** | Basic CDaR | 6 drawdown measures (ADD, Ulcer, CDaR, EDaR, RLDaR, MDD) |
-| **Integer Constraints** | Limited | Cardinality, mutually exclusive, joint investment constraints |
-| **Factor Models** | Basic | Full risk factor modeling with PCA and stepwise regression |
-| **Graph Constraints** | No | Yes - network-based constraints |
-| **Uncertainty Sets** | No | Robust optimization with uncertainty sets for mean/covariance |
-| **Reporting** | Basic | Jupyter/Excel report generation |
+Uvicorn is not pure Python—it's a **hybrid C/Python architecture** specifically optimized for I/O-bound workloads:
 
-**Winner: Riskfolio-Lib** - Significantly richer feature set with institutional-grade risk metrics and constraints.
+### Core Components
 
----
+| Component | Implementation | Purpose |
+|-----------|---------------|---------|
+| **uvloop** | Cython (compiled to C) | Event loop replacement using libuv (Node.js's I/O engine)  |
+| **httptools** | C (Node.js HTTP parser) | HTTP parsing at C speed  |
+| **asyncio** | C-optimized Python stdlib | Coroutine scheduling |
 
-## Performance & Efficiency
+### Why Uvicorn Wins at Database Queries
 
-### **Computational Architecture**
+**The Secret: Zero-Copy I/O and Mature Async Ecosystem**
 
-Both libraries share the same fundamental bottleneck: **CVXPY** 
+1. **uvloop's libuv Integration**: Uvicorn uses uvloop, which is **Cython code on top of libuv**—the same battle-tested async I/O library that powers Node.js . This provides:
+   - **2-4x faster** event loop operations than standard asyncio 
+   - Extremely efficient **epoll/kqueue/IOCP** abstractions
+   - Zero-copy buffer management for network I/O
 
-- **CVXPY Overhead**: High-level abstraction layer that translates Pythonic syntax into solver-specific formats
-- **Solver Performance**: According to benchmarks, CVXPY adds significant overhead (50x slower than direct solver calls in some cases) 
-- **PyPortfolioOpt**: Uses `cvxpy` with `scipy` backends, focuses on convex problems
-- **Riskfolio-Lib**: Uses `cvxpy` but supports commercial solvers (MOSEK, GUROBI) for large-scale problems
+2. **asyncpg: The C-Implemented Driver**: In TechEmpower's "Single Query" test, frameworks use **asyncpg**—a PostgreSQL driver written in **C with a thin Python wrapper** . It uses:
+   - PostgreSQL's **binary protocol** (faster than text)
+   - **Prepared statements** with automatic caching
+   - Native asyncio integration without Rust FFI overhead
 
-### **Speed Considerations**
-
-| Aspect | PyPortfolioOpt | Riskfolio-Lib |
-|--------|---------------|---------------|
-| Small Portfolios (<50 assets) | Fast enough | Fast enough |
-| Large Portfolios (>500 assets) | Slow | Moderate (with commercial solvers) |
-| Hierarchical Methods | Fast (scipy) | Fast (scikit-learn) |
-| Integer Constraints | N/A | Slow (MIP complexity) |
-
-**Winner: Tie** - Both are Python-bound by CVXPY. Riskfolio-Lib has better solver options for scale, but neither is "fast" for high-frequency applications.
+3. **No FFI Boundary Crossing**: The entire request path stays in **C/Python memory space**:
+   ```
+   Client → httptools (C) → uvloop (Cython/C) → asyncio → asyncpg (C) → PostgreSQL
+   ```
+   No Rust ↔ Python serialization overhead at the server level.
 
 ---
 
-## Robustness & Code Quality
+## 2. Granian's Architecture: The "Rust Wrapper" Approach
 
-### **PyPortfolioOpt**
-- **Testing**: Close to 100% pytest coverage 
-- **Maturity**: JOSS publication (2021), stable API since 2018
-- **Community**: Active Discord, LinkedIn presence, sponsored by GC.OS
-- **Documentation**: Extensive ReadTheDocs, cookbook tutorials
-- **Design**: Clean separation of concerns (returns / risk / objectives / optimizers)
+Granian takes a different approach—it's a **Rust HTTP server** that embeds Python:
 
-### **Riskfolio-Lib**
-- **Testing**: Comprehensive but less documented coverage
-- **Maturity**: Newer (v7.2.0 in 2025), rapid feature expansion
-- **Maintenance**: Single maintainer (consulting fee model for support) 
-- **Documentation**: Good technical docs, academic focus
-- **Design**: Monolithic but feature-complete
+### Core Components
 
-**Winner: PyPortfolioOpt** - Better engineering practices, community support, and stability for production use.
+| Component | Implementation | Purpose |
+|-----------|---------------|---------|
+| **Hyper** | Rust | HTTP/1.1 and HTTP/2 protocol handling |
+| **Tokio** | Rust | Async runtime (Rust's equivalent of asyncio) |
+| **PyO3** | Rust | Python bindings and FFI layer |
+| **RSGI/ASGI** | Rust ↔ Python bridge | Application interface |
+
+### Why Granian Loses at Database Queries
+
+**The Problem: The FFI Tax and Mismatched Optimizations**
+
+1. **Python ↔ Rust FFI Overhead**: Every request crosses the **FFI boundary** (Foreign Function Interface):
+   ```rust
+   // Simplified: Rust receives HTTP request, calls Python app
+   async fn handle_request(req: Request) -> Response {
+       // Rust side (Hyper/Tokio)
+       let scope = create_asgi_scope(&req);
+       
+       // FFI call into Python - EXPENSIVE
+       let response = Python::with_gil(|py| {
+           app.call(py, (scope, receive, send))
+       }).await;
+       
+       response
+   }
+   ```
+
+   This boundary crossing involves:
+   - **GIL acquisition** (Global Interpreter Lock)
+   - **Memory marshalling** between Rust and Python heaps
+   - **Object conversion** (Rust types → Python objects)
+
+2. **Tokio/asyncio Mismatch**: Granian runs Python's asyncio on top of Tokio . This creates **two event loops**:
+   ```
+   Client → Hyper (Rust/Tokio) → FFI → asyncio (Python) → asyncpg → PostgreSQL
+                    ↑___________________________↓
+                         Context switches!
+   ```
+
+   When asyncpg (which expects native asyncio) runs under Granian, there's **scheduling overhead** between Tokio and asyncio.
+
+3. **Blocking Thread Configuration**: Granian uses `--blocking-threads` for sync code and `--runtime-threads` for I/O . For async database queries, misconfiguration can limit concurrency.
 
 ---
 
-## High-Performance Alternatives (Rust/Cython/C++)
+## 3. Why Granian Wins at JSON Serialization
 
-### **1. Commercial-Grade C++ Solutions**
+Here's where the tables turn. In the **JSON Serialization** test, Granian dominates because:
 
-**MOSEK Fusion API (C++)** 
-- Industry standard for large-scale convex optimization
-- Direct conic quadratic programming without Python overhead
-- Handles cardinality constraints, transaction costs, factor models efficiently
-- **Best for**: Production quant systems requiring sub-millisecond optimization
+### The Test Characteristics
 
-**QuantLib (C++)** 
-- Comprehensive quantitative finance library
-- Portfolio optimization via efficient frontiers with custom constraints
-- **Best for**: Fixed income, derivatives, and multi-asset class portfolios
+TechEmpower's JSON test is **pure compute**: it serializes a tiny `{"message": "Hello, World!"}` object . No I/O, no database, just:
+1. Parse HTTP headers
+2. Create Python dict
+3. Serialize to JSON
+4. Return response
 
-### **2. Rust-Based Alternatives**
+### Granian's Advantages
 
-**PyO3 + Rust**
-- Rust's `argmin` or `good_lp` crates for optimization
-- **Advantage**: Memory safety + performance (~10-100x faster than Python for tight loops) 
-- **Disadvantage**: Call overhead from Python (140ns vs 40ns for Cython) makes it unsuitable for fine-grained operations unless batch processing
+| Factor | Granian | Uvicorn |
+|--------|---------|---------|
+| **HTTP Parsing** | Native Rust (Hyper) | C (httptools) - comparable |
+| **JSON Serialization** | **orjson/ujson in Python** (C/Rust) | **Same** |
+| **Response Construction** | **Rust-side optimization** | Python asyncio overhead |
+| **GIL Release** | **Can release GIL during HTTP parsing** | Holds GIL in Python layer |
 
-**Current Gap**: No mature, open-source Rust portfolio optimization library exists with the feature richness of Riskfolio-Lib.
+**The Key Difference**: Granian's **RSGI interface** allows it to optimize the "trivial response" case. As the Granian author notes :
+> "RSGI changed this in a way that you have interfaces which are synchronous or asynchronous depending on what you're actually planning to do... if your route returns a JSON string, you don't need to await for sending the body because you already have all the body."
 
-### **3. Cython-Accelerated Options**
+Granian can **short-circuit** the async ceremony for simple responses, while ASGI requires:
+```python
+# ASGI (Uvicorn) - requires await for every step
+await send({"type": "http.response.start", ...})
+await send({"type": "http.response.body", ...})  # Extra event loop cycle
 
-**Custom Cython Implementation**
-- Direct wrapping of `OSQP`, `ECOS`, or `SCS` C libraries
-- **Advantage**: Lower call overhead than Rust-Python bindings 
-- **Best for**: Medium-frequency trading where Python ergonomics matter but speed is critical
-
-### **4. GPU-Accelerated Solutions**
-
-**NVIDIA cuOPT / CUDA**
-- 26x speedup on Hopper GPUs for portfolio simulations 
-- **Best for**: Monte Carlo simulations, backtesting across thousands of portfolios
-
-### **5. Hybrid Architecture Recommendation**
-
-For a **production quant stack**, consider:
-
-```
-┌─────────────────────────────────────┐
-│  Python Interface (PyPortfolioOpt   │
-│   or Riskfolio-Lib API)             │
-├─────────────────────────────────────┤
-│  Cython/Rust Shim Layer             │
-│  (Data preprocessing, validation)   │
-├─────────────────────────────────────┤
-│  C++/Rust Core Optimizer            │
-│  (MOSEK, custom SDP solver)         │
-├─────────────────────────────────────┤
-│  GPU Acceleration (Optional)        │
-│  (cuOPT for large-scale sims)       │
-└─────────────────────────────────────┘
+# RSGI (Granian) - synchronous for complete responses
+proto.response_str(status=200, body="{}")  # Single call, no await
 ```
 
----
-
-## Final Verdict
-
-| Criteria | Winner | Notes |
-|----------|--------|-------|
-| **Feature Richness** | Riskfolio-Lib | 24 risk measures vs 6, advanced constraints |
-| **Speed** | Tie | Both CVXPY-bound; need C++ core for speed |
-| **Robustness** | PyPortfolioOpt | Better testing, community, stability |
-| **Ease of Use** | PyPortfolioOpt | Cleaner API, better docs |
-| **Production Readiness** | PyPortfolioOpt | Mature, sponsored, extensive CI/CD |
-| **Academic/Research** | Riskfolio-Lib | Cutting-edge risk measures, factor models |
-
-**Recommendation**:
-- **For rapid prototyping/education**: PyPortfolioOpt
-- **For advanced risk research**: Riskfolio-Lib  
-- **For production HFT**: Custom C++ (MOSEK) or Rust core with Python bindings
-- **For large-scale asset management**: Riskfolio-Lib + MOSEK/GUROBI commercial solvers
-
-**Better Alternative**: If you need **both** rich features **and** speed, consider wrapping Riskfolio-Lib's mathematical models in a **Rust core** using `cvxpy`-rs (experimental) or implementing the critical path in **Cython** while keeping the API surface in Python.
+For micro-benchmarks, this **protocol overhead** matters more than I/O efficiency.
 
 ---
 
-Based on my comprehensive research, here's an evaluation of the top portfolio optimization packages in the Python quant ecosystem:
+## 4. The Database Query Deep Dive
+
+Let's analyze why Uvicorn's advantage reverses in database tests:
+
+### Single Query Test Flow
+
+| Step | Uvicorn Path | Granian Path |
+|------|-------------|--------------|
+| 1. HTTP Parse | httptools (C) | Hyper (Rust) |
+| 2. Route to App | asyncio (Cython) | Tokio → FFI → asyncio |
+| 3. DB Connection | asyncpg pool (C) | asyncpg pool (C) |
+| 4. Query Execution | asyncpg (C) → PostgreSQL | asyncpg (C) → PostgreSQL |
+| 5. Result Fetch | asyncpg (C) | asyncpg (C) |
+| 6. JSON Serialize | orjson/ujson (C/Rust) | orjson/ujson (C/Rust) |
+| 7. HTTP Response | asyncio → httptools | asyncio → FFI → Hyper |
+
+**The Bottleneck Shift**: In JSON tests, steps 3-5 don't exist. In DB tests, they dominate. The **FFI overhead** (step 2 and 7) becomes significant relative to total time.
+
+### Why Uvicorn Excels at Multiple Queries
+
+Your benchmark shows **Uvicorn #1 in single query, #2 in multiple queries**—both ahead of Granian. This is because:
+
+1. **Connection Pool Efficiency**: Uvicorn + asyncpg maintains **persistent connections** efficiently. The pool is optimized for asyncio's event loop without Tokio interference.
+
+2. **Latency Sensitivity**: Database queries have **high variance** (network + disk I/O). Uvicorn's uvloop has **lower tail latency** for I/O operations .
+
+3. **No Double Event Loop**: Uvicorn runs one event loop; Granian runs **Tokio + asyncio**, adding scheduling complexity.
 
 ---
 
-## 1. **skfolio** (2024-2025) ⭐ *Emerging Leader*
+## 5. What This Means for Your Use Case (NautilusTrader + PyPortfolioOpt)
 
-**Architecture & Philosophy:**
-- Built on **scikit-learn** API (`fit-predict-transform` paradigm) 
-- **Modular design** with estimators inheriting from `BaseEstimator`
-- **Python 3.10+**, BSD 3-clause license, backed by Skfolio Labs (enterprise support available)
+Based on this analysis, here's the strategic recommendation:
 
-**Key Strengths:**
-- **ML Integration**: Native compatibility with `GridSearchCV`, `Pipeline`, cross-validation
-- **Advanced CV**: Combinatorial Purged Cross-Validation (CPCV), Walk Forward, Multiple Randomized CV 
-- **Rich Risk Measures**: Variance, CVaR, EVaR, CDaR, Ulcer Index, Gini Mean Difference, etc. 
-- **State-of-the-art Estimators**: Gerber Covariance, Denoising, Detoning, Vine Copulas 
-- **Ensemble Methods**: Stacking Optimization combining multiple estimators
-- **Factor Models**: Full integration with Black-Litterman, Entropy Pooling, Opinion Pooling 
+### Choose Uvicorn If:
 
-**Unique Features:**
-- Synthetic data generation for stress testing via Vine Copulas
-- Nested Clustered Optimization (NCO) with parallelization
-- Transaction costs and management fees modeling
-- Cardinality constraints (integer programming)
+| Scenario | Rationale |
+|----------|-----------|
+| **Real-time market data streaming** | WebSocket performance is critical; Uvicorn has mature WebSocket support with **wsproto** or **websockets** |
+| **High-frequency trading signals** | Lower latency variance matters more than peak throughput |
+| **Mixed sync/async workload** | PyPortfolioOpt's CPU-heavy optimization runs in thread pools; Uvicorn's **loop.run_in_executor** is well-optimized |
+| **Database-heavy operations** | Your benchmarks confirm Uvicorn wins on DB queries |
 
-**Maturity**: >95% test coverage, active development, arXiv paper (2025) 
+### Choose Granian If:
 
----
+| Scenario | Rationale |
+|----------|-----------|
+| **HTTP/2 or HTTP/3 required** | Granian has native HTTP/2 support  |
+| **Simple REST API, low latency** | JSON serialization advantage matters for simple responses |
+| **Static file serving** | Granian's `pathsend` extension is efficient |
+| **Long-running WebSockets** | Granian's Rust runtime handles connection stability well |
 
-## 2. **Riskfolio-Lib** (2019-2025) ⭐ *Most Comprehensive*
+### The Hybrid Recommendation
 
-**Architecture & Philosophy:**
-- **CVXPY-based** convex optimization with support for commercial solvers (MOSEK, GUROBI) 
-- **Peruvian-built** academic-focused library with 24+ convex risk measures
-- Monolithic `Portfolio` class design with parameter-driven configuration
+For **NautilusTrader + PyPortfolioOpt**, I recommend **Uvicorn with specific optimizations**:
 
-**Key Strengths:**
-- **Widest Risk Measure Coverage**: 24 convex risk measures including Tail Gini, Entropic VaR, Relativistic VaR, Square Root Kurtosis 
-- **Hierarchical Methods**: HRP, HERC (Hierarchical Equal Risk Contribution), NCO with 35 risk measures
-- **Advanced Constraints**: Graph-based constraints, cardinality, mutually exclusive assets, tracking error, turnover 
-- **Factor Models**: Built-in factor modeling with PCA and stepwise regression
-- **Uncertainty Sets**: Robust optimization for mean and covariance
+```python
+# Production configuration
+uvicorn main:app \
+    --loop uvloop \           # Use Cython event loop (2-4x faster)
+    --http httptools \        # C-based HTTP parser
+    --workers 4 \             # Match CPU cores
+    --limit-concurrency 1000   # Prevent overload
+```
 
-**Unique Features:**
-- OWA (Ordered Weighted Averaging) optimization
-- Relaxed Risk Parity
-- Augmented Black-Litterman Bayesian model
-- Excel/Jupyter reporting tools
+**Why not Granian for your trading use case?**
 
-**Limitations**: Steeper learning curve, single maintainer (consulting fee model for support) 
+1. **NautilusTrader is async-native Rust** —it will integrate better with Uvicorn's Python async ecosystem
+2. **WebSocket streaming** is your likely bottleneck, not JSON serialization
+3. **Database queries** (portfolio state, trade history) are I/O-bound where Uvicorn wins
+4. **PyPortfolioOpt is CPU-bound**—you'll run it in process pools anyway, neutralizing Granian's Rust advantage
 
 ---
 
-## 3. **PyPortfolioOpt** (2018-2025) ⭐ *Most Accessible*
+## Summary: The Performance Hierarchy
 
-**Architecture & Philosophy:**
-- **Scikit-learn inspired** but not strictly compatible
-- **Modular components**: Expected returns, risk models, objectives, optimizers are swappable 
-- Focus on **usability** and **classical methods**
+| Test Type | Winner | Key Factor |
+|-----------|--------|------------|
+| **JSON Serialization** | Granian | Protocol overhead, Rust HTTP optimization |
+| **Single Database Query** | Uvicorn | FFI-free path, mature asyncpg integration |
+| **Multiple Database Queries** | Uvicorn | Connection pool efficiency, lower latency variance |
+| **WebSocket Streaming** | Uvicorn | Ecosystem maturity, lower tail latency |
+| **HTTP/2 Throughput** | Granian | Native Rust HTTP/2 implementation |
+| **Mixed CPU/I/O Workload** | Uvicorn | Better executor integration for sync code |
 
-**Key Strengths:**
-- **Clean API**: Intuitive separation of concerns
-- **Classical Methods**: Mean-variance, Black-Litterman, Critical Line Algorithm (CLA), HRP 
-- **Shrinkage Methods**: Ledoit-Wolf, Oracle Approximating, manual shrinkage
-- **Discrete Allocation**: Unique feature for converting weights to actual share counts 
-- **Robustness**: Handles missing data, different price series lengths
-
-**Limitations**: 
-- Limited risk measures (primarily variance/semivariance)
-- No native ML integration
-- Smaller feature set than Riskfolio-Lib or skfolio 
-
-**Maturity**: JOSS publication (2021), GC.OS sponsored, extensive CI/CD, active community 
-
----
-
-## 4. **finalytics** (2024-2025) ⭐ *Rust-Powered Performance*
-
-**Architecture & Philosophy:**
-- **Rust core** with Python bindings (PyO3) 
-- **High-performance** modular interface for analytics and optimization
-- Four core modules: Screener, Ticker, Tickers, Portfolio
-
-**Key Strengths:**
-- **Speed**: Rust backend offers 10-100x performance over pure Python 
-- **Unified Interface**: Combines data retrieval, analysis, and optimization
-- **Multi-asset**: Equities, crypto, benchmarks
-
-**Limitations**:
-- **Newest** library (least mature ecosystem)
-- Limited documentation compared to established libraries
-- Smaller community, single maintainer
-- Feature set not as extensive as Riskfolio-Lib or skfolio
-
-**Best For**: Performance-critical applications where Rust's speed outweighs ecosystem maturity 
-
----
-
-## Comparative Matrix
-
-| Feature | skfolio | Riskfolio-Lib | PyPortfolioOpt | finalytics |
-|---------|---------|---------------|----------------|------------|
-| **API Design** | scikit-learn native | Parameter-driven | Modular | Functional |
-| **Risk Measures** | 15+ | **24+** | 5-6 | Basic |
-| **ML Integration** | **Native** | Limited | None | None |
-| **Cross-Validation** | **CPCV, Walk Forward** | Basic | None | None |
-| **Hierarchical** | HRP, HERC, NCO | **HRP, HERC, NCO** | HRP only | No |
-| **Speed** | Moderate | Moderate | Moderate | **Fast (Rust)** |
-| **Ease of Use** | **High** | Medium | **High** | Medium |
-| **Academic Rigor** | **High** | **High** | Medium | Low |
-| **Production Ready** | **Yes** | Yes | **Yes** | Beta |
-| **Enterprise Support** | **Available** | No | No | No |
-
----
-
-## Selection Guide
-
-### **Choose skfolio if:**
-- You need **ML workflows** (hyperparameter tuning, pipelines, cross-validation)
-- You want **state-of-the-art** methods (Vine Copulas, Gerber covariance)
-- You're doing **research** requiring reproducible experiments
-- You need **ensemble methods** and model stacking
-
-### **Choose Riskfolio-Lib if:**
-- You need the **widest range of risk measures** (especially tail risk, drawdown)
-- You're implementing **academic papers** with specific risk metrics
-- You need **advanced constraints** (graph-based, cardinality, factor risk)
-- You have access to **commercial solvers** (MOSEK, GUROBI)
-
-### **Choose PyPortfolioOpt if:**
-- You're **teaching** or **learning** portfolio optimization
-- You need **simple, clean code** for classical methods
-- You want **discrete allocation** (converting weights to shares)
-- You prioritize **stability** and **community support** over cutting-edge features
-
-### **Choose finalytics if:**
-- **Speed is critical** (high-frequency, large universes)
-- You want **integrated data + optimization** in one library
-- You're building **Rust-based** quant infrastructure
-- You can tolerate **early-stage software** risk
-
----
-
-## Ecosystem Trend (2025)
-
-The field is converging toward **skfolio** as the new standard due to:
-1. **Scikit-learn compatibility** enables seamless ML integration
-2. **Modern software practices** (type hints, >95% coverage, enterprise backing)
-3. **Academic rigor** with practical implementation (arXiv paper, citations)
-4. **Active development** with rapid feature addition (Schur Complementary Allocation coming) 
-
-**Riskfolio-Lib** remains the **reference for risk measure diversity**, while **PyPortfolioOpt** serves as the **gateway drug** for newcomers. **Finalytics** represents the **performance frontier** but needs maturity.
-
-For most quant professionals in 2025, **skfolio offers the best balance** of features, usability, and future-proofing.
+**The Takeaway**: Rust doesn't automatically win. Uvicorn's **Cython + C + libuv** architecture is specifically optimized for the I/O patterns in database-heavy applications, while Granian's **Rust + FFI** overhead hurts it in these scenarios. For a trading system integrating NautilusTrader, Uvicorn's proven ecosystem and lower latency variance make it the safer, faster choice.

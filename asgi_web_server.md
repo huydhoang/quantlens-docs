@@ -2,7 +2,7 @@
 
 ## Decision Summary
 
-**FastAPI on Granian** is the default ASGI web server stack for QuantLens. For production systems with real-time market data ingestion, extract latency-critical paths to **vanilla Granian (RSGI)** using a hybrid two-tier architecture.
+**FastAPI on Uvicorn** is the default ASGI web server stack for QuantLens. For production systems that combine research dashboards with live trading, use a **hybrid two-tier architecture**: FastAPI on Uvicorn for strategy backtesting and data dashboards, and a **lightweight Uvicorn gateway** (vanilla ASGI or Starlette-thin) for real-time market data ingestion and signal processing.
 
 ---
 
@@ -10,68 +10,117 @@
 
 QuantLens serves two distinct workload profiles through its web layer:
 
-1. **Research & backtesting** — REST endpoints for running NautilusTrader simulations, portfolio optimization via PyPortfolioOpt, strategy CRUD, and serving results to a React frontend. These are compute-bound; the HTTP framework is not the bottleneck.
-2. **Real-time trading** — WebSocket streaming of market data from multiple providers (Finnhub, Alpaca), live signal processing, and order execution. These are I/O-bound and latency-sensitive.
+1. **Research, backtesting & dashboards** — REST endpoints for running NautilusTrader simulations, portfolio optimization via PyPortfolioOpt, strategy CRUD, and serving results to a React frontend. These are compute-bound and database-heavy; the HTTP framework is not the bottleneck.
+2. **Real-time trading** — WebSocket streaming of market data from multiple providers (Finnhub, Alpaca), live signal processing, TimescaleDB writes, and order execution. These are I/O-bound and latency-sensitive.
 
-This document evaluates three approaches — FastAPI, Starlette+Pydantic, and vanilla Granian — and recommends an architecture that matches each workload to the right tool.
+This document evaluates server architectures based on TechEmpower benchmark data, the internal mechanics of Uvicorn and Granian, and QuantLens's specific workload profile.
 
 ---
 
-## Architecture Options
+## Server Architectures Compared
 
 ```mermaid
 flowchart LR
-    subgraph opt1["Option 1: Full Stack"]
+    subgraph opt1["Option 1: FastAPI on Uvicorn"]
         direction LR
-        A1[FastAPI<br/>routing · validation · docs] --> A2[Starlette<br/>ASGI app] --> A3[Granian / Uvicorn<br/>HTTP server]
+        A1[FastAPI<br/>routing · validation · docs] --> A2[Starlette<br/>ASGI app] --> A3[Uvicorn<br/>uvloop · httptools]
     end
 
-    subgraph opt2["Option 2: Vanilla Server"]
+    subgraph opt2["Option 2: FastAPI on Granian"]
         direction LR
-        B1[Granian / Uvicorn<br/>routing · validation · serialization<br/>all manual]
+        B1[FastAPI<br/>routing · validation · docs] --> B2[Starlette<br/>ASGI app] --> B3[Granian<br/>Hyper · Tokio · PyO3]
+    end
+
+    subgraph opt3["Option 3: Vanilla ASGI on Uvicorn"]
+        direction LR
+        C1[Uvicorn<br/>uvloop · httptools<br/>manual routing · validation]
     end
 ```
 
 ---
 
-## Comparison
+## Uvicorn vs Granian: Architectural Deep Dive
 
-### FastAPI on Granian/Uvicorn
+### Uvicorn — Optimized C/Python Hybrid
 
-| Aspect | Pros | Cons |
-|--------|------|------|
-| **Development Speed** | Automatic OpenAPI docs, Pydantic validation, dependency injection, auto-generated client SDKs | ~30–40 % performance overhead, larger memory footprint, more dependencies |
-| **Code Clarity** | Declarative route definitions, type hints drive validation, clean separation of concerns | "Magic" can obscure control flow, steep learning curve for advanced features |
-| **Trading System Fit** | Native Pydantic matches NautilusTrader, WebSocket support for real-time feeds, easy PyPortfolioOpt integration | May add latency to critical paths, extra layers between market data and execution |
-| **Maintenance** | Large community, extensive documentation, battle-tested in production | Framework updates may break APIs, vendor lock-in to FastAPI patterns |
+Uvicorn is not pure Python. It is a **hybrid C/Cython architecture** specifically optimized for I/O-bound workloads:
 
-### Vanilla Granian/Uvicorn (Pure ASGI)
+| Component | Implementation | Purpose |
+|-----------|---------------|---------|
+| **uvloop** | Cython (compiled to C) | Event loop replacement using libuv (Node.js's I/O engine) |
+| **httptools** | C (Node.js HTTP parser) | HTTP parsing at C speed |
+| **asyncio** | C-optimized Python stdlib | Coroutine scheduling |
 
-| Aspect | Pros | Cons |
-|--------|------|------|
-| **Performance** | Maximum throughput, minimal memory allocation, no framework overhead, direct control over event loop | Manual validation, no auto-generated documentation, must reinvent routing and middleware |
-| **Latency** | Lowest possible latency, no middleware stack traversal, direct WebSocket handling | Must implement connection pooling, manual error handling, no built-in CORS/security |
-| **Trading System Fit** | Direct kernel integration, custom serialization (MessagePack/Protobuf), fine-tuned for HFT patterns | Pydantic integration is manual, portfolio optimization endpoints need boilerplate |
-| **Maintenance** | No framework dependencies, full control over upgrades, smaller attack surface | All features built from scratch, harder to onboard developers, testing infrastructure needed |
+The entire request path stays in **C/Python memory space** with no FFI boundary crossing:
 
-### Decision Matrix
+```
+Client → httptools (C) → uvloop (Cython/C) → asyncio → asyncpg (C) → PostgreSQL
+```
 
-| Criteria | FastAPI | Starlette + Pydantic | Vanilla Granian |
-|----------|---------|----------------------|-----------------|
-| Development speed | ⭐⭐⭐ | ⭐⭐ | ⭐ |
-| Auto API documentation | ⭐⭐⭐ Built-in | ⭐⭐ Manual setup | ⭐ None |
-| React integration | ⭐⭐⭐ Native CORS, JSON | ⭐⭐ Manual CORS | ⭐ Manual everything |
-| Backtest endpoint complexity | ⭐⭐⭐ Easy | ⭐⭐ Moderate | ⭐ Verbose |
-| Performance (sufficient?) | ⭐⭐⭐ Yes for backtests | ⭐⭐⭐ Yes | ⭐⭐⭐ Overkill for REST |
-| Team onboarding | ⭐⭐⭐ Easy | ⭐⭐ Moderate | ⭐ Hard |
+Key advantages:
+- **uvloop** provides **2–4× faster** event loop operations than standard asyncio, built on libuv — the same battle-tested async I/O library that powers Node.js.
+- **asyncpg** (the PostgreSQL driver used in benchmarks) is written in **C with a thin Python wrapper**, using PostgreSQL's binary protocol and prepared statement caching.
+- A single event loop manages the entire request lifecycle — no scheduling overhead between runtimes.
+
+### Granian — Rust HTTP Server Embedding Python
+
+Granian takes a fundamentally different approach: a **Rust HTTP server** that calls into Python via FFI:
+
+| Component | Implementation | Purpose |
+|-----------|---------------|---------|
+| **Hyper** | Rust | HTTP/1.1 and HTTP/2 protocol handling |
+| **Tokio** | Rust | Async runtime (Rust's equivalent of asyncio) |
+| **PyO3** | Rust | Python bindings and FFI layer |
+| **RSGI/ASGI** | Rust ↔ Python bridge | Application interface |
+
+Every request crosses the **FFI boundary**:
+
+```
+Client → Hyper (Rust/Tokio) → PyO3 FFI → asyncio (Python) → asyncpg (C) → PostgreSQL
+```
+
+This boundary crossing involves:
+- **GIL acquisition** on every request
+- **Memory marshalling** between Rust and Python heaps
+- **Object conversion** (Rust types → Python objects)
+- **Two event loops** (Tokio + asyncio) with scheduling overhead between them
+
+### Where Granian Wins: JSON Serialization
+
+Granian's RSGI interface can **short-circuit** the async ceremony for simple responses. ASGI requires two awaited `send()` calls per response; RSGI collapses this to a single synchronous call:
+
+```python
+# ASGI (Uvicorn) — requires await for every step
+await send({"type": "http.response.start", ...})
+await send({"type": "http.response.body", ...})   # Extra event loop cycle
+
+# RSGI (Granian) — synchronous for complete responses
+proto.response_str(status=200, body="{}")           # Single call, no await
+```
+
+For micro-benchmarks with no I/O (pure JSON serialization of `{"message": "Hello, World!"}`), this protocol overhead matters. Granian leads here.
+
+### Where Uvicorn Wins: Database Queries and I/O
+
+In TechEmpower benchmarks, **Uvicorn ranks #1 in single-query and #2 in multiple-query tests** — both ahead of Granian. The reasons:
+
+1. **No FFI tax.** asyncpg runs natively in Python's asyncio loop. Granian adds Tokio → asyncio context switches on every query.
+2. **Connection pool efficiency.** asyncpg's pool is optimized for asyncio's event loop without Tokio interference.
+3. **Lower tail latency.** uvloop's libuv foundation provides stable, low-variance I/O scheduling — critical for database-heavy workloads and WebSocket streaming.
 
 ---
 
-## Performance Reality Check
+## TechEmpower Benchmark Results
 
-Backtesting is **compute-bound, not I/O-bound**. A NautilusTrader simulation taking seconds to minutes will not be materially faster with vanilla Granian's microsecond-level HTTP optimizations. The framework overhead is noise compared to engine runtime.
+### By Test Type
 
-For the real-time path, the overhead matters:
+| Test | Uvicorn Rank | Granian Rank | Winner | Key Factor |
+|------|-------------|-------------|--------|------------|
+| **JSON Serialization** | Lower | Higher | Granian | RSGI protocol optimization, no async overhead for trivial responses |
+| **Single Database Query** | #1 | Lower | Uvicorn | FFI-free path, native asyncpg integration |
+| **Multiple Database Queries** | #2 | Lower | Uvicorn | Connection pool efficiency, lower latency variance |
+
+### Framework-Level Throughput
 
 | Configuration | Requests/sec | Latency p50 |
 |---------------|-------------|-------------|
@@ -81,23 +130,58 @@ For the real-time path, the overhead matters:
 | FastAPI | 5 882 | 8.36 ms |
 | Vanilla Uvicorn (est.) | ~11 000 | ~3 ms |
 
-FastAPI adds ~30 % overhead versus Starlette alone. Vanilla ASGI approaches BlackSheep/Sanic speeds.
+FastAPI adds ~30% overhead versus Starlette alone. Vanilla ASGI on Uvicorn approaches BlackSheep/Sanic speeds.
 
-### Latency Budget — Real-Time Trading Path
+### What This Means for QuantLens
 
-| Component | Target | FastAPI overhead | Vanilla Granian |
-|-----------|--------|------------------|-----------------|
-| Market data ingest (Finnhub/Alpaca) | < 5 ms | +2–5 ms | +0.5 ms |
-| Signal calculation (NautilusTrader) | 10–50 ms | same | same |
-| DB write (TimescaleDB/QuestDB) | 5–10 ms | same | same |
-| WebSocket push to React | < 10 ms | +2–3 ms | +0.5 ms |
-| **Total round-trip** | **~30–75 ms** | **+4–8 ms (10–25 %)** | **Minimal** |
+QuantLens is **database-heavy and I/O-bound** in both tiers:
+
+- **Tier 1 (backtesting/dashboards):** Reads/writes to PostgreSQL (strategy configs, backtest results), MongoDB Atlas (fundamentals), and TimescaleDB (historical OHLCV). Uvicorn's benchmark lead on database queries directly applies.
+- **Tier 2 (real-time trading):** Continuous TimescaleDB writes, asyncpg connection pool under sustained load, WebSocket streaming to the React frontend. Uvicorn's lower tail latency and single-event-loop architecture deliver more predictable performance.
+
+Granian's JSON serialization advantage is irrelevant here — QuantLens endpoints are never "return a static JSON string." Every request involves database I/O, compute, or both.
 
 ---
 
-## Why FastAPI Wins for Research & Backtesting
+## Performance Reality Check
 
-### 1. React Frontend Needs
+Backtesting is **compute-bound, not I/O-bound**. A NautilusTrader simulation taking seconds to minutes will not be materially faster with Uvicorn's microsecond-level advantages over Granian. The server overhead is noise compared to engine runtime.
+
+For the real-time path, the overhead matters:
+
+### Latency Budget — Real-Time Trading Path
+
+| Component | Target | FastAPI + Uvicorn | Vanilla Uvicorn |
+|-----------|--------|-------------------|-----------------|
+| Market data ingest (Finnhub/Alpaca) | < 5 ms | +2–5 ms | +0.3 ms |
+| Signal calculation (NautilusTrader) | 10–50 ms | same | same |
+| DB write (TimescaleDB) | 5–10 ms | same | same |
+| WebSocket push to React | < 10 ms | +2–3 ms | +0.3 ms |
+| **Total round-trip** | **~30–75 ms** | **+4–8 ms (10–25%)** | **Minimal** |
+
+Uvicorn's uvloop delivers **lower tail latency** than Granian's Tokio-to-asyncio bridge for sustained I/O, making it the better foundation for both tiers.
+
+---
+
+## Tier 1: FastAPI on Uvicorn — Backtesting & Dashboards
+
+### Why FastAPI
+
+| Aspect | Pros | Cons |
+|--------|------|------|
+| **Development Speed** | Automatic OpenAPI docs, Pydantic validation, dependency injection, auto-generated client SDKs | ~30% overhead vs Starlette (irrelevant for compute-bound backtests) |
+| **Code Clarity** | Declarative route definitions, type hints drive validation, clean separation of concerns | "Magic" can obscure control flow for advanced use |
+| **Trading System Fit** | Native Pydantic matches NautilusTrader data models, WebSocket support, seamless PyPortfolioOpt integration | Extra layers versus vanilla ASGI |
+| **Maintenance** | Large community, extensive documentation, battle-tested in production | Framework updates may break APIs |
+
+### Why Uvicorn (Not Granian) for This Tier
+
+1. **Database queries dominate.** Backtest results, strategy configs, historical OHLCV, and fundamentals all hit PostgreSQL/TimescaleDB/MongoDB. Uvicorn wins on every database benchmark.
+2. **asyncpg runs natively.** No Tokio → asyncio context switches. Connection pool performance is optimal.
+3. **Mixed sync/async workload.** PyPortfolioOpt's CPU-heavy optimization runs in process pools via `loop.run_in_executor` — Uvicorn's executor integration is well-optimized and battle-tested.
+4. **NautilusTrader is async-native Python/Rust.** It integrates directly with Python's asyncio ecosystem without an extra FFI layer.
+
+### React Frontend Integration
 
 | Requirement | FastAPI Solution |
 |-------------|-----------------|
@@ -107,7 +191,7 @@ FastAPI adds ~30 % overhead versus Starlette alone. Vanilla ASGI approaches Blac
 | File uploads (trade logs) | `UploadFile` dependency |
 | Pagination (large results) | `fastapi-pagination` library |
 
-### 2. Auto-Generated Client SDK
+### Auto-Generated Client SDK
 
 FastAPI's `/docs` endpoint produces an OpenAPI spec that generates a TypeScript client automatically:
 
@@ -127,7 +211,7 @@ const results = await BacktestService.runBacktest({
 });
 ```
 
-### 3. PyPortfolioOpt Integration
+### PyPortfolioOpt Integration
 
 Both FastAPI and PyPortfolioOpt use Pydantic, giving seamless compatibility:
 
@@ -152,22 +236,76 @@ async def optimize_portfolio(request: OptimizationRequest):
     }
 ```
 
-### 4. Clean Backtest Endpoints
+### Clean Backtest Endpoints
 
 ```python
 @app.post("/backtest")
 async def run_backtest(config: BacktestConfig) -> BacktestResults:
     strategy = load_strategy(config.strategy_id)
-    # This dominates runtime (seconds), not FastAPI overhead (microseconds)
+    # This dominates runtime (seconds), not server overhead (microseconds)
     results = await run_nautilus_backtest(strategy, config.params)
     return results  # Auto-serialized to JSON
 ```
 
+### Tier 1 Implementation
+
+```python
+# fastapi_service.py
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
+from concurrent.futures import ProcessPoolExecutor
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    app.state.kernel = NautilusKernel()
+    await app.state.kernel.start()
+    yield
+    await app.state.kernel.stop()
+
+app = FastAPI(title="QuantLens Backtest API", lifespan=lifespan)
+executor = ProcessPoolExecutor(max_workers=4)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],  # React dev server
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.post("/backtest")
+async def run_backtest(config: BacktestConfig):
+    results = await app.state.kernel.backtest(config)
+    return results
+
+@app.post("/optimize-portfolio")
+async def optimize_portfolio(holdings: dict):
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(executor, run_optimization_sync, holdings)
+
+# Run with:
+# uvicorn main:app --loop uvloop --http httptools --workers 4 --limit-concurrency 1000
+```
+
 ---
 
-## Why Vanilla Granian Wins for Real-Time Trading
+## Tier 2: Vanilla Uvicorn Gateway — Real-Time Trading
 
-When the system handles multiple streaming data sources, live signal processing, and order execution, vanilla Granian (or RSGI) provides the control and latency characteristics the hot path demands.
+### Why Vanilla ASGI (Not FastAPI) for This Tier
+
+When the system handles multiple streaming data sources, live signal processing, and order execution, FastAPI's middleware stack adds measurable latency to the hot path. Stripping down to vanilla ASGI on Uvicorn provides:
+
+- **No middleware traversal** — direct WebSocket handling
+- **Custom serialization** — MessagePack/Protobuf instead of JSON
+- **Direct kernel integration** — NautilusTrader tick injection with zero framework overhead
+- **Backpressure control** — fine-grained queue management for sustained ingestion
+
+### Why Uvicorn (Not Granian) for This Tier
+
+1. **WebSocket streaming is the bottleneck.** Uvicorn's uvloop has mature, low-variance WebSocket performance. Granian's Tokio → asyncio bridge adds scheduling jitter under sustained streaming load.
+2. **TimescaleDB writes on every tick.** asyncpg connection pools perform better under Uvicorn's single event loop than under Granian's dual-runtime architecture.
+3. **Lower tail latency.** For real-time trading, p99 latency matters more than peak throughput. Uvicorn's libuv foundation delivers more predictable I/O scheduling.
+4. **Ecosystem maturity.** The `websockets` library, asyncpg, and aioredis are all optimized for asyncio/uvloop — no FFI friction.
 
 ### WebSocket Performance
 
@@ -233,111 +371,10 @@ class DataIngestionManager:
             )
 ```
 
----
-
-## Recommended Architecture: Hybrid Two-Tier
-
-For production systems that combine research and real-time trading, split the workload across two processes:
-
-```mermaid
-flowchart TD
-    subgraph frontend["React Dashboard"]
-        FE["TypeScript · Auto-generated API client\nWebSocket for live data · Recharts/D3"]
-    end
-
-    frontend -->|HTTP / WebSocket| tier1
-    frontend -->|WebSocket| tier2
-
-    subgraph tier1["Tier 1 — FastAPI · Uvicorn/Granian · Port 8000"]
-        T1A["POST /backtest — Run NautilusTrader"]
-        T1B["GET  /backtest/&lbrace;id&rbrace; — Query results"]
-        T1C["WS   /backtest/stream — Real-time progress"]
-        T1D["POST /optimize — PyPortfolioOpt"]
-        T1E["GET  /fundamentals/&lbrace;ticker&rbrace; — MongoDB Atlas"]
-        T1F["Pydantic validation · OpenAPI docs · JWT auth"]
-    end
-
-    subgraph tier2["Tier 2 — Vanilla Granian · RSGI · Port 8001"]
-        T2A["WS /ws/market-data"]
-        T2B["WS /ws/signals"]
-        T2C["WS /ws/execution"]
-        T2D["Finnhub ingest · Alpaca ingest"]
-        T2E["Signal processing · TimescaleDB writes"]
-    end
-
-    tier1 --> shared
-    tier2 --> shared
-
-    subgraph shared["Shared Layer"]
-        SH1["Redis — pub/sub · cache"]
-        SH2["NautilusTrader kernel"]
-    end
-
-    shared --> storage
-
-    subgraph storage["Storage"]
-        DB1["TimescaleDB — OHLCV"]
-        DB2["QuestDB — backup / alt"]
-        DB3["MongoDB Atlas — fundamentals"]
-        DB4["PostgreSQL — strategies · results"]
-    end
-```
-
-### Benefits
-
-- **FastAPI** handles business logic (portfolio optimization, backtesting, reporting) with full developer experience.
-- **Vanilla Granian** handles the hot path (market data ingestion, order execution, real-time risk) with minimal latency.
-- Both tiers share Pydantic models via a shared library.
-- Isolated failure domains — a crash in the research API does not affect live trading.
-- **Redis pub/sub** decouples the tiers with built-in backpressure handling.
-
----
-
-## Implementation
-
-### Tier 1 — FastAPI Service
+### Tier 2 Implementation
 
 ```python
-# fastapi_service.py
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from contextlib import asynccontextmanager
-from concurrent.futures import ProcessPoolExecutor
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    app.state.kernel = NautilusKernel()
-    await app.state.kernel.start()
-    yield
-    await app.state.kernel.stop()
-
-app = FastAPI(title="Trading Backtest API", lifespan=lifespan)
-executor = ProcessPoolExecutor(max_workers=4)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:3000"],  # React dev server
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-@app.post("/backtest")
-async def run_backtest(config: BacktestConfig):
-    results = await app.state.kernel.backtest(config)
-    return results
-
-@app.post("/optimize-portfolio")
-async def optimize_portfolio(holdings: dict):
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(executor, run_optimization_sync, holdings)
-
-# Run with: granian --interface asgi main:app --workers 4
-```
-
-### Tier 2 — Vanilla Granian Gateway
-
-```python
-# granian_gateway.py
+# realtime_gateway.py
 import asyncio
 import json
 import logging
@@ -402,20 +439,87 @@ class RealtimeGateway:
 
 gateway = RealtimeGateway()
 
-async def app(scope, proto):
+async def app(scope, receive, send):
     if scope["type"] == "websocket":
         pubsub = gateway.redis.pubsub()
         await pubsub.subscribe("market:ticks", "signals:high")
         async for message in pubsub.listen():
             if message["type"] == "message":
-                await proto.send(message["data"])
+                await send({"type": "websocket.send", "bytes": message["data"]})
     elif scope["type"] == "http":
-        await proto.response(
-            200,
-            [(b"content-type", b"application/json")],
-            b'{"status": "live"}',
-        )
+        await send({
+            "type": "http.response.start",
+            "status": 200,
+            "headers": [(b"content-type", b"application/json")],
+        })
+        await send({
+            "type": "http.response.body",
+            "body": b'{"status": "live"}',
+        })
+
+# Run with:
+# uvicorn realtime_gateway:app --loop uvloop --http httptools --workers 2 --port 8001
 ```
+
+---
+
+## Recommended Architecture: Hybrid Two-Tier
+
+For production systems that combine research and real-time trading, split the workload across two Uvicorn processes:
+
+```mermaid
+flowchart TD
+    subgraph frontend["React Dashboard"]
+        FE["TypeScript · Auto-generated API client\nWebSocket for live data · Recharts/D3"]
+    end
+
+    frontend -->|HTTP / WebSocket| tier1
+    frontend -->|WebSocket| tier2
+
+    subgraph tier1["Tier 1 — FastAPI · Uvicorn · Port 8000"]
+        T1A["POST /backtest — Run NautilusTrader"]
+        T1B["GET  /backtest/&lbrace;id&rbrace; — Query results"]
+        T1C["WS   /backtest/stream — Real-time progress"]
+        T1D["POST /optimize — PyPortfolioOpt"]
+        T1E["GET  /fundamentals/&lbrace;ticker&rbrace; — MongoDB Atlas"]
+        T1F["Pydantic validation · OpenAPI docs · JWT auth"]
+    end
+
+    subgraph tier2["Tier 2 — Vanilla ASGI · Uvicorn · Port 8001"]
+        T2A["WS /ws/market-data"]
+        T2B["WS /ws/signals"]
+        T2C["WS /ws/execution"]
+        T2D["Finnhub ingest · Alpaca ingest"]
+        T2E["Signal processing · TimescaleDB writes"]
+    end
+
+    tier1 --> shared
+    tier2 --> shared
+
+    subgraph shared["Shared Layer"]
+        SH1["Redis — pub/sub · cache"]
+        SH2["NautilusTrader kernel"]
+    end
+
+    shared --> storage
+
+    subgraph storage["Storage"]
+        DB1["TimescaleDB — OHLCV"]
+        DB2["QuestDB — backup / alt"]
+        DB3["MongoDB Atlas — fundamentals"]
+        DB4["PostgreSQL — strategies · results"]
+    end
+```
+
+### Benefits
+
+- **Both tiers run on Uvicorn**, leveraging its database query and WebSocket streaming advantages across the board.
+- **FastAPI** handles business logic (portfolio optimization, backtesting, reporting) with full developer experience — OpenAPI docs, Pydantic validation, CORS middleware.
+- **Vanilla ASGI** handles the hot path (market data ingestion, order execution, real-time risk) with minimal latency and direct asyncpg/WebSocket control.
+- Both tiers share Pydantic models via a shared library.
+- Isolated failure domains — a crash in the research API does not affect live trading.
+- **Redis pub/sub** decouples the tiers with built-in backpressure handling.
+- A single event loop architecture (uvloop) on both tiers means **no Tokio ↔ asyncio scheduling friction** for database operations.
 
 ---
 
@@ -464,25 +568,50 @@ async def get_fundamentals(ticker: str) -> dict:
 
 ---
 
+## When to Consider Granian
+
+Granian is not the right default for QuantLens, but there are scenarios where it could be worth evaluating:
+
+| Scenario | Rationale |
+|----------|-----------|
+| **HTTP/2 or HTTP/3 required** | Granian has native HTTP/2 support via Hyper; Uvicorn does not |
+| **Pure JSON API with no database** | Granian's RSGI protocol optimization provides an edge for trivial responses |
+| **Static file serving** | Granian's `pathsend` extension is efficient |
+
+If any of these become a priority, benchmark against Uvicorn on QuantLens's actual workload before switching. Synthetic micro-benchmarks (JSON serialization) can be misleading for database-heavy applications.
+
+---
+
 ## Final Verdict
 
 | Use Case | Recommendation |
 |----------|----------------|
-| **Research / backtesting platform** | FastAPI on Granian |
-| **Live trading with < 10 ms latency** | Vanilla Granian (RSGI) |
-| **Mixed system (research + production)** | Hybrid — FastAPI for research APIs, vanilla Granian for live trading |
-| **Small team, rapid development** | FastAPI on Granian (best of both worlds) |
-| **Multiple real-time data sources** | Build the gateway in vanilla Granian from day one |
+| **Research / backtesting platform** | FastAPI on Uvicorn |
+| **Data dashboards (React frontend)** | FastAPI on Uvicorn |
+| **Live trading with low latency** | Vanilla ASGI on Uvicorn |
+| **Mixed system (research + production)** | Hybrid — FastAPI on Uvicorn for Tier 1, vanilla ASGI on Uvicorn for Tier 2 |
+| **Small team, rapid development** | FastAPI on Uvicorn (single tier, add Tier 2 when needed) |
+| **Multiple real-time data sources** | Build the vanilla ASGI gateway on Uvicorn from day one |
 
-For QuantLens specifically — backtesting NautilusTrader strategies and serving results to a React frontend — start with **FastAPI on Granian**. Granian's Rust-based HTTP layer delivers strong baseline performance, and FastAPI's developer experience (OpenAPI docs, Pydantic validation, CORS middleware) eliminates boilerplate. If profiling reveals latency bottlenecks on the real-time path, extract those endpoints to a vanilla Granian service using the hybrid architecture above.
+For QuantLens specifically — backtesting NautilusTrader strategies, running PyPortfolioOpt, and serving dashboards to a React frontend — start with **FastAPI on Uvicorn**. Uvicorn's Cython/C architecture (uvloop + httptools + asyncpg) delivers benchmark-leading database query performance, and FastAPI's developer experience (OpenAPI docs, Pydantic validation, CORS middleware) eliminates boilerplate. When live trading is added, extract real-time endpoints to a vanilla ASGI service on a second Uvicorn process using the hybrid architecture above.
 
 | Component | Technology | Reason |
 |-----------|-----------|--------|
-| Research / backtest API | FastAPI on Granian | Developer experience, docs, validation |
-| Real-time market data gateway | Vanilla Granian (RSGI) | Sub-millisecond latency, WebSocket control |
-| Signal processing | Vanilla Granian + NautilusTrader | Direct kernel integration |
+| Research / backtest API | FastAPI on Uvicorn | Developer experience, docs, validation, DB query performance |
+| Real-time market data gateway | Vanilla ASGI on Uvicorn | Low-latency WebSocket streaming, native asyncpg, single event loop |
+| Signal processing | Vanilla ASGI + NautilusTrader | Direct kernel integration, no FFI overhead |
 | Data persistence | TimescaleDB primary, QuestDB backup | Time-series optimized, high ingest rate |
 | Cross-service communication | Redis pub/sub | Decoupling, backpressure handling |
 | Frontend | React + WebSocket (msgpack) | Binary framing for efficiency |
+
+### Production Configuration
+
+```bash
+# Tier 1 — FastAPI (backtesting, dashboards)
+uvicorn main:app --loop uvloop --http httptools --workers 4 --limit-concurrency 1000
+
+# Tier 2 — Vanilla ASGI (real-time trading)
+uvicorn realtime_gateway:app --loop uvloop --http httptools --workers 2 --port 8001
+```
 
 See also: [asgi_rsgi_wsgi.md](asgi_rsgi_wsgi.md) for the ASGI vs WSGI vs RSGI interface decision.
