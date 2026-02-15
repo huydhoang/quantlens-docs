@@ -98,7 +98,7 @@ Hybrid Rust/Python with an event-driven core. The Rust layer (via PyO3) handles 
 │  Data Models · Matching · I/O       │
 ├─────────────────────────────────────┤
 │         Adapters Layer              │
-│  Binance · IBKR · OKX · Custom     │
+│  Binance · IBKR · OKX · Custom      │
 └─────────────────────────────────────┘
 ```
 
