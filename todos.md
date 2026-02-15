@@ -1,4 +1,4 @@
-# Remaining Verification Tasks
+# Remaining Tasks
 
 ## Completed
 - [x] **Local Desktop Frontend** — Evaluated Tauri vs Electron, Vite vs Rspack, and Vite SPA vs TanStack Start vs Next.js vs Astro. Decision: Tauri + Vite + React + TanStack Query/Router. See [local_frontend.md](local_frontend.md)
