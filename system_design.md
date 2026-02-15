@@ -63,7 +63,7 @@ flowchart TD
 
 ```mermaid
 graph LR
-    subgraph "Vite + React SPA File Structure"
+    subgraph "Vite + React SPA File Structure (TanStack Router)"
         A[src/routes] --> B[strategies.tsx]
         A --> C[backtest.$id.tsx]
         
