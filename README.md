@@ -49,6 +49,7 @@ TanStack Start (Frontend + API)
 | [ohlcv_database.md](ohlcv_database.md) | Time-series database evaluation — QuestDB vs TimescaleDB vs InfluxDB vs MongoDB for OHLCV storage, with a phased adoption plan |
 | [task_queue.md](task_queue.md) | Task queue decision analysis — why Celery over Dramatiq, RQ, and Taskiq, with configuration for NautilusTrader backtest workers |
 | [asgi_rsgi_wsgi.md](asgi_rsgi_wsgi.md) | Web interface decision analysis — why ASGI over WSGI/RSGI for NautilusTrader real-time streaming + PyPortfolioOpt optimization workloads |
+| [asgi_web_server.md](asgi_web_server.md) | ASGI framework & architecture decision — FastAPI vs Starlette vs vanilla Granian, performance benchmarks, hybrid two-tier architecture for research and real-time trading |
 
 ## Tech Stack
 
