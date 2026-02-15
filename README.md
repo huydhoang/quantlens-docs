@@ -43,6 +43,7 @@ TanStack Start (Frontend + API)
 
 | Document | Description |
 |----------|-------------|
+| [core_engine.md](core_engine.md) | Core engine decision analysis — why NautilusTrader alone (not a dual VectorBT + NautilusTrader stack), with ecosystem comparison, dual-engine trade-offs, and integration with QuantLens architecture |
 | [system_design.md](system_design.md) | Full system architecture — frontend components, backtest execution flow, data flow, NautilusTrader integration, database schema, and deployment topology |
 | [python_rust_or_go.md](python_rust_or_go.md) | Server language decision analysis — why Python wins given NautilusTrader's hybrid Rust/Python architecture, with ecosystem comparisons across Python, Rust, and Go |
 | [data_providers.md](data_providers.md) | Multi-provider strategy for free-tier data — Tiingo, Alpaca, Finnhub, and Alpha Vantage compared on rate limits, data quality, and coverage, plus the validation pipeline |
