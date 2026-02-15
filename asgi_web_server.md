@@ -217,16 +217,18 @@ FastAPI request/response models remain Pydantic-based, while skfolio provides th
 
 ```python
 from skfolio.optimization import MeanRisk, CVaR
+import pandas as pd
 from pydantic import BaseModel
 
 class OptimizationRequest(BaseModel):
-    returns: list[list[float]]
+    returns_data: list[list[float]]  # rows=time observations, columns=asset returns
     confidence_level: float = 0.95
 
 @app.post("/optimize")
 async def optimize_portfolio(request: OptimizationRequest):
+    returns_df = pd.DataFrame(request.returns_data)
     optimizer = MeanRisk(risk_measure=CVaR(request.confidence_level))
-    optimizer.fit(request.returns)
+    optimizer.fit(returns_df)
     return {
         "weights": optimizer.weights_,
     }

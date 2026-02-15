@@ -392,17 +392,16 @@ def ingest_validated_data():
 ```python
 from skfolio.optimization import MeanRisk, CVaR
 
-def robust_optimization(prices_df):
-    """prices_df: DataFrame from validated Tiingo data."""
+def cvar_optimization(prices_df, confidence_level=0.95):
+    """prices_df: DataFrame with datetime index and asset tickers as columns."""
     if prices_df.isnull().sum().sum() > 0:
         raise DataQualityError("Missing values in price data")
 
-    zero_volume_days = (prices_df['volume'] == 0).sum()
-    if zero_volume_days > len(prices_df) * 0.05:
-        log.warning("High proportion of zero-volume days detected")
+    if prices_df.shape[1] < 2:
+        raise DataQualityError("Expected multiple asset columns for portfolio optimization")
 
-    returns = prices_df['close'].pct_change().dropna()
-    optimizer = MeanRisk(risk_measure=CVaR(0.95))
+    returns = prices_df.pct_change().dropna()
+    optimizer = MeanRisk(risk_measure=CVaR(confidence_level))
     optimizer.fit(returns)
     return optimizer.weights_
 ```
