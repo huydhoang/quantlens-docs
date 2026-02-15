@@ -2,7 +2,7 @@
 
 QuantLens is a **local-first** alpha research, strategy backtesting, and portfolio optimization desktop application. It combines a **Tauri + Vite + React** frontend with a **Python/FastAPI** backend powered by **NautilusTrader**'s Rust core, providing institutional-grade simulation performance with an accessible desktop workflow. Tauri's lightweight Rust shell wraps a Vite-powered React SPA, with **TanStack Query** for REST data fetching and **TanStack Router** for type-safe routing.
 
-The project will evolve into a **platform** where quants can submit their backtesting results and deploy strategies live to track and showcase real-world performance. The deployed platform app uses **Neon** (managed PostgreSQL) as its database.
+The project will evolve into a **platform** where quants can submit their backtesting results and deploy strategies live to track and showcase real-world performance. The deployed platform app uses **TanStack Start + React** for the frontend and **Neon** (managed PostgreSQL) as its database.
 
 ## Architecture at a Glance
 
@@ -35,7 +35,7 @@ Tauri Desktop App (Vite + React SPA)
 ### Future Platform App (Deployed)
 
 ```
-React Platform App
+TanStack Start + React (Frontend + API)
         │
         ├── Strategy Showcase ── Leaderboards, performance tracking
         ├── Live Deployment ──── Real-world strategy monitoring
@@ -55,12 +55,13 @@ React Platform App
 | **Backtest engine** | NautilusTrader | Rust-powered event-driven engine with Python strategy API — institutional speed without sacrificing usability |
 | **Primary data source** | Tiingo | Most generous free-tier limits (1,000 req/day, 30+ years EOD per call) for bulk historical data |
 | **Time-series DB** | QuestDB | Native `SAMPLE BY`, `ASOF JOIN`, `LATEST ON`, 11M+ rows/sec ingestion — purpose-built for financial market data. Running locally in Docker removes the free-tier constraints that previously favored TimescaleDB |
-| **Frontend** | Tauri + Vite + React | Desktop app with TanStack Query (REST caching), TanStack Router (type-safe routing), WebSocket streaming for backtest progress, Monaco Editor for strategy authoring |
+| **Frontend (local)** | Tauri + Vite + React | Desktop app with TanStack Query (REST caching), TanStack Router (type-safe routing), WebSocket streaming for backtest progress, Monaco Editor for strategy authoring |
+| **Frontend (platform)** | TanStack Start + React | Server functions, SSR for SEO, streaming, TanStack Query for data fetching |
 | **NoSQL DB** | MongoDB (local Docker) | Flexible document model for semi-structured fundamentals and economic data; aggregation framework for screening queries |
 | **Task queue** | Celery | Battle-tested reliability, canvas workflows for backtest pipelines, Redis broker (no new infrastructure), Flower monitoring |
 | **Platform DB** | Neon (managed PostgreSQL) | Serverless PostgreSQL for the deployed platform app — user profiles, submitted results, live strategy tracking |
 | **Deployment (local)** | Tauri desktop app + Docker Compose | Tauri app runs natively; backend services (FastAPI, databases, Redis, workers) start with `docker compose up` |
-| **Deployment (platform)** | Cloud (TBD) | Future deployed React app for strategy showcasing and live performance tracking |
+| **Deployment (platform)** | Cloud (TBD) | Future deployed TanStack Start + React app for strategy showcasing and live performance tracking |
 
 ## Documents
 
@@ -80,7 +81,9 @@ React Platform App
 
 ## Tech Stack
 
-**Frontend:** Tauri, Vite, React, TanStack Query, TanStack Router, Monaco Editor
+**Frontend (Local App):** Tauri, Vite, React, TanStack Query, TanStack Router, Monaco Editor
+
+**Frontend (Platform App):** TanStack Start, React, TanStack Query
 
 **Backend:** Python, FastAPI, Uvicorn (uvloop), Celery
 

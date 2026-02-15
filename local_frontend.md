@@ -74,32 +74,26 @@ The previous plan used **TanStack Start** (a full-stack SSR framework). Upon eva
 
 ## Recommended Architecture
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                     Tauri (Rust Core)                       │
-│  ┌───────────────────────────────────────────────────────┐  │
-│  │                  WebView (Chromium)                    │  │
-│  │  ┌─────────────────────────────────────────────────┐  │  │
-│  │  │              Vite + React SPA                    │  │  │
-│  │  │  ┌─────────────┐  ┌─────────────────────────┐  │  │  │
-│  │  │  │  TanStack   │  │      WebSocket          │  │  │  │
-│  │  │  │   Query     │◄─┤    Connection Manager   │  │  │  │
-│  │  │  │  (REST API) │  │   (Real-time updates)   │  │  │  │
-│  │  │  └─────────────┘  └─────────────────────────┘  │  │  │
-│  │  │  ┌─────────────────────────────────────────┐    │  │  │
-│  │  │  │         TanStack Router                 │    │  │  │
-│  │  │  │    (Type-safe routing)                  │    │  │  │
-│  │  │  └─────────────────────────────────────────┘    │  │  │
-│  │  └─────────────────────────────────────────────────┘  │  │
-│  └───────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-                    ┌──────────────────┐
-                    │   FastAPI +      │
-                    │   Uvicorn        │
-                    │   (Localhost)    │
-                    └──────────────────┘
+```mermaid
+graph TD
+    subgraph Tauri["Tauri (Rust Core)"]
+        subgraph WebView["WebView (Chromium)"]
+            subgraph SPA["Vite + React SPA"]
+                TQ["TanStack Query<br/>(REST API)"]
+                WS["WebSocket<br/>Connection Manager<br/>(Real-time updates)"]
+                TR["TanStack Router<br/>(Type-safe routing)"]
+                WS -->|updates cache| TQ
+            end
+        end
+    end
+
+    subgraph Backend["FastAPI + Uvicorn (Localhost)"]
+        REST[REST Endpoints]
+        WSE[WebSocket Endpoints]
+    end
+
+    TQ -->|HTTP| REST
+    WS -->|WebSocket| WSE
 ```
 
 ### Stack Breakdown
