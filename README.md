@@ -54,6 +54,7 @@ TanStack Start (Frontend + API)
 | [task_queue.md](task_queue.md) | Task queue decision analysis — why Celery over Dramatiq, RQ, and Taskiq, with configuration for NautilusTrader backtest workers |
 | [asgi_rsgi_wsgi.md](asgi_rsgi_wsgi.md) | Web interface decision analysis — why ASGI over WSGI/RSGI for NautilusTrader real-time streaming + PyPortfolioOpt optimization workloads |
 | [asgi_web_server.md](asgi_web_server.md) | ASGI framework & architecture decision — FastAPI vs Starlette vs vanilla Granian, performance benchmarks, hybrid two-tier architecture for research and real-time trading |
+| [vector_database.md](vector_database.md) | Vector database evaluation — LanceDB vs Qdrant vs Weaviate vs Milvus vs ChromaDB for local LLM chat, semantic search, and RAG pipelines, with embedded-first architecture for local deployment |
 
 ## Tech Stack
 
