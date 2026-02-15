@@ -2,7 +2,7 @@
 
 ## Decision Summary
 
-**ASGI** is the web server interface for QuantLens backend services. We will use **FastAPI** as the ASGI framework, with **Granian** as the ASGI server for all environments (development, CI, staging, and production).
+**ASGI** is the web server interface for QuantLens backend services. We will use **FastAPI** as the ASGI framework.
 
 ---
 
@@ -83,38 +83,4 @@ async def optimize_portfolio(holdings: dict):
     return await loop.run_in_executor(executor, run_optimization_sync, holdings)
 ```
 
----
-
-## Server Choice: Granian
-
-**Granian** is the ASGI server for all environments (development, CI, staging, and production).
-
-### Why Granian for All Environments
-
-- **Rust-based server implementation** tuned for high-throughput ASGI workloads, providing a strong fit with a NautilusTrader-centric, performance-oriented backend
-- **Hot reload support** via optional reload dependency (see [Granian documentation](https://github.com/emmett-framework/granian#reload)), providing comparable developer experience to Uvicorn during local development
-- **Runtime parity across all environments** — using one server eliminates behavioral differences (timeouts, worker defaults, connection handling) and simplifies configuration management
-- **Reduced operational complexity** — maintaining a single server configuration reduces maintenance burden and testing surface area
-
-### Trade-offs
-
-The primary trade-off is **Granian's smaller community** compared to Uvicorn. However, for standard ASGI/FastAPI usage, this is a minor concern:
-
-- Granian implements the ASGI 3.0 specification fully
-- FastAPI and Starlette applications are server-agnostic
-- The Granian project is actively maintained and production-ready
-
-### Operational Considerations in a Hybrid Async + CPU-Bound Architecture
-
-| Area | Consideration / Potential issue | Mitigation |
-|------|--------------------------------|------------|
-| **Long-lived streams** | WebSocket/SSE behavior can degrade under conservative timeout or keepalive defaults | Explicitly configure keepalive/timeouts and add reconnect + heartbeat logic at clients |
-| **CPU-heavy optimization** | PyPortfolioOpt jobs can starve event-loop responsiveness if executed in-process | Always offload optimization to process/thread executors and enforce concurrency limits |
-| **Backpressure under load** | Market-data bursts can flood WebSocket consumers | Use bounded queues, drop/coalesce non-critical updates, and emit snapshots on intervals |
-
-### Practical Mitigation Checklist
-
-1. Pin explicit worker, timeout, keepalive, and max-request settings in deployment config.
-2. Keep WebSocket handlers non-blocking; move compute work to executors/workers.
-3. Add readiness/liveness probes and monitor event-loop lag, p95/p99 latency, and dropped stream events.
 
