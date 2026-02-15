@@ -2,7 +2,7 @@
 
 ## Decision Summary
 
-**ASGI** is the web server interface for QuantLens backend services. We will use **FastAPI** as the ASGI framework, with **Uvicorn** for local development and **Granian** for production.
+**ASGI** is the web server interface for QuantLens backend services. We will use **FastAPI** as the ASGI framework.
 
 ---
 
@@ -83,35 +83,4 @@ async def optimize_portfolio(holdings: dict):
     return await loop.run_in_executor(executor, run_optimization_sync, holdings)
 ```
 
----
-
-## Server Choice: Uvicorn (Dev) vs Granian (Prod)
-
-Uvicorn is suggested for local development primarily for **developer experience (DX)**:
-
-- Stable hot reload and rapid iteration loop
-- Simpler debugging behavior during local API work
-- Familiar defaults across the FastAPI ecosystem
-
-Granian is suggested for production primarily for runtime characteristics:
-
-- Rust-based server implementation tuned for high-throughput ASGI workloads
-- Strong fit with a NautilusTrader-centric, performance-oriented backend
-
-### Trade-offs in a Hybrid Async + CPU-Bound Architecture
-
-| Area | Trade-off / Potential issue | Mitigation |
-|------|-----------------------------|------------|
-| **Runtime parity** | Dev on Uvicorn and prod on Granian can expose behavioral differences (timeouts, worker defaults, connection handling) | Keep app ASGI-pure (no server-specific APIs), pin explicit server settings, and run pre-release smoke tests on Granian |
-| **Long-lived streams** | WebSocket/SSE behavior can degrade under conservative timeout or keepalive defaults | Explicitly configure keepalive/timeouts and add reconnect + heartbeat logic at clients |
-| **CPU-heavy optimization** | PyPortfolioOpt jobs can starve event-loop responsiveness if executed in-process | Always offload optimization to process/thread executors and enforce concurrency limits |
-| **Backpressure under load** | Market-data bursts can flood WebSocket consumers | Use bounded queues, drop/coalesce non-critical updates, and emit snapshots on intervals |
-| **Observability differences** | Metrics and logs may differ between dev/prod servers | Standardize app-level structured logging, health checks, and latency/error metrics independent of server |
-
-### Practical Mitigation Checklist
-
-1. Pin explicit worker, timeout, keepalive, and max-request settings in deployment config.
-2. Keep WebSocket handlers non-blocking; move compute work to executors/workers.
-3. Validate both HTTP and WebSocket paths in CI smoke tests against Granian.
-4. Add readiness/liveness probes and monitor event-loop lag, p95/p99 latency, and dropped stream events.
 
