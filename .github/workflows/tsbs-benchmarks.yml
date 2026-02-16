@@ -1,0 +1,84 @@
+name: TSBS Benchmarks
+
+on:
+  push:
+
+jobs:
+  tsbs-benchmarks:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Pull database Docker images
+        run: |
+          set -euo pipefail
+          mkdir -p benchmarks
+
+          cat <<'EOF' > benchmarks/tsbs_results.md
+          # TSBS Benchmark Results
+
+          ## Pulled Docker images
+          EOF
+
+          images=(
+            "questdb/questdb:latest"
+            "timescale/timescaledb:latest-pg16"
+            "mongo:latest"
+            "influxdb:latest"
+            "crate:latest"
+            "clickhouse/clickhouse-server:latest"
+            "bfolkens/siridb-server:latest"
+            "victoriametrics/victoria-metrics:latest"
+            "cassandra:latest"
+          )
+
+          for image in "${images[@]}"; do
+            docker pull "$image"
+            echo "- \`$image\`" >> benchmarks/tsbs_results.md
+          done
+
+      - name: Run TSBS benchmark generation
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/questdb/tsbs.git /tmp/tsbs
+          cd /tmp/tsbs
+          make
+
+          echo "" >> "$GITHUB_WORKSPACE/benchmarks/tsbs_results.md"
+          echo "## TSBS generation benchmark (cpu-only)" >> "$GITHUB_WORKSPACE/benchmarks/tsbs_results.md"
+          echo "| Database format | Generated lines | Elapsed seconds |" >> "$GITHUB_WORKSPACE/benchmarks/tsbs_results.md"
+          echo "| --- | ---: | ---: |" >> "$GITHUB_WORKSPACE/benchmarks/tsbs_results.md"
+
+          formats=(questdb timescaledb mongo influx cratedb clickhouse siridb victoriametrics cassandra)
+          for format in "${formats[@]}"; do
+            output="/tmp/${format}-data.txt"
+            start_ns=$(date +%s%N)
+            ./bin/tsbs_generate_data \
+              --use-case=cpu-only \
+              --seed=123 \
+              --scale=10 \
+              --timestamp-start=2016-01-01T00:00:00Z \
+              --timestamp-end=2016-01-01T00:05:00Z \
+              --log-interval=10s \
+              --format="$format" \
+              > "$output"
+            end_ns=$(date +%s%N)
+            elapsed=$(awk "BEGIN {printf \"%.3f\", (${end_ns}-${start_ns})/1000000000}")
+            lines=$(wc -l < "$output")
+            echo "| $format | $lines | $elapsed |" >> "$GITHUB_WORKSPACE/benchmarks/tsbs_results.md"
+          done
+
+      - name: Upload TSBS results
+        uses: actions/upload-artifact@v4
+        with:
+          name: tsbs-results
+          path: benchmarks/tsbs_results.md
