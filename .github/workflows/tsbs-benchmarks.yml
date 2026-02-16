@@ -33,7 +33,6 @@ jobs:
             "questdb/questdb:latest"
             "timescale/timescaledb:latest-pg18"
             "influxdb/influxdb:latest"
-            "crate:latest"
             "clickhouse/clickhouse-server:latest"
             "victoriametrics/victoria-metrics:latest"
             "cassandra:latest"
@@ -71,7 +70,7 @@ jobs:
           QUERY_TYPES=(single-groupby-1-1-1 double-groupby-1 high-cpu-all)
           POST_LOAD_WAIT_SECS=5
 
-          CONTAINERS=(tsbs-questdb tsbs-timescaledb tsbs-influx tsbs-cratedb tsbs-clickhouse tsbs-victoriametrics tsbs-cassandra)
+          CONTAINERS=(tsbs-questdb tsbs-timescaledb tsbs-influx tsbs-clickhouse tsbs-victoriametrics tsbs-cassandra)
           trap 'docker rm -f "${CONTAINERS[@]}" >/dev/null 2>&1 || true' EXIT INT TERM
 
           write_rate() {
@@ -210,14 +209,6 @@ jobs:
             "until curl -fsS http://localhost:8086/ping >/dev/null; do sleep 2; done" \
             "cat \"$WORKDIR/influx-data.gz\" | gunzip | ./bin/tsbs_load_influx --workers=2 --batch-size=5000 --reporting-period=5s --db-name=benchmark --urls=http://localhost:8086" \
             "cat __QUERY_FILE__ | gunzip | ./bin/tsbs_run_queries_influx --workers=2 --max-queries=$QUERY_COUNT --db-name=benchmark --urls=http://localhost:8086"
-
-          benchmark_db \
-            cratedb \
-            tsbs-cratedb \
-            "docker run -d --name tsbs-cratedb -p 5432:5432 -p 4200:4200 crate:latest" \
-            "until curl -fsS http://localhost:4200 >/dev/null; do sleep 2; done" \
-            "cat \"$WORKDIR/cratedb-data.gz\" | gunzip | ./bin/tsbs_load_cratedb --workers=2 --batch-size=5000 --reporting-period=5s --hosts=localhost --port=5432 --user=crate" \
-            "cat __QUERY_FILE__ | gunzip | ./bin/tsbs_run_queries_cratedb --workers=2 --max-queries=$QUERY_COUNT --hosts=localhost --port=5432 --user=crate"
 
           benchmark_db \
             clickhouse \
