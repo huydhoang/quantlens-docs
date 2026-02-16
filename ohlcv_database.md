@@ -275,6 +275,7 @@ def ingest_ohlcv(symbol: str, bars: list[dict]):
 Use PostgreSQL wire protocol (asyncpg) for analytical queries:
 
 ```python
+# Standard imports at module level
 import asyncpg
 from datetime import datetime
 
