@@ -568,7 +568,7 @@ async def get_fundamentals(ticker: str) -> dict:
         "SELECT * FROM fundamentals WHERE symbol = ? ORDER BY period DESC LIMIT 1",
         [ticker]
     ).fetchdf()
-    return result.to_dict(orient='records')[0] if len(result) > 0 else {}
+    return result.to_dict(orient='records')[0] if not result.empty else {}
 ```
 
 ---

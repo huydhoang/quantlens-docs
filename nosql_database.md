@@ -100,7 +100,7 @@ con.execute("""
         fiscal_quarter,
         revenue,
         net_income,
-        LAG(revenue, 4) OVER (PARTITION BY ticker ORDER BY fiscal_quarter) as revenue_yoy
+        LAG(revenue, 4) OVER (PARTITION BY ticker ORDER BY fiscal_quarter) as revenue_4q_ago
     FROM read_parquet('fundamentals/*.parquet')
     WHERE sector = 'Technology'
 """).df()
