@@ -33,6 +33,7 @@ jobs:
             "questdb/questdb:latest"
             "timescale/timescaledb:latest-pg16"
             "mongo:latest"
+            # TSBS Influx loaders/runners target InfluxDB v1 API endpoints.
             "influxdb:1.8"
             "crate:latest"
             "clickhouse/clickhouse-server:latest"
@@ -59,12 +60,16 @@ jobs:
           TS_END_QUERY="2016-01-01T02:00:01Z"
           SCALE=100
           QUERY_COUNT=200
+          POST_LOAD_WAIT_SECS=5
+          CONTAINERS=(tsbs-questdb tsbs-timescaledb tsbs-mongo tsbs-influx tsbs-cratedb tsbs-clickhouse tsbs-victoriametrics tsbs-cassandra)
+          trap 'docker rm -f "${CONTAINERS[@]}" >/dev/null 2>&1 || true' EXIT INT TERM
 
           write_rate() {
             local log_file="$1"
             local rate
-            rate=$(awk '/mean rate/ && /metrics\/sec/ {for (i = 1; i <= NF; i++) if ($i == "rate") {print $(i+1); exit}}' "$log_file" || true)
+            rate=$(sed -nE 's/.*mean rate ([0-9.]+) metrics\/sec.*/\1/p' "$log_file" | head -n 1 || true)
             if [ -z "${rate:-}" ]; then
+              echo "Warning: unable to parse metrics/sec from $log_file" >&2
               echo "n/a"
             else
               echo "$rate"
@@ -74,9 +79,10 @@ jobs:
           read_qps() {
             local log_file="$1"
             local query_count wall_sec
-            query_count=$(grep -Eo '[Rr]un complete after [0-9]+ queries' "$log_file" | tail -n 1 | awk '{print $4}' || true)
-            wall_sec=$(grep -Eo 'wall clock time: [0-9.]+sec' "$log_file" | tail -n 1 | awk -F': ' '{print $2}' | sed 's/sec$//' || true)
+            query_count=$(sed -nE 's/.*[Rr]un complete after ([0-9]+) queries.*/\1/p' "$log_file" | tail -n 1 || true)
+            wall_sec=$(sed -nE 's/.*wall clock time: ([0-9.]+)sec.*/\1/p' "$log_file" | tail -n 1 || true)
             if [ -z "${query_count:-}" ] || [ -z "${wall_sec:-}" ]; then
+              echo "Warning: unable to parse query throughput from $log_file" >&2
               echo "n/a"
             else
               awk -v q="$query_count" -v t="$wall_sec" 'BEGIN { if (t > 0) printf "%.2f", q / t; else print "n/a" }'
@@ -117,7 +123,7 @@ jobs:
               | gzip > "$WORKDIR/${db}-queries.gz"
 
             eval "$load_cmd" | tee "$WORKDIR/${db}-load.log"
-            sleep 5
+            sleep "$POST_LOAD_WAIT_SECS"
             eval "$query_cmd" | tee "$WORKDIR/${db}-query.log"
 
             echo "| $db | $(write_rate "$WORKDIR/${db}-load.log") | $(read_qps "$WORKDIR/${db}-query.log") |" >> "$GITHUB_WORKSPACE/benchmarks/tsbs_results.md"
