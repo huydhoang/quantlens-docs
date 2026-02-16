@@ -1,7 +1,7 @@
 name: TSBS Benchmarks
 
 on:
-  push:
+  workflow_dispatch:
 
 jobs:
   tsbs-benchmarks:
@@ -34,7 +34,6 @@ jobs:
             "timescale/timescaledb:latest-pg18"
             "influxdb/influxdb:latest"
             "clickhouse/clickhouse-server:latest"
-            "cassandra:latest"
           )
 
           for image in "${images[@]}"; do
@@ -70,7 +69,7 @@ jobs:
           POST_LOAD_WAIT_SECS=5
           CLICKHOUSE_PASSWORD=$(openssl rand -hex 12)
 
-          CONTAINERS=(tsbs-questdb tsbs-timescaledb tsbs-influx tsbs-clickhouse tsbs-cassandra)
+          CONTAINERS=(tsbs-questdb tsbs-timescaledb tsbs-influx tsbs-clickhouse)
           trap 'docker rm -f "${CONTAINERS[@]}" >/dev/null 2>&1 || true' EXIT INT TERM
 
           write_rate() {
@@ -217,14 +216,6 @@ jobs:
             "until docker exec tsbs-clickhouse clickhouse-client --user default --password $CLICKHOUSE_PASSWORD --query \"SELECT 1\" >/dev/null 2>&1; do sleep 2; done" \
             "cat \"$WORKDIR/clickhouse-data.gz\" | gunzip | ./bin/tsbs_load_clickhouse --workers=2 --batch-size=5000 --reporting-period=5s --host=localhost --db-name=benchmark --user=default --password=$CLICKHOUSE_PASSWORD" \
             "cat __QUERY_FILE__ | gunzip | ./bin/tsbs_run_queries_clickhouse --workers=2 --max-queries=$QUERY_COUNT --hosts=localhost --db-name=benchmark --user=default --password=$CLICKHOUSE_PASSWORD"
-
-          benchmark_db \
-            cassandra \
-            tsbs-cassandra \
-            "docker run -d --name tsbs-cassandra -p 9042:9042 cassandra:latest" \
-            "until docker exec tsbs-cassandra cqlsh -e \"DESCRIBE KEYSPACES\" >/dev/null 2>&1; do sleep 5; done" \
-            "cat \"$WORKDIR/cassandra-data.gz\" | gunzip | ./bin/tsbs_load_cassandra --workers=2 --batch-size=500 --reporting-period=5s --hosts=localhost:9042 --consistency=ONE" \
-            "cat __QUERY_FILE__ | gunzip | ./bin/tsbs_run_queries_cassandra --workers=2 --max-queries=$QUERY_COUNT --host=localhost:9042"
 
           {
             echo ""
