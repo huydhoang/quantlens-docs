@@ -26,7 +26,7 @@ While TimescaleDB excels at simple point lookups (2.6x faster), our workload is 
 
 Recent performance testing with 1M rows across 10 metrics and 100 hosts reveals clear workload-specific winners:
 
-### Data Loading Performance
+### Data Ingestion Performance
 
 | Metric | QuestDB | TimescaleDB | Advantage |
 |--------|---------|-------------|-----------|
@@ -233,7 +233,7 @@ QuestDB runs locally via Docker Compose with the following services:
 ```yaml
 services:
   questdb:
-    image: questdb/questdb:latest
+    image: questdb/questdb:7.3.10  # Pin version for reproducible deployments
     ports:
       - "9000:9000"  # REST API and Web Console
       - "8812:8812"  # PostgreSQL wire protocol
@@ -276,6 +276,7 @@ Use PostgreSQL wire protocol (asyncpg) for analytical queries:
 
 ```python
 import asyncpg
+from datetime import datetime
 
 async def fetch_bars(symbol: str, start: datetime, end: datetime):
     """Fetch OHLCV bars using PGWire protocol (8812)"""
@@ -304,7 +305,14 @@ async def fetch_bars(symbol: str, start: datetime, end: datetime):
 ```python
 async def export_to_parquet(symbol: str, output_path: str):
     """Export QuestDB data to Parquet for NautilusTrader ParquetDataCatalog"""
-    conn = await asyncpg.connect(host='localhost', port=8812, ...)
+    # Connect with same parameters as previous example
+    conn = await asyncpg.connect(
+        host='localhost',
+        port=8812,
+        user='admin',
+        password='quest',
+        database='qdb'
+    )
     
     # Fetch data
     rows = await conn.fetch("""
