@@ -31,10 +31,9 @@ jobs:
 
           images=(
             "questdb/questdb:latest"
-            "timescale/timescaledb:latest-pg16"
-            "mongo:latest"
-            # TSBS Influx loaders/runners target InfluxDB v1 API endpoints.
-            "influxdb:1.8"
+            "timescale/timescaledb:latest-pg18"
+            "mongodb/mongodb-community-server:latest"
+            "influxdb/influxdb:latest"
             "crate:latest"
             "clickhouse/clickhouse-server:latest"
             "victoriametrics/victoria-metrics:latest"
@@ -42,8 +41,16 @@ jobs:
           )
 
           for image in "${images[@]}"; do
-            docker pull "$image"
-            echo "- \`$image\`" >> benchmarks/tsbs_results.md
+            pulled_image="$image"
+            if [ "$image" = "influxdb/influxdb:latest" ]; then
+              if ! docker pull "$image"; then
+                docker pull "influxdb:latest"
+                pulled_image="influxdb:latest"
+              fi
+            else
+              docker pull "$image"
+            fi
+            echo "- \`$pulled_image\`" >> benchmarks/tsbs_results.md
           done
 
       - name: Run TSBS write/read throughput benchmarks
@@ -122,12 +129,23 @@ jobs:
               --format="$db" \
               | gzip > "$WORKDIR/${db}-queries.gz"
 
+            set +e
             eval "$load_cmd" | tee "$WORKDIR/${db}-load.log"
-            sleep "$POST_LOAD_WAIT_SECS"
-            eval "$query_cmd" | tee "$WORKDIR/${db}-query.log"
+            local load_status=${PIPESTATUS[0]}
+            if [ "$load_status" -eq 0 ]; then
+              sleep "$POST_LOAD_WAIT_SECS"
+              eval "$query_cmd" | tee "$WORKDIR/${db}-query.log"
+              local query_status=${PIPESTATUS[0]}
+            else
+              local query_status=1
+            fi
+            set -e
 
             echo "| $db | $(write_rate "$WORKDIR/${db}-load.log") | $(read_qps "$WORKDIR/${db}-query.log") |" >> "$GITHUB_WORKSPACE/benchmarks/tsbs_results.md"
             docker rm -f "$container" >/dev/null 2>&1 || true
+            if [ "$load_status" -ne 0 ] || [ "$query_status" -ne 0 ]; then
+              return 1
+            fi
           }
 
           echo "" >> "$GITHUB_WORKSPACE/benchmarks/tsbs_results.md"
@@ -146,7 +164,7 @@ jobs:
           benchmark_db \
             timescaledb \
             tsbs-timescaledb \
-            "docker run -d --name tsbs-timescaledb -e POSTGRES_PASSWORD=password -p 5432:5432 timescale/timescaledb:latest-pg16" \
+            "docker run -d --name tsbs-timescaledb -e POSTGRES_PASSWORD=password -p 5432:5432 timescale/timescaledb:latest-pg18" \
             "until docker exec tsbs-timescaledb pg_isready -U postgres >/dev/null 2>&1; do sleep 2; done" \
             "cat \"$WORKDIR/timescaledb-data.gz\" | gunzip | ./bin/tsbs_load_timescaledb --workers=2 --batch-size=5000 --reporting-period=5s --host=localhost --port=5432 --user=postgres --pass=password --db-name=benchmark --admin-db-name=postgres --postgres=sslmode=disable --do-create-db=true" \
             "cat \"$WORKDIR/timescaledb-queries.gz\" | gunzip | ./bin/tsbs_run_queries_timescaledb --workers=2 --max-queries=$QUERY_COUNT --hosts=localhost --port=5432 --user=postgres --pass=password --db-name=benchmark --postgres=sslmode=disable"
@@ -154,15 +172,15 @@ jobs:
           benchmark_db \
             mongo \
             tsbs-mongo \
-            "docker run -d --name tsbs-mongo -p 27017:27017 mongo:latest" \
-            "until docker exec tsbs-mongo mongosh --quiet --eval \"db.runCommand({ ping: 1 }).ok\" | grep -q 1; do sleep 2; done" \
-            "cat \"$WORKDIR/mongo-data.gz\" | gunzip | ./bin/tsbs_load_mongo --workers=2 --batch-size=5000 --reporting-period=5s --db-name=benchmark --url=localhost:27017" \
+            "docker run -d --name tsbs-mongo -p 27017:27017 mongodb/mongodb-community-server:latest --bind_ip_all" \
+            "until docker exec tsbs-mongo mongosh --quiet --eval \"db.runCommand({ ping: 1 }).ok\" | grep -q 1 && nc -z localhost 27017; do sleep 2; done" \
+            "cat \"$WORKDIR/mongo-data.gz\" | gunzip | ./bin/tsbs_load_mongo --workers=2 --batch-size=5000 --reporting-period=5s --db-name=benchmark --url=mongodb://localhost:27017" \
             "cat \"$WORKDIR/mongo-queries.gz\" | gunzip | ./bin/tsbs_run_queries_mongo --workers=2 --max-queries=$QUERY_COUNT --db-name=benchmark --url=mongodb://localhost:27017"
 
           benchmark_db \
             influx \
             tsbs-influx \
-            "docker run -d --name tsbs-influx -p 8086:8086 influxdb:1.8" \
+            "docker run -d --name tsbs-influx -p 8086:8086 influxdb:latest" \
             "until curl -fsS http://localhost:8086/ping >/dev/null; do sleep 2; done" \
             "cat \"$WORKDIR/influx-data.gz\" | gunzip | ./bin/tsbs_load_influx --workers=2 --batch-size=5000 --reporting-period=5s --db-name=benchmark --urls=http://localhost:8086" \
             "cat \"$WORKDIR/influx-queries.gz\" | gunzip | ./bin/tsbs_run_queries_influx --workers=2 --max-queries=$QUERY_COUNT --db-name=benchmark --urls=http://localhost:8086"
