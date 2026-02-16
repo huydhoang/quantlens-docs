@@ -1,16 +1,47 @@
-# Remaining Tasks
+# Integration Questions
 
-## Completed
-- [x] **Local Desktop Frontend** — Evaluated Tauri vs Electron, Vite vs Rspack, and Vite SPA vs TanStack Start vs Next.js vs Astro. Decision: Tauri + Vite + React + TanStack Query/Router. See [local_frontend.md](local_frontend.md)
-- [x] **WebSocket Support** — Resolved by switching from TanStack Start to Vite + React SPA. WebSocket is native in the browser — connections managed directly in React and integrated with TanStack Query cache via `queryClient.setQueryData()`. No framework abstraction needed. See [local_frontend.md](local_frontend.md)
-- [x] **NautilusTrader** — Verified architecture (library not service), BacktestEngine/BacktestNode API, ParquetDataCatalog, one-node-per-process constraint, no REST/gRPC/SQLAlchemy
-- [x] **Monaco Editor** — Verified Python has syntax colorization only (no IntelliSense/validation), onValidate doesn't fire for Python, Pyodide viable for client-side AST parsing
-- [x] **PyPortfolioOpt** — `add_sector_constraints(sector_mapper, sector_lower, sector_upper)` confirmed on `BaseConvexOptimizer`. Black-Litterman fully supported via `BlackLittermanModel` (absolute/relative views, Idzorek confidence method, posterior returns/covariance, `bl_weights()`). No built-in ESG-specific API, but generic `add_constraint()` handles any linear constraint. **Riskfolio-Lib** is a significantly more comprehensive alternative: 24 convex risk measures, Risk Parity, HRP/HERC hierarchical clustering, Black-Litterman (standard + Augmented + Bayesian), built-in constraint builders for asset classes/sectors/risk factors, and graph-based constraints. Consider Riskfolio-Lib over PyPortfolioOpt for production.
-- [x] **Data Providers (Tiingo/Finnhub/Alpaca)** — **Tiingo:** Rate limits are plan-dependent (hourly + daily + monthly bandwidth, see pricing page); "50 req/hr" was incorrect. Has WebSocket streams for IEX (US equities intraday), Crypto, and Forex. EOD REST data goes back decades with split/dividend adjustments (CRSP methodology). Supports JSON and CSV response formats. **Finnhub:** Free tier: 60 calls/min + hard 30 calls/sec cap. **Stock Candles (OHLCV) and Tick Data are Premium-only** — free tier cannot fetch historical price data, only quotes, fundamentals, news, recommendations, and earnings calendar (1 month). WebSocket available for real-time trade streaming (free tier, 1 connection per API key). **Alpaca:** ~200 calls/min on free tier. WebSocket available for real-time market data. Supports 1min–1day bars for historical data.
+Cross-referencing [system_design.md](system_design.md), [local_frontend.md](local_frontend.md), and [asgi_web_server.md](asgi_web_server.md) against all other architecture docs surfaced the following open questions. See [integration_questions.md](integration_questions.md) for full context on each item.
 
-## Not Started
-- [ ] **TimescaleDB** — Verify hypertable configuration for OHLCV storage, chunk interval recommendations for financial data, compression policies, continuous aggregates for multi-timeframe rollups.
-- [ ] **Redis** — Verify pub/sub vs Streams for real-time backtest progress broadcasting, Celery broker configuration, cache eviction strategies for market data.
-- [ ] **Deployment Architecture** — Verify Docker Compose configuration for backend services (FastAPI, Celery workers, databases, Redis) that the Tauri desktop app connects to. Evaluate if a simplified setup (e.g., bundled Python backend) is feasible for MVP distribution.
-- [ ] **Custom Dataset Upload** — User story mentions "bring-your-own data" but system_design.md has no upload flow. Design file upload → validation → Parquet conversion → ParquetDataCatalog registration pipeline.
-- [ ] **Strategy Sandboxing** — Verify Python sandboxing approach (RestrictedPython, nsjail, Docker isolation, or Pyodide server-side). Current doc says "restricted environment, no network access" but doesn't specify mechanism.
+## Frontend ↔ API Layer Communication
+- [ ] **1.1 API process ownership** — Does FastAPI run inside Docker Compose or as a native process managed by Tauri? Affects port binding, startup orchestration, and dev workflow.
+- [ ] **1.2 Service discovery** — How does the Tauri app discover FastAPI (and the Tier 2 gateway on port 8001)? Hardcoded ports, Tauri IPC, or Docker networking?
+- [ ] **1.3 CORS configuration** — `asgi_web_server.md` allows `http://localhost:3000` (Vite dev), but production Tauri uses `tauri://` or `https://tauri.localhost`. What's the production CORS strategy?
+
+## Backtest Execution: FastAPI ↔ Celery ↔ NautilusTrader
+- [ ] **2.1 Frontend → backtest path** — Contradictory diagrams: one shows `Frontend → FastAPI → Celery`, another shows `Tauri → Redis` directly. Which is canonical?
+- [ ] **2.2 WebSocket progress ownership** — Does Tier 1 (FastAPI) or Tier 2 (vanilla ASGI on 8001) own the backtest progress WebSocket?
+- [ ] **2.3 NautilusKernel in FastAPI lifespan** — `asgi_web_server.md` initializes a kernel in FastAPI, but all docs say backtests run in Celery workers. What does the FastAPI-hosted kernel do?
+- [ ] **2.4 ProcessPoolExecutor vs Celery** — Both are used for CPU-bound work. What's the decision boundary (skfolio in-process vs backtests in Celery)? Does `ProcessPoolExecutor` conflict with `uvicorn --workers 4`?
+
+## Two-Tier Architecture
+- [ ] **3.1 MVP scope** — Is the two-tier setup (FastAPI on 8000 + vanilla ASGI on 8001) for MVP or future? `system_design.md` and `local_frontend.md` show only a single API layer.
+- [ ] **3.2 Shared NautilusTrader kernel** — The two-tier diagram shows a "shared" kernel, but NautilusTrader enforces one-BacktestNode-per-process. How do two Uvicorn processes share it?
+
+## Data Layer
+- [ ] **4.1 QuestDB vs TimescaleDB** — `system_design.md` uses QuestDB; `ohlcv_database.md` recommends TimescaleDB for Phase 1. Which ships in Docker Compose?
+- [ ] **4.2 QuestDB write protocol** — Three patterns shown: ILP over HTTP (port 9000), ILP over TCP (port 9009), PGWire SQL INSERT (port 8812). Which is canonical, or are different protocols for different tiers?
+- [ ] **4.3 MongoDB presence** — Deployment diagram includes MongoDB; main Local App diagram omits it. Is MongoDB confirmed for the local Docker stack or deferred?
+- [ ] **4.4 PostgreSQL connection pools** — How many asyncpg pools does FastAPI maintain (PostgreSQL + QuestDB PGWire + potentially TimescaleDB)?
+
+## Real-Time Data Flow
+- [ ] **5.1 Data ingestion service** — Is the Tier 2 vanilla ASGI gateway also the data ingestion service, or is ingestion a separate process?
+- [ ] **5.2 Finnhub trade → OHLCV mismatch** — Tier 2 inserts into `ohlcv_1m`, but Finnhub WebSocket delivers raw trades. Where does bar aggregation happen (QuestDB `SAMPLE BY` or Python)?
+- [ ] **5.3 Frontend market data delivery** — Does the React frontend get live data via dedicated WebSocket, REST polling, or WebSocket → TanStack Query cache?
+
+## Tauri Integration
+- [ ] **6.1 Tauri Rust backend usage** — Is Tauri purely a WebView shell, or does it use `#[tauri::command]` for file I/O, system monitoring, or native notifications?
+- [ ] **6.2 Startup orchestration** — Does the user run `docker compose up` manually before opening Tauri, or does Tauri launch Docker on startup? What's the health check / retry UX?
+
+## Strategy Execution Security
+- [ ] **7.1 Sandboxing mechanism** — `system_design.md` says "restricted environment, no network access" but specifies no mechanism. What's the interim plan for MVP? For a single-user local app, is the threat model accidental harm (infinite loops) rather than malicious code?
+
+## Platform App Integration (Future)
+- [ ] **8.1 Local → platform data flow** — What exactly is "submit results"? Raw trades, equity curves, strategy code? What's the API contract and auth model between local and platform apps?
+
+## Data Provider Contradictions
+- [ ] **9.1 Tiingo rate limits** — `data_providers.md` lists "50 requests/hour" but this was previously identified as incorrect (limits are plan-dependent). Correct the table to match actual free-tier limits.
+
+## Missing Specifications
+- [ ] **10.1 Custom dataset upload** — Design the file upload → validation → Parquet conversion → ParquetDataCatalog registration pipeline (file formats, validation rules, storage destination, UI component).
+- [ ] **10.2 Authentication model** — Is auth needed for the local app? The USERS table and JWT auth are mentioned, but a single-user desktop app may not need them.
+- [ ] **10.3 Error handling / retry strategy** — Define unified approach for data provider failures, backtest failures, QuestDB write failures, and frontend WebSocket reconnection.
