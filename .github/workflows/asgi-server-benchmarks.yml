@@ -123,14 +123,14 @@ jobs:
             echo "# ASGI Server Benchmark Results"
             echo
             echo "- Requests per benchmark: 100,000"
-            echo "- Client concurrency: 2"
+            echo "- Client concurrency: 4"
             echo
             echo "| Server configuration | Throughput (req/s) | Min duration (ms) | Max duration (ms) | Mean duration (ms) | Median duration (ms) |"
             echo "| --- | ---: | ---: | ---: | ---: | ---: |"
           } > "$RESULTS_FILE"
 
           REQUESTS=100000
-          CONCURRENCY=2
+          CONCURRENCY=4
           STARTUP_WAIT_SECONDS=60
 
           run_benchmark() {
