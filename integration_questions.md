@@ -149,14 +149,13 @@ The `psycopg2` compatibility issues (no scrollable cursors) are not a concern be
 - PGWire SQL INSERT (port 8812) — shown in Tier 2 code
 - Are different protocols used for different tiers (ILP for bulk ingestion, PGWire for individual tick writes)?
 
-### 4.3 MongoDB placement in architecture
+### 4.3 MongoDB → DuckDB (RESOLVED)
 
-`system_design.md` mentions MongoDB in the Deployment Architecture diagram (`MongoDB — Fundamentals · Economic Indicators`). `asgi_web_server.md` shows MongoDB queries in the Tier 1 endpoints and the two-tier diagram. But `system_design.md`'s main Local App diagram does **not** include MongoDB — it only shows PostgreSQL and QuestDB.
+**RESOLVED:** MongoDB has been replaced by **DuckDB** (embedded, in-process) for fundamentals and economic indicators.
 
-**Question:** Is MongoDB a confirmed part of the local Docker stack?
-- The main system diagram omits it, but the deployment diagram includes it
-- Should the Local App flowchart be updated to include MongoDB?
-- Or is MongoDB deferred to a later phase?
+MongoDB's official Docker image and the community server image both encountered persistent **connection errors** during local benchmarking — a common issue with Docker-containerized databases for desktop app use cases. DuckDB eliminates this class of problems entirely by running embedded in the Python process with zero configuration. See [nosql_database.md](nosql_database.md) for the full rationale.
+
+The deployment architecture diagram in `system_design.md` has been updated to show DuckDB as an embedded database alongside LanceDB, separate from the Docker Compose services.
 
 ### 4.4 PostgreSQL — single instance or separate per concern?
 

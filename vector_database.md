@@ -145,6 +145,8 @@ ChromaDB is a Python-native embedded vector database, often the first choice for
 | Use Case | Description | Why LanceDB |
 |----------|-------------|-------------|
 | **Local LLM chat** | RAG pipeline grounding LLM responses with strategy docs, backtest results, and financial research | Embedded operation, built-in embedding functions, hybrid search for combining semantic similarity with metadata filters |
+| **Expert analyses & company news** | Store and retrieve analyst reports, earnings call transcripts, and financial news for LLM-powered analysis | Semantic search over text-heavy financial content with metadata filtering by ticker, date, and source |
+| **LLM financial modeling** | Feed fundamentals + price patterns to LLM for DCF models, risk analysis, and valuation | Retrieve similar historical patterns via vector similarity, combine with structured data from DuckDB |
 | **Strategy similarity search** | Find strategies with similar logic, parameters, or performance characteristics | Vector search over strategy embeddings with metadata filtering by asset class, timeframe, or Sharpe ratio |
 | **Documentation search** | Semantic search over NautilusTrader docs, QuantLens guides, and user notes | Full-text + vector hybrid search for precise retrieval |
 | **Anomaly detection** | Flag unusual portfolio metrics or backtest results by comparing against historical embeddings | Lance format's columnar storage enables efficient batch comparisons |
@@ -182,6 +184,8 @@ ChromaDB is a Python-native embedded vector database, often the first choice for
 
 ## 6. Integration Architecture
 
+### Strategy & Documentation RAG Pipeline
+
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                    User Query (Natural Language)             │
@@ -203,6 +207,11 @@ ChromaDB is a Python-native embedded vector database, often the first choice for
 │  │   (vectors)  │  │   (vectors)  │  │   (vectors)  │      │
 │  └──────────────┘  └──────────────┘  └──────────────┘      │
 │                                                             │
+│  ┌──────────────┐  ┌──────────────┐                        │
+│  │expert_analyses│ │ company_news │                        │
+│  │   (vectors)  │  │   (vectors)  │                        │
+│  └──────────────┘  └──────────────┘                        │
+│                                                             │
 │  Hybrid Search: vector similarity + full-text + metadata    │
 └───────────────────────────┬─────────────────────────────────┘
                             │
@@ -213,15 +222,65 @@ ChromaDB is a Python-native embedded vector database, often the first choice for
 └─────────────────────────────────────────────────────────────┘
 ```
 
+### Hybrid DuckDB + LanceDB Architecture for LLM Financial Analysis
+
+When feeding fundamentals and price patterns to an LLM for financial modeling, vector search adds value for **semantic retrieval of patterns, expert analyses, and similar historical setups** — a fundamentally different operation from the structured queries that DuckDB handles.
+
+| Layer | Technology | Purpose |
+|-------|-----------|---------|
+| **Structured Storage** | DuckDB (see [nosql_database.md](nosql_database.md)) | Fundamentals, economic indicators, screening queries |
+| **Time-Series Storage** | QuestDB (see [ohlcv_database.md](ohlcv_database.md)) | OHLCV prices, tick data, market data |
+| **Vector Store** | LanceDB | Expert analyses, company news, pattern embeddings, semantic search |
+| **Orchestration** | Python (LangChain/LlamaIndex) | Retrieve structured + semantic context → LLM prompt |
+
+**Why vector search makes sense here (but not for raw fundamentals)**:
+
+- **Pattern matching**: "Find stocks with price action similar to current NVDA setup" → Embed 30-day price curves, query by vector similarity
+- **Expert analysis retrieval**: "What did analysts say about SaaS companies with declining growth?" → Embed analyst reports, retrieve semantically similar analyses
+- **Fundamental clustering**: "Companies with similar margin compression trajectories" → Embed normalized fundamental sequences as text descriptions
+
+**When to skip vector search**: If the LLM use case is purely "query latest AAPL fundamentals" without semantic pattern matching, DuckDB's full-text search (FTS) extension suffices. Add vectors only when you need "find similar patterns" semantics.
+
+**Why LanceDB for this hybrid workflow**: Since QuantLens already uses DuckDB for structured data, LanceDB's Arrow-native format eliminates serialization overhead between the two databases. Both run embedded — no Docker networking complexity.
+
+```python
+import duckdb
+import lancedb
+
+# 1. Structured data in DuckDB
+con = duckdb.connect('fundamentals.db')
+fundamentals = con.execute("""
+    SELECT ticker, revenue, net_income, eps, pe_ratio
+    FROM fundamentals
+    WHERE ticker = 'NVDA' AND period >= '2023-Q1'
+""").fetchdf()
+
+# 2. Semantic retrieval from LanceDB (expert analyses, similar patterns)
+db = lancedb.connect("./data/lancedb")
+analyses_table = db.open_table("expert_analyses")
+
+# Find similar expert analyses for context
+similar_analyses = analyses_table.search(
+    "NVDA revenue growth deceleration data center demand"
+).metric("cosine").limit(5).to_pandas()
+
+# 3. Build LLM prompt with both structured + semantic context
+prompt = f"""
+Based on these expert analyses: {similar_analyses['text'].tolist()}
+And current fundamentals: {fundamentals.to_json()}
+Build a DCF model and identify key risks.
+"""
+```
+
 ### Data Flow
 
-1. **Ingestion**: Strategy files, backtest results (JSON/Parquet), and documentation are chunked, embedded (locally via Sentence Transformers), and stored in LanceDB tables.
-2. **Query**: User's natural language question is embedded using the same model, then searched against LanceDB with optional metadata filters (date range, strategy type, asset class).
-3. **Retrieval**: Top-k results are returned as a Pandas DataFrame with text content, similarity scores, and metadata.
-4. **Generation**: Retrieved context is passed to the LLM (local or API-based) as grounding material for the response.
+1. **Ingestion**: Strategy files, backtest results (JSON/Parquet), expert analyses, company news, and documentation are chunked, embedded (locally via Sentence Transformers), and stored in LanceDB tables.
+2. **Query**: User's natural language question is embedded using the same model, then searched against LanceDB with optional metadata filters (date range, strategy type, asset class, ticker).
+3. **Retrieval**: Top-k results are returned as a Pandas DataFrame with text content, similarity scores, and metadata. Structured data is retrieved from DuckDB via SQL.
+4. **Generation**: Retrieved context (semantic + structured) is passed to the LLM (local or API-based) as grounding material for the response.
 
 ---
 
 ## Bottom Line
 
-For **local LLM chat and semantic search**, LanceDB is the right choice. Its embedded architecture eliminates infrastructure overhead, its Lance format bridges vector search and tabular analytics, and its built-in embedding functions enable a fully local RAG pipeline with no external dependencies. Qdrant and Weaviate are strong alternatives if QuantLens later needs a dedicated vector search service or multi-modal capabilities, but for the current local-first architecture, LanceDB's in-process library approach is the simplest and most efficient path.
+For **local LLM chat, semantic search, and LLM-powered financial analysis**, LanceDB is the right choice. Its embedded architecture eliminates infrastructure overhead, its Lance format bridges vector search and tabular analytics, and its built-in embedding functions enable a fully local RAG pipeline with no external dependencies. The hybrid DuckDB + LanceDB architecture — with DuckDB handling structured fundamentals and LanceDB handling expert analyses, company news, and pattern embeddings — provides the optimal split between SQL analytics and semantic retrieval, with both databases running embedded and sharing data via Arrow tables. Qdrant and Weaviate are strong alternatives if QuantLens later needs a dedicated vector search service or multi-modal capabilities, but for the current local-first architecture, LanceDB's in-process library approach is the simplest and most efficient path.

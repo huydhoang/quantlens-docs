@@ -335,9 +335,9 @@ erDiagram
 
 ## Deployment Architecture
 
-### Local App (Docker Compose)
+### Local App (Docker Compose + Embedded)
 
-All services run locally via `docker compose up`:
+All services run locally — Docker containers via `docker compose up`, plus embedded databases (DuckDB, LanceDB) in the Python process:
 
 ```mermaid
 graph TB
@@ -348,7 +348,11 @@ graph TB
 
         D[PostgreSQL<br/>Strategies · Results · Users]
         E[QuestDB<br/>OHLCV Market Data]
-        F[MongoDB<br/>Fundamentals · Economic Indicators]
+    end
+
+    subgraph "Embedded (In-Process)"
+        F[DuckDB<br/>Fundamentals · Economic Indicators]
+        L[LanceDB<br/>Expert Analyses · Company News · RAG]
     end
 
     subgraph "External APIs"
@@ -361,6 +365,8 @@ graph TB
     B -->|Consume| C
     B -->|Read/Write| D
     B -->|Read| E
+    B -->|Read/Write| F
+    B -->|Read| L
     B -->|Fetch| G
     B -->|Fetch| H
     B -->|Fetch| TI
