@@ -1,0 +1,187 @@
+name: ASGI Server Benchmarks
+
+on:
+  push:
+
+jobs:
+  benchmark-asgi-servers:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install benchmark dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install fastapi uvicorn granian httpx
+
+      - name: Benchmark FastAPI and vanilla ASGI servers
+        run: |
+          set -euo pipefail
+
+          APP_DIR=/tmp/asgi-bench
+          RESULTS_FILE="$GITHUB_WORKSPACE/benchmarks/asgi_server_benchmarks.md"
+          mkdir -p "$APP_DIR" "$GITHUB_WORKSPACE/benchmarks"
+
+          cat <<'PY' > "$APP_DIR/fastapi_app.py"
+          from fastapi import FastAPI
+
+          app = FastAPI()
+
+
+          @app.get("/")
+          async def root():
+              return {"message": "ok"}
+          PY
+
+          cat <<'PY' > "$APP_DIR/vanilla_app.py"
+          import json
+
+
+          async def app(scope, receive, send):
+              if scope["type"] != "http":
+                  return
+
+              body = json.dumps({"message": "ok"}).encode("utf-8")
+              await send(
+                  {
+                      "type": "http.response.start",
+                      "status": 200,
+                      "headers": [(b"content-type", b"application/json")],
+                  }
+              )
+              await send({"type": "http.response.body", "body": body})
+          PY
+
+          cat <<'PY' > "$APP_DIR/benchmark_client.py"
+          import argparse
+          import asyncio
+          import statistics
+          import time
+
+          import httpx
+
+
+          async def worker(client: httpx.AsyncClient, url: str, requests: int, durations: list[float]) -> None:
+              for _ in range(requests):
+                  start = time.perf_counter()
+                  response = await client.get(url)
+                  response.raise_for_status()
+                  durations.append((time.perf_counter() - start) * 1000.0)
+
+
+          async def run(url: str, total_requests: int, concurrency: int) -> tuple[float, float, float, float, float]:
+              durations: list[float] = []
+              requests_per_worker = total_requests // concurrency
+              remainder = total_requests % concurrency
+
+              async with httpx.AsyncClient(timeout=10.0) as client:
+                  start = time.perf_counter()
+                  tasks = []
+                  for i in range(concurrency):
+                      n = requests_per_worker + (1 if i < remainder else 0)
+                      tasks.append(asyncio.create_task(worker(client, url, n, durations)))
+                  await asyncio.gather(*tasks)
+                  elapsed = time.perf_counter() - start
+
+              throughput = total_requests / elapsed
+              min_ms = min(durations)
+              max_ms = max(durations)
+              mean_ms = statistics.fmean(durations)
+              median_ms = statistics.median(durations)
+              return throughput, min_ms, max_ms, mean_ms, median_ms
+
+
+          def main() -> None:
+              parser = argparse.ArgumentParser()
+              parser.add_argument("--url", required=True)
+              parser.add_argument("--requests", type=int, required=True)
+              parser.add_argument("--concurrency", type=int, required=True)
+              args = parser.parse_args()
+
+              throughput, min_ms, max_ms, mean_ms, median_ms = asyncio.run(
+                  run(args.url, args.requests, args.concurrency)
+              )
+
+              print(f"{throughput:.2f},{min_ms:.4f},{max_ms:.4f},{mean_ms:.4f},{median_ms:.4f}")
+
+
+          if __name__ == "__main__":
+              main()
+          PY
+
+          {
+            echo "# ASGI Server Benchmark Results"
+            echo
+            echo "- Requests per benchmark: 1,000,000"
+            echo "- Client concurrency: 200"
+            echo
+            echo "| Server configuration | Throughput (req/s) | Min duration (ms) | Max duration (ms) | Mean duration (ms) | Median duration (ms) |"
+            echo "| --- | ---: | ---: | ---: | ---: | ---: |"
+          } > "$RESULTS_FILE"
+
+          REQUESTS=1000000
+          CONCURRENCY=200
+
+          run_benchmark() {
+            local label="$1"
+            local server_cmd="$2"
+            local port="$3"
+            local log_file="/tmp/asgi-bench-${port}.log"
+
+            (cd "$APP_DIR" && bash -c "$server_cmd") > "$log_file" 2>&1 &
+            local server_pid=$!
+
+            for _ in $(seq 1 60); do
+              if curl -fsS "http://127.0.0.1:${port}/" >/dev/null 2>&1; then
+                break
+              fi
+              sleep 1
+            done
+
+            if ! curl -fsS "http://127.0.0.1:${port}/" >/dev/null 2>&1; then
+              echo "Server failed to start for ${label}" >&2
+              cat "$log_file" >&2
+              if [ -n "${server_pid:-}" ] && [ "$server_pid" -gt 0 ] 2>/dev/null; then
+                kill "$server_pid" || true
+                wait "$server_pid" || true
+              fi
+              return 1
+            fi
+
+            local metrics
+            metrics=$(python "$APP_DIR/benchmark_client.py" \
+              --url "http://127.0.0.1:${port}/" \
+              --requests "$REQUESTS" \
+              --concurrency "$CONCURRENCY")
+
+            if [ -n "${server_pid:-}" ] && [ "$server_pid" -gt 0 ] 2>/dev/null; then
+              kill "$server_pid" || true
+              wait "$server_pid" || true
+            fi
+
+            IFS=',' read -r throughput min_ms max_ms mean_ms median_ms <<< "$metrics"
+            echo "| ${label} | ${throughput} | ${min_ms} | ${max_ms} | ${mean_ms} | ${median_ms} |" >> "$RESULTS_FILE"
+          }
+
+          run_benchmark "FastAPI on uvicorn" "python -m uvicorn fastapi_app:app --host 127.0.0.1 --port 8000 --workers 1" 8000
+          run_benchmark "FastAPI on granian" "granian --interface asgi --host 127.0.0.1 --port 8001 --workers 1 fastapi_app:app" 8001
+          run_benchmark "Vanilla ASGI uvicorn" "python -m uvicorn vanilla_app:app --host 127.0.0.1 --port 8002 --workers 1" 8002
+          run_benchmark "Vanilla ASGI granian" "granian --interface asgi --host 127.0.0.1 --port 8003 --workers 1 vanilla_app:app" 8003
+
+          cat "$RESULTS_FILE" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: asgi-server-benchmarks
+          path: benchmarks/asgi_server_benchmarks.md
