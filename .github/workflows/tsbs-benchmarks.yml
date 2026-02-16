@@ -32,6 +32,7 @@ jobs:
           images=(
             "questdb/questdb:latest"
             "timescale/timescaledb:latest-pg18"
+            "mongodb/mongodb-community-server:8.0-ubi8"
             "influxdb/influxdb:latest"
             "clickhouse/clickhouse-server:latest"
             "victoriametrics/victoria-metrics:latest"
@@ -69,8 +70,10 @@ jobs:
           QUERY_COUNT=100
           QUERY_TYPES=(single-groupby-1-1-1 double-groupby-1 high-cpu-all)
           POST_LOAD_WAIT_SECS=5
+          MONGODB_VERSION=8.0-ubi8
+          CLICKHOUSE_PASSWORD=$(openssl rand -hex 12)
 
-          CONTAINERS=(tsbs-questdb tsbs-timescaledb tsbs-influx tsbs-clickhouse tsbs-victoriametrics tsbs-cassandra)
+          CONTAINERS=(tsbs-questdb tsbs-timescaledb tsbs-mongo tsbs-influx tsbs-clickhouse tsbs-victoriametrics tsbs-cassandra)
           trap 'docker rm -f "${CONTAINERS[@]}" >/dev/null 2>&1 || true' EXIT INT TERM
 
           write_rate() {
@@ -203,6 +206,14 @@ jobs:
             "cat __QUERY_FILE__ | gunzip | ./bin/tsbs_run_queries_timescaledb --workers=2 --max-queries=$QUERY_COUNT --hosts=localhost --port=5432 --user=postgres --pass=password --db-name=benchmark --postgres=sslmode=disable"
 
           benchmark_db \
+            mongo \
+            tsbs-mongo \
+            "docker run -d --name tsbs-mongo -p 27017:27017 mongodb/mongodb-community-server:$MONGODB_VERSION" \
+            "until docker exec tsbs-mongo mongosh --quiet --eval \"db.runCommand({ ping: 1 }).ok\" | grep -q 1; do sleep 2; done" \
+            "cat \"$WORKDIR/mongo-data.gz\" | gunzip | ./bin/tsbs_load_mongo --workers=2 --batch-size=5000 --reporting-period=5s --db-name=benchmark --url=mongodb://localhost:27017" \
+            "cat __QUERY_FILE__ | gunzip | ./bin/tsbs_run_queries_mongo --workers=2 --max-queries=$QUERY_COUNT --db-name=benchmark --url=mongodb://localhost:27017"
+
+          benchmark_db \
             influx \
             tsbs-influx \
             "docker run -d --name tsbs-influx -p 8086:8086 influxdb:1.8" \
@@ -213,10 +224,10 @@ jobs:
           benchmark_db \
             clickhouse \
             tsbs-clickhouse \
-            "docker run -d --name tsbs-clickhouse -p 8123:8123 -p 9000:9000 clickhouse/clickhouse-server:latest" \
-            "until docker exec tsbs-clickhouse clickhouse-client --query \"SELECT 1\" >/dev/null 2>&1; do sleep 2; done" \
-            "cat \"$WORKDIR/clickhouse-data.gz\" | gunzip | ./bin/tsbs_load_clickhouse --workers=2 --batch-size=5000 --reporting-period=5s --host=localhost --db-name=benchmark --user=default" \
-            "cat __QUERY_FILE__ | gunzip | ./bin/tsbs_run_queries_clickhouse --workers=2 --max-queries=$QUERY_COUNT --hosts=localhost --db-name=benchmark --user=default"
+            "docker run -d --name tsbs-clickhouse -e CLICKHOUSE_PASSWORD=$CLICKHOUSE_PASSWORD -p 8123:8123 -p 9000:9000 clickhouse/clickhouse-server:latest" \
+            "until docker exec tsbs-clickhouse clickhouse-client --user default --password $CLICKHOUSE_PASSWORD --query \"SELECT 1\" >/dev/null 2>&1; do sleep 2; done" \
+            "cat \"$WORKDIR/clickhouse-data.gz\" | gunzip | ./bin/tsbs_load_clickhouse --workers=2 --batch-size=5000 --reporting-period=5s --host=localhost --db-name=benchmark --user=default --password=$CLICKHOUSE_PASSWORD" \
+            "cat __QUERY_FILE__ | gunzip | ./bin/tsbs_run_queries_clickhouse --workers=2 --max-queries=$QUERY_COUNT --hosts=localhost --db-name=benchmark --user=default --password=$CLICKHOUSE_PASSWORD"
 
           benchmark_db \
             victoriametrics \
