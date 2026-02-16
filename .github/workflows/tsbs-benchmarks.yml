@@ -62,7 +62,7 @@ jobs:
           WORKDIR=/tmp/tsbs-bench
           mkdir -p "$WORKDIR"
 
-          # Shared synthetic dataset config (~1,002,240 rows per DB format for cpu-only)
+          # Shared synthetic dataset config (~1M rows per DB format for cpu-only)
           TS_START="2016-01-01T00:00:00Z"
           TS_END_DATA="2016-01-02T00:00:00Z"
           TS_END_QUERY="2016-01-02T00:00:01Z"
@@ -94,12 +94,14 @@ jobs:
               echo "| $db | $qtype | n/a | n/a | n/a | n/a |" >> "$GITHUB_WORKSPACE/benchmarks/tsbs_results.md"
               return
             fi
+            # Expected TSBS format: "min: Xms, med: Yms, mean: Zms, max: Wms"
             stats=$(sed -nE 's/^min:[[:space:]]*([0-9.]+)ms, med:[[:space:]]*([0-9.]+)ms, mean:[[:space:]]*([0-9.]+)ms, max:[[:space:]]*([0-9.]+)ms.*/\1|\2|\3|\4/p' "$log_file" | tail -n 1 || true)
             if [ -z "${stats:-}" ]; then
+              echo "Warning: unable to parse query stats for $db/$qtype from $log_file" >&2
               echo "| $db | $qtype | n/a | n/a | n/a | n/a |" >> "$GITHUB_WORKSPACE/benchmarks/tsbs_results.md"
             else
-              IFS='|' read -r min med avg max <<< "$stats"
-              echo "| $db | $qtype | $min | $max | $avg | $med |" >> "$GITHUB_WORKSPACE/benchmarks/tsbs_results.md"
+              IFS='|' read -r min median avg max <<< "$stats"
+              echo "| $db | $qtype | $min | $max | $avg | $median |" >> "$GITHUB_WORKSPACE/benchmarks/tsbs_results.md"
             fi
           }
 
@@ -143,16 +145,16 @@ jobs:
             local load_status=${PIPESTATUS[0]}
             set -e
 
-            echo "| $db | $(write_rate "$WORKDIR/${db}-load.log") |" >> "$GITHUB_WORKSPACE/benchmarks/tsbs_results.md"
-
             if [ "$load_status" -eq 0 ]; then
+              echo "| $db | $(write_rate "$WORKDIR/${db}-load.log") |" >> "$GITHUB_WORKSPACE/benchmarks/tsbs_results.md"
               sleep "$POST_LOAD_WAIT_SECS"
               for qtype in "${QUERY_TYPES[@]}"; do
                 qfile="$WORKDIR/${db}-${qtype}-queries.gz"
                 qlog="$WORKDIR/${db}-${qtype}-query.log"
+                safe_qfile=$(printf '%q' "$qfile")
 
                 set +e
-                eval "${query_cmd_tpl//__QUERY_FILE__/$qfile}" | tee "$qlog"
+                eval "${query_cmd_tpl//__QUERY_FILE__/$safe_qfile}" | tee "$qlog"
                 local query_status=${PIPESTATUS[0]}
                 set -e
                 if [ "$query_status" -ne 0 ]; then
@@ -161,6 +163,7 @@ jobs:
                 fi
               done
             else
+              echo "| $db | n/a |" >> "$GITHUB_WORKSPACE/benchmarks/tsbs_results.md"
               docker rm -f "$container" >/dev/null 2>&1 || true
               return 1
             fi
@@ -177,7 +180,7 @@ jobs:
             echo "- timestamp-start: $TS_START"
             echo "- timestamp-end (data): $TS_END_DATA"
             echo "- log-interval: 10s"
-            echo "- target rows: ~1,002,240 per database format"
+            echo "- target rows: ~1M per database format"
             echo ""
             echo "## Insert throughput"
             echo "| Database | Write throughput (metrics/sec) |"
@@ -247,7 +250,8 @@ jobs:
             echo "| --- | --- | ---: | ---: | ---: | ---: |"
           } >> "$GITHUB_WORKSPACE/benchmarks/tsbs_results.md"
 
-          for db in questdb timescaledb influx cratedb clickhouse victoriametrics cassandra; do
+          for container in "${CONTAINERS[@]}"; do
+            db="${container#tsbs-}"
             for qtype in "${QUERY_TYPES[@]}"; do
               qlog="$WORKDIR/${db}-${qtype}-query.log"
               query_stats_row "$db" "$qtype" "$qlog"
