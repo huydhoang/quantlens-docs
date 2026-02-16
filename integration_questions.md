@@ -1,6 +1,10 @@
-# Integration Questions: system_design.md × local_frontend.md × asgi_web_server.md
+# Integration Questions
 
-Deep-dive cross-referencing of the three core architecture documents surfaced the following integration questions, contradictions, and unresolved design decisions.
+Deep-dive cross-referencing of [system_design.md](system_design.md), [local_frontend.md](local_frontend.md), [asgi_web_server.md](asgi_web_server.md), and [core_engine.md](core_engine.md) against all other architecture documents surfaced the following integration questions, contradictions, and unresolved design decisions.
+
+---
+
+## Cross-Review: system_design.md × local_frontend.md × asgi_web_server.md
 
 ---
 
@@ -289,3 +293,187 @@ For a local-first single-user app, the threat model is arguably just accidental 
 - Backtest failures: retry automatically or report to user?
 - QuestDB write failures: buffer in Redis and retry, or drop?
 - WebSocket disconnections from the React frontend: auto-reconnect with what backoff?
+
+---
+
+## Cross-Review: core_engine.md
+
+---
+
+## 11. BacktestEngine vs BacktestNode — Which API for Which Workflow?
+
+### 11.1 Conflicting API recommendations across docs
+
+`core_engine.md` presents two NautilusTrader APIs for different workflows:
+- **`BacktestEngine`** (low-level) — for rapid research iteration with `engine.reset()` for tight loops without process restart
+- **`BacktestNode`** (high-level) — for production backtests via Celery workers, one per process
+
+But `system_design.md` Section 2 ("NautilusTrader Integration") only mentions `BacktestEngine` in the class diagram (`NautilusBacktestService` has a `+BacktestEngine engine` field), while the Key Implementation Recommendations say: "Use `BacktestEngine` (low-level, fine-grained control) **or** `BacktestNode` with `BacktestRunConfig` objects (high-level, recommended for production)."
+
+Meanwhile, `task_queue.md` exclusively uses `BacktestNode` in its Celery integration example:
+
+```python
+@shared_task(bind=True, max_retries=2)
+def run_nautilus_backtest(self, data, strategy_id, config):
+    node = BacktestNode(configs=config)
+    node.run()
+    return node.get_results()
+```
+
+And `core_engine.md`'s own Celery example uses `BacktestNode`:
+
+```python
+job = group(run_backtest.s(strategy_id, params) for params in param_grid)
+```
+
+**Question:** Which API is used where?
+- Is `BacktestEngine` used in FastAPI's process for quick "validate strategy" dry runs, while `BacktestNode` is used in Celery workers for full backtests?
+- The `system_design.md` class diagram shows `BacktestEngine` in `NautilusBacktestService` — is this service instantiated in FastAPI or in Celery workers?
+- Can `BacktestEngine.reset()` be used inside a Celery prefork worker to reuse the engine across multiple tasks, or does `worker_max_tasks_per_child=50` (from `task_queue.md`) mean each worker gets a fresh `BacktestNode` per task?
+
+---
+
+## 12. Data Pipeline: QuestDB → Parquet → ParquetDataCatalog
+
+### 12.1 Export mechanism undefined
+
+`core_engine.md` states: "One data pipeline (QuestDB → Parquet → `ParquetDataCatalog`)" and the integration table says: "Historical OHLCV stored in QuestDB (local Docker), exported to Parquet for NautilusTrader's native data catalog."
+
+But no document specifies **how** data moves from QuestDB to Parquet files:
+
+**Question:** What is the QuestDB → Parquet export mechanism?
+- QuestDB supports native Parquet export via `COPY` SQL command — is this used?
+- Is there a scheduled Celery Beat task that periodically exports from QuestDB to Parquet?
+- Or does a data ingestion service write to both QuestDB and Parquet simultaneously (dual-write)?
+- If the export is periodic, how does the system ensure Parquet files are up-to-date when a backtest starts? Does the backtest task trigger an export before running?
+
+### 12.2 Parquet catalog path and Docker volume mapping
+
+`data_providers.md` shows `ParquetDataCatalog(path="/data/validated")` as the catalog path. But NautilusTrader runs inside Celery workers, which run in Docker containers.
+
+**Question:** How does the Parquet catalog path map to Docker volumes?
+- Is `/data/validated` a Docker volume shared between the data ingestion service and Celery workers?
+- If QuestDB runs in one container and Celery workers in another, how does the export + catalog read work across containers?
+- Does `docker compose` define a shared volume for the Parquet catalog?
+
+---
+
+## 13. Parameter Sweep Scalability
+
+### 13.1 Celery worker count vs parameter grid size
+
+`core_engine.md` claims: "QuantLens's target users run hundreds to low thousands of combinations — well within Celery worker parallelism." The Celery config in `task_queue.md` sets `worker_concurrency=4`.
+
+**Question:** With 4 concurrent workers and "hundreds to low thousands" of parameter combinations, what's the expected sweep duration?
+- A 500-combination sweep with 4 workers = 125 sequential batches. If each backtest takes 5 seconds, that's ~10 minutes. Is this acceptable for research iteration?
+- Does the system provide sweep progress in the UI (e.g., "234/500 complete, ~4 min remaining")?
+- Is there a UI for configuring the parameter grid, or does the user write the grid in Python code in the Monaco editor?
+
+### 13.2 Memory pressure from parallel BacktestNodes
+
+`core_engine.md` notes VectorBT's limitation: "Large parameter grids over many assets can exceed available RAM." NautilusTrader's BacktestNode loads the `ParquetDataCatalog` per process.
+
+**Question:** With 4 Celery prefork workers, each loading a full `ParquetDataCatalog` for the same universe of symbols:
+- Does each worker load a separate copy of the data into memory, or does NautilusTrader use memory-mapped files?
+- For a 500-symbol × 20-year daily OHLCV catalog (~36M rows), what's the per-worker memory footprint?
+- `task_queue.md` sets `worker_max_tasks_per_child=50` to mitigate memory leaks — does this force a full data reload every 50 tasks?
+
+---
+
+## 14. Strategy Code: Authoring, Validation, and Execution
+
+### 14.1 Strategy template system undefined
+
+`core_engine.md` states: "QuantLens provides strategy templates and Monaco editor autocompletion to reduce NautilusTrader's boilerplate." The integration table says: "Strategy templates target NautilusTrader's `TradingStrategy` API exclusively — one template system, one validation path."
+
+But no document defines the template system:
+
+**Question:** What does the strategy template system look like?
+- Are templates pre-built `.py` files served by FastAPI (`GET /api/strategies/template`)?
+- Do templates include the full NautilusTrader boilerplate (`Strategy` base class, `on_start`, `on_bar`, `on_stop` methods), leaving the user to fill in logic?
+- Are there multiple templates (SMA crossover, momentum, mean reversion) or a single generic template?
+- How does the Monaco editor provide NautilusTrader-specific autocompletion? `system_design.md` mentions a custom `CompletionItemProvider` but doesn't specify what completions are offered.
+
+### 14.2 Strategy validation — dry run vs AST parse
+
+`core_engine.md` says strategies are validated before execution. `system_design.md`'s Monaco Editor flow shows two validation stages:
+1. Client-side: Pyodide WASM AST parsing for syntax errors
+2. Server-side: `POST /api/strategies/validate → FastAPI → Nautilus: Dry-run parse`
+
+**Question:** What does "dry-run parse" mean for NautilusTrader?
+- Does NautilusTrader have a built-in strategy validation API, or does QuantLens implement this by importing the user's class and checking for required method signatures?
+- Does the dry-run actually instantiate a `BacktestEngine` with no data, or is it purely a Python import + introspection?
+- If the dry-run imports user code, this executes arbitrary Python in the FastAPI process. Does this conflict with the sandboxing concern (question 7.1)?
+
+### 14.3 Strategy code serialization for Celery
+
+`core_engine.md` shows strategies executed in Celery workers. `task_queue.md` configures `task_serializer="json"` and `accept_content=["json"]`. But a strategy is Python source code (a class definition), not a JSON-serializable object.
+
+**Question:** How does strategy code get from the Monaco editor to a Celery worker?
+- Is the Python source stored in PostgreSQL (`STRATEGIES.python_code` column in `system_design.md` schema), and the worker loads it by ID from the database?
+- Or is the source code passed as a JSON string in the Celery task arguments?
+- If loaded from the database, the worker must `exec()` or `importlib` the code at runtime — how does this interact with NautilusTrader's strategy registration?
+
+---
+
+## 15. NautilusTrader Data Types vs Provider Data
+
+### 15.1 Adapter pattern — who converts, when?
+
+`core_engine.md` integration table: "Single adapter pattern normalizing Tiingo/Alpaca/Finnhub data to NautilusTrader `Bar`/`QuoteTick` types."
+
+But the data flow in `system_design.md` and `data_providers.md` shows data going through multiple stages: Provider → Validation → QuestDB → Parquet → ParquetDataCatalog.
+
+**Question:** At which stage does the conversion to NautilusTrader types happen?
+- During ingestion (provider response → NautilusTrader `Bar` objects → Parquet)?
+- During catalog read (Parquet files → NautilusTrader `Bar` objects inside `ParquetDataCatalog`)?
+- If conversion happens at ingestion time, the QuestDB and Parquet stores contain NautilusTrader-formatted data. Does this lock the storage schema to NautilusTrader's format?
+- If conversion happens at read time, the Parquet files store a QuantLens-native schema and the catalog adapter converts on-the-fly. Is this the intended design?
+
+---
+
+## 16. Granian vs Uvicorn Contradiction
+
+### 16.1 python_rust_or_go.md recommends Granian; asgi_web_server.md recommends Uvicorn
+
+`python_rust_or_go.md` Performance Optimization Strategy section says: "Use Granian (Rust-based ASGI server) for HTTP handling. Rust performance at the transport layer, Python business logic above it."
+
+But `asgi_web_server.md` concludes with a thorough benchmark analysis showing Uvicorn wins on database-heavy workloads and explicitly states: "Granian is not the right default for QuantLens."
+
+`core_engine.md` doesn't mention the ASGI server, but its integration table references `asgi_web_server.md`: "FastAPI on Uvicorn — API layer enqueues backtest jobs."
+
+**Question:** Which ASGI server is canonical — Granian or Uvicorn?
+- `python_rust_or_go.md` was written before `asgi_web_server.md`. Does the Uvicorn recommendation in `asgi_web_server.md` supersede Granian?
+- Should `python_rust_or_go.md`'s Granian recommendation be updated to reflect the final decision?
+
+---
+
+## 17. skfolio Integration Boundary
+
+### 17.1 Results handoff between NautilusTrader and skfolio
+
+`core_engine.md` System Flow diagram shows: `Validation → Portfolio Layer → Strategy Returns → skfolio Optimization → Allocation Weights`. The integration table says: "Portfolio optimization runs independently of the backtest engine — NautilusTrader produces trade results, skfolio optimizes allocations."
+
+But no document specifies the data contract between NautilusTrader results and skfolio inputs.
+
+**Question:** What is the NautilusTrader → skfolio handoff format?
+- skfolio's `MeanRisk` optimizer expects a DataFrame of asset returns (rows = time observations, columns = assets). NautilusTrader produces per-strategy trade results and equity curves.
+- Who converts NautilusTrader's trade-level results into asset-level return series for skfolio?
+- If a user runs 5 strategies on different asset universes, does skfolio optimize across all 5 strategies (strategy-level allocation) or across underlying assets (asset-level allocation)?
+- Is the conversion logic in the FastAPI backend, in a Celery task, or in the React frontend?
+
+---
+
+## 18. Live/Paper Trading Path
+
+### 18.1 Backtest-live parity claim vs current architecture
+
+`core_engine.md`'s key selling point: "Backtest-live parity — identical strategy code runs in backtest and live modes with zero changes." The decision rationale states this is "the most important factor for a tool targeting serious quants."
+
+But no other document describes the live trading architecture:
+
+**Question:** How does the live trading path work in QuantLens?
+- `core_engine.md` mentions broker adapters (Binance, Interactive Brokers, OKX, Bybit) — are any of these configured in QuantLens, or is live trading entirely future scope?
+- `data_providers.md` says Alpaca is for "paper trading only." Does QuantLens have a paper trading mode, or is this deferred?
+- If live/paper trading is future scope, should `core_engine.md` explicitly label it as such to avoid setting incorrect expectations about MVP capabilities?
+- The `asgi_web_server.md` Tier 2 real-time gateway assumes live signal processing with `nautilus.process_tick()`. Is this the live trading path, and if so, how does it relate to the Tier 1 backtest workflow?

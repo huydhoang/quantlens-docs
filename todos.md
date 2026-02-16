@@ -1,6 +1,6 @@
 # Integration Questions
 
-Cross-referencing [system_design.md](system_design.md), [local_frontend.md](local_frontend.md), and [asgi_web_server.md](asgi_web_server.md) against all other architecture docs surfaced the following open questions. See [integration_questions.md](integration_questions.md) for full context on each item.
+Cross-referencing [system_design.md](system_design.md), [local_frontend.md](local_frontend.md), [asgi_web_server.md](asgi_web_server.md), and [core_engine.md](core_engine.md) against all other architecture docs surfaced the following open questions. See [integration_questions.md](integration_questions.md) for full context on each item.
 
 ## Frontend ↔ API Layer Communication
 - [ ] **1.1 API process ownership** — Does FastAPI run inside Docker Compose or as a native process managed by Tauri? Affects port binding, startup orchestration, and dev workflow.
@@ -45,3 +45,17 @@ Cross-referencing [system_design.md](system_design.md), [local_frontend.md](loca
 - [ ] **10.1 Custom dataset upload** — Design the file upload → validation → Parquet conversion → ParquetDataCatalog registration pipeline (file formats, validation rules, storage destination, UI component).
 - [ ] **10.2 Authentication model** — Is auth needed for the local app? The USERS table and JWT auth are mentioned, but a single-user desktop app may not need them.
 - [ ] **10.3 Error handling / retry strategy** — Define unified approach for data provider failures, backtest failures, QuestDB write failures, and frontend WebSocket reconnection.
+
+## Core Engine (core_engine.md cross-review)
+- [ ] **11.1 BacktestEngine vs BacktestNode API assignment** — `system_design.md` class diagram uses `BacktestEngine`; `task_queue.md` uses `BacktestNode` in Celery. Which API is used where (FastAPI validation vs Celery execution)? Can `BacktestEngine.reset()` reuse engines within prefork workers?
+- [ ] **12.1 QuestDB → Parquet export mechanism** — `core_engine.md` assumes a QuestDB → Parquet → ParquetDataCatalog pipeline but no doc specifies how data moves from QuestDB to Parquet files (COPY command, Celery Beat job, or dual-write).
+- [ ] **12.2 Parquet catalog Docker volume** — Celery workers and the data ingestion service need shared access to `/data/validated`. How is this mapped in Docker Compose?
+- [ ] **13.1 Parameter sweep duration** — With 4 Celery workers and hundreds of combinations, what's the expected sweep time? Is there UI progress for sweeps?
+- [ ] **13.2 Memory pressure from parallel BacktestNodes** — 4 prefork workers each loading a full ParquetDataCatalog. Does NautilusTrader use memory-mapped files, or does each worker hold a separate copy?
+- [ ] **14.1 Strategy template system** — Referenced in `core_engine.md` and `system_design.md` but never defined. What templates exist? What Monaco completions are offered?
+- [ ] **14.2 Strategy dry-run validation** — What does NautilusTrader "dry-run parse" mean? Does it execute user code in FastAPI's process, conflicting with sandboxing (7.1)?
+- [ ] **14.3 Strategy code serialization** — Celery uses JSON serialization, but strategies are Python classes. How does code travel from Monaco → PostgreSQL → Celery worker → NautilusTrader?
+- [ ] **15.1 Data type conversion stage** — At which pipeline stage are provider responses converted to NautilusTrader `Bar`/`QuoteTick` types (ingestion time vs catalog read time)?
+- [ ] **16.1 Granian vs Uvicorn contradiction** — `python_rust_or_go.md` recommends Granian; `asgi_web_server.md` recommends Uvicorn. Which is canonical? Update the outdated doc.
+- [ ] **17.1 NautilusTrader → skfolio handoff** — No doc defines how NautilusTrader trade results are converted to the asset-return DataFrames that skfolio expects. Who does the conversion, and where?
+- [ ] **18.1 Live/paper trading scope** — `core_engine.md` highlights backtest-live parity as the key value prop, but no doc describes the live trading path. Is this MVP or future? Should docs explicitly label it?
