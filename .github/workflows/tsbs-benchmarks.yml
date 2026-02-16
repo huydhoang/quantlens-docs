@@ -32,7 +32,6 @@ jobs:
           images=(
             "questdb/questdb:latest"
             "timescale/timescaledb:latest-pg18"
-            "mongodb/mongodb-community-server:latest"
             "influxdb/influxdb:latest"
             "crate:latest"
             "clickhouse/clickhouse-server:latest"
@@ -53,7 +52,7 @@ jobs:
             echo "- \`$pulled_image\`" >> benchmarks/tsbs_results.md
           done
 
-      - name: Run TSBS write/read throughput benchmarks
+      - name: Run TSBS write/read benchmarks
         run: |
           set -euo pipefail
           git clone --depth 1 https://github.com/questdb/tsbs.git /tmp/tsbs
@@ -62,13 +61,17 @@ jobs:
 
           WORKDIR=/tmp/tsbs-bench
           mkdir -p "$WORKDIR"
+
+          # Shared synthetic dataset config (~1,002,240 rows per DB format for cpu-only)
           TS_START="2016-01-01T00:00:00Z"
-          TS_END_DATA="2016-01-01T02:00:00Z"
-          TS_END_QUERY="2016-01-01T02:00:01Z"
-          SCALE=100
-          QUERY_COUNT=200
+          TS_END_DATA="2016-01-02T00:00:00Z"
+          TS_END_QUERY="2016-01-02T00:00:01Z"
+          SCALE=116
+          QUERY_COUNT=100
+          QUERY_TYPES=(single-groupby-1-1-1 double-groupby-1 high-cpu-all)
           POST_LOAD_WAIT_SECS=5
-          CONTAINERS=(tsbs-questdb tsbs-timescaledb tsbs-mongo tsbs-influx tsbs-cratedb tsbs-clickhouse tsbs-victoriametrics tsbs-cassandra)
+
+          CONTAINERS=(tsbs-questdb tsbs-timescaledb tsbs-influx tsbs-cratedb tsbs-clickhouse tsbs-victoriametrics tsbs-cassandra)
           trap 'docker rm -f "${CONTAINERS[@]}" >/dev/null 2>&1 || true' EXIT INT TERM
 
           write_rate() {
@@ -76,23 +79,27 @@ jobs:
             local rate
             rate=$(sed -nE 's/.*mean rate ([0-9.]+) metrics\/sec.*/\1/p' "$log_file" | head -n 1 || true)
             if [ -z "${rate:-}" ]; then
-              echo "Warning: unable to parse metrics/sec from $log_file" >&2
               echo "n/a"
             else
               echo "$rate"
             fi
           }
 
-          read_qps() {
-            local log_file="$1"
-            local query_count wall_sec
-            query_count=$(sed -nE 's/.*[Rr]un complete after ([0-9]+) queries.*/\1/p' "$log_file" | tail -n 1 || true)
-            wall_sec=$(sed -nE 's/.*wall clock time: ([0-9.]+)sec.*/\1/p' "$log_file" | tail -n 1 || true)
-            if [ -z "${query_count:-}" ] || [ -z "${wall_sec:-}" ]; then
-              echo "Warning: unable to parse query throughput from $log_file" >&2
-              echo "n/a"
+          query_stats_row() {
+            local db="$1"
+            local qtype="$2"
+            local log_file="$3"
+            local stats
+            if [ ! -f "$log_file" ]; then
+              echo "| $db | $qtype | n/a | n/a | n/a | n/a |" >> "$GITHUB_WORKSPACE/benchmarks/tsbs_results.md"
+              return
+            fi
+            stats=$(sed -nE 's/^min:[[:space:]]*([0-9.]+)ms, med:[[:space:]]*([0-9.]+)ms, mean:[[:space:]]*([0-9.]+)ms, max:[[:space:]]*([0-9.]+)ms.*/\1|\2|\3|\4/p' "$log_file" | tail -n 1 || true)
+            if [ -z "${stats:-}" ]; then
+              echo "| $db | $qtype | n/a | n/a | n/a | n/a |" >> "$GITHUB_WORKSPACE/benchmarks/tsbs_results.md"
             else
-              awk -v q="$query_count" -v t="$wall_sec" 'BEGIN { if (t > 0) printf "%.2f", q / t; else print "n/a" }'
+              IFS='|' read -r min med avg max <<< "$stats"
+              echo "| $db | $qtype | $min | $max | $avg | $med |" >> "$GITHUB_WORKSPACE/benchmarks/tsbs_results.md"
             fi
           }
 
@@ -102,7 +109,7 @@ jobs:
             local run_cmd="$3"
             local wait_cmd="$4"
             local load_cmd="$5"
-            local query_cmd="$6"
+            local query_cmd_tpl="$6"
 
             docker rm -f "$container" >/dev/null 2>&1 || true
             eval "$run_cmd"
@@ -118,39 +125,64 @@ jobs:
               --format="$db" \
               | gzip > "$WORKDIR/${db}-data.gz"
 
-            ./bin/tsbs_generate_queries \
-              --use-case=cpu-only \
-              --seed=123 \
-              --scale="$SCALE" \
-              --timestamp-start="$TS_START" \
-              --timestamp-end="$TS_END_QUERY" \
-              --queries="$QUERY_COUNT" \
-              --query-type=single-groupby-1-1-1 \
-              --format="$db" \
-              | gzip > "$WORKDIR/${db}-queries.gz"
+            for qtype in "${QUERY_TYPES[@]}"; do
+              ./bin/tsbs_generate_queries \
+                --use-case=cpu-only \
+                --seed=123 \
+                --scale="$SCALE" \
+                --timestamp-start="$TS_START" \
+                --timestamp-end="$TS_END_QUERY" \
+                --queries="$QUERY_COUNT" \
+                --query-type="$qtype" \
+                --format="$db" \
+                | gzip > "$WORKDIR/${db}-${qtype}-queries.gz"
+            done
 
             set +e
             eval "$load_cmd" | tee "$WORKDIR/${db}-load.log"
             local load_status=${PIPESTATUS[0]}
-            local query_status=0
-            if [ "$load_status" -eq 0 ]; then
-              sleep "$POST_LOAD_WAIT_SECS"
-              eval "$query_cmd" | tee "$WORKDIR/${db}-query.log"
-              query_status=${PIPESTATUS[0]}
-            fi
             set -e
 
-            echo "| $db | $(write_rate "$WORKDIR/${db}-load.log") | $(read_qps "$WORKDIR/${db}-query.log") |" >> "$GITHUB_WORKSPACE/benchmarks/tsbs_results.md"
-            docker rm -f "$container" >/dev/null 2>&1 || true
-            if [ "$load_status" -ne 0 ] || [ "$query_status" -ne 0 ]; then
+            echo "| $db | $(write_rate "$WORKDIR/${db}-load.log") |" >> "$GITHUB_WORKSPACE/benchmarks/tsbs_results.md"
+
+            if [ "$load_status" -eq 0 ]; then
+              sleep "$POST_LOAD_WAIT_SECS"
+              for qtype in "${QUERY_TYPES[@]}"; do
+                qfile="$WORKDIR/${db}-${qtype}-queries.gz"
+                qlog="$WORKDIR/${db}-${qtype}-query.log"
+
+                set +e
+                eval "${query_cmd_tpl//__QUERY_FILE__/$qfile}" | tee "$qlog"
+                local query_status=${PIPESTATUS[0]}
+                set -e
+                if [ "$query_status" -ne 0 ]; then
+                  docker rm -f "$container" >/dev/null 2>&1 || true
+                  return 1
+                fi
+              done
+            else
+              docker rm -f "$container" >/dev/null 2>&1 || true
               return 1
             fi
+
+            docker rm -f "$container" >/dev/null 2>&1 || true
           }
 
-          echo "" >> "$GITHUB_WORKSPACE/benchmarks/tsbs_results.md"
-          echo "## TSBS throughput benchmark (cpu-only)" >> "$GITHUB_WORKSPACE/benchmarks/tsbs_results.md"
-          echo "| Database | Write throughput (metrics/sec) | Read throughput (queries/sec) |" >> "$GITHUB_WORKSPACE/benchmarks/tsbs_results.md"
-          echo "| --- | ---: | ---: |" >> "$GITHUB_WORKSPACE/benchmarks/tsbs_results.md"
+          {
+            echo ""
+            echo "## Shared dataset"
+            echo "- use-case: cpu-only"
+            echo "- seed: 123"
+            echo "- scale: $SCALE"
+            echo "- timestamp-start: $TS_START"
+            echo "- timestamp-end (data): $TS_END_DATA"
+            echo "- log-interval: 10s"
+            echo "- target rows: ~1,002,240 per database format"
+            echo ""
+            echo "## Insert throughput"
+            echo "| Database | Write throughput (metrics/sec) |"
+            echo "| --- | ---: |"
+          } >> "$GITHUB_WORKSPACE/benchmarks/tsbs_results.md"
 
           benchmark_db \
             questdb \
@@ -158,7 +190,7 @@ jobs:
             "docker run -d --name tsbs-questdb -p 9000:9000 -p 8812:8812 -p 9009:9009 -p 9003:9003 questdb/questdb:latest" \
             "until curl -fsS http://localhost:9003/ping >/dev/null; do sleep 2; done" \
             "cat \"$WORKDIR/questdb-data.gz\" | gunzip | ./bin/tsbs_load_questdb --workers=2 --batch-size=5000 --reporting-period=5s --url=http://localhost:9000 --ilp-bind-to localhost:9009" \
-            "cat \"$WORKDIR/questdb-queries.gz\" | gunzip | ./bin/tsbs_run_queries_questdb --workers=2 --max-queries=$QUERY_COUNT --url=http://localhost:9000"
+            "cat __QUERY_FILE__ | gunzip | ./bin/tsbs_run_queries_questdb --workers=2 --max-queries=$QUERY_COUNT --url=http://localhost:9000"
 
           benchmark_db \
             timescaledb \
@@ -166,15 +198,7 @@ jobs:
             "docker run -d --name tsbs-timescaledb -e POSTGRES_PASSWORD=password -p 5432:5432 timescale/timescaledb:latest-pg18" \
             "until docker exec tsbs-timescaledb pg_isready -U postgres >/dev/null 2>&1; do sleep 2; done" \
             "cat \"$WORKDIR/timescaledb-data.gz\" | gunzip | ./bin/tsbs_load_timescaledb --workers=2 --batch-size=5000 --reporting-period=5s --host=localhost --port=5432 --user=postgres --pass=password --db-name=benchmark --admin-db-name=postgres --postgres=sslmode=disable --do-create-db=true" \
-            "cat \"$WORKDIR/timescaledb-queries.gz\" | gunzip | ./bin/tsbs_run_queries_timescaledb --workers=2 --max-queries=$QUERY_COUNT --hosts=localhost --port=5432 --user=postgres --pass=password --db-name=benchmark --postgres=sslmode=disable"
-
-          benchmark_db \
-            mongo \
-            tsbs-mongo \
-            "docker run -d --name tsbs-mongo -p 27017:27017 mongodb/mongodb-community-server:latest --bind_ip_all" \
-            "for i in \$(seq 1 90); do if docker exec tsbs-mongo mongosh --quiet --eval \"db.runCommand({ ping: 1 }).ok\" | grep -q 1 && nc -z localhost 27017; then break; fi; if [ \"\$i\" -eq 90 ]; then echo \"MongoDB did not become ready in time\" >&2; exit 1; fi; sleep 2; done" \
-            "cat \"$WORKDIR/mongo-data.gz\" | gunzip | ./bin/tsbs_load_mongo --workers=2 --batch-size=5000 --reporting-period=5s --db-name=benchmark --url=mongodb://localhost:27017" \
-            "cat \"$WORKDIR/mongo-queries.gz\" | gunzip | ./bin/tsbs_run_queries_mongo --workers=2 --max-queries=$QUERY_COUNT --db-name=benchmark --url=mongodb://localhost:27017"
+            "cat __QUERY_FILE__ | gunzip | ./bin/tsbs_run_queries_timescaledb --workers=2 --max-queries=$QUERY_COUNT --hosts=localhost --port=5432 --user=postgres --pass=password --db-name=benchmark --postgres=sslmode=disable"
 
           benchmark_db \
             influx \
@@ -182,7 +206,7 @@ jobs:
             "docker run -d --name tsbs-influx -p 8086:8086 influxdb:1.8" \
             "until curl -fsS http://localhost:8086/ping >/dev/null; do sleep 2; done" \
             "cat \"$WORKDIR/influx-data.gz\" | gunzip | ./bin/tsbs_load_influx --workers=2 --batch-size=5000 --reporting-period=5s --db-name=benchmark --urls=http://localhost:8086" \
-            "cat \"$WORKDIR/influx-queries.gz\" | gunzip | ./bin/tsbs_run_queries_influx --workers=2 --max-queries=$QUERY_COUNT --db-name=benchmark --urls=http://localhost:8086"
+            "cat __QUERY_FILE__ | gunzip | ./bin/tsbs_run_queries_influx --workers=2 --max-queries=$QUERY_COUNT --db-name=benchmark --urls=http://localhost:8086"
 
           benchmark_db \
             cratedb \
@@ -190,7 +214,7 @@ jobs:
             "docker run -d --name tsbs-cratedb -p 5432:5432 -p 4200:4200 crate:latest" \
             "until curl -fsS http://localhost:4200 >/dev/null; do sleep 2; done" \
             "cat \"$WORKDIR/cratedb-data.gz\" | gunzip | ./bin/tsbs_load_cratedb --workers=2 --batch-size=5000 --reporting-period=5s --hosts=localhost --port=5432 --user=crate" \
-            "cat \"$WORKDIR/cratedb-queries.gz\" | gunzip | ./bin/tsbs_run_queries_cratedb --workers=2 --max-queries=$QUERY_COUNT --hosts=localhost --port=5432 --user=crate"
+            "cat __QUERY_FILE__ | gunzip | ./bin/tsbs_run_queries_cratedb --workers=2 --max-queries=$QUERY_COUNT --hosts=localhost --port=5432 --user=crate"
 
           benchmark_db \
             clickhouse \
@@ -198,7 +222,7 @@ jobs:
             "docker run -d --name tsbs-clickhouse -p 8123:8123 -p 9000:9000 clickhouse/clickhouse-server:latest" \
             "until docker exec tsbs-clickhouse clickhouse-client --query \"SELECT 1\" >/dev/null 2>&1; do sleep 2; done" \
             "cat \"$WORKDIR/clickhouse-data.gz\" | gunzip | ./bin/tsbs_load_clickhouse --workers=2 --batch-size=5000 --reporting-period=5s --host=localhost --port=9000 --db-name=benchmark --user=default" \
-            "cat \"$WORKDIR/clickhouse-queries.gz\" | gunzip | ./bin/tsbs_run_queries_clickhouse --workers=2 --max-queries=$QUERY_COUNT --hosts=localhost --port=9000 --db-name=benchmark --user=default"
+            "cat __QUERY_FILE__ | gunzip | ./bin/tsbs_run_queries_clickhouse --workers=2 --max-queries=$QUERY_COUNT --hosts=localhost --port=9000 --db-name=benchmark --user=default"
 
           benchmark_db \
             victoriametrics \
@@ -206,7 +230,7 @@ jobs:
             "docker run -d --name tsbs-victoriametrics -p 8428:8428 victoriametrics/victoria-metrics:latest" \
             "until curl -fsS http://localhost:8428/health >/dev/null; do sleep 2; done" \
             "cat \"$WORKDIR/victoriametrics-data.gz\" | gunzip | ./bin/tsbs_load_victoriametrics --workers=2 --batch-size=5000 --reporting-period=5s --urls=http://localhost:8428/write" \
-            "cat \"$WORKDIR/victoriametrics-queries.gz\" | gunzip | ./bin/tsbs_run_queries_victoriametrics --workers=2 --max-queries=$QUERY_COUNT --urls=http://localhost:8428"
+            "cat __QUERY_FILE__ | gunzip | ./bin/tsbs_run_queries_victoriametrics --workers=2 --max-queries=$QUERY_COUNT --urls=http://localhost:8428"
 
           benchmark_db \
             cassandra \
@@ -214,7 +238,21 @@ jobs:
             "docker run -d --name tsbs-cassandra -p 9042:9042 cassandra:latest" \
             "until docker exec tsbs-cassandra cqlsh -e \"DESCRIBE KEYSPACES\" >/dev/null 2>&1; do sleep 5; done" \
             "cat \"$WORKDIR/cassandra-data.gz\" | gunzip | ./bin/tsbs_load_cassandra --workers=2 --batch-size=500 --reporting-period=5s --hosts=localhost:9042 --consistency=ONE" \
-            "cat \"$WORKDIR/cassandra-queries.gz\" | gunzip | ./bin/tsbs_run_queries_cassandra --workers=2 --max-queries=$QUERY_COUNT --host=localhost:9042"
+            "cat __QUERY_FILE__ | gunzip | ./bin/tsbs_run_queries_cassandra --workers=2 --max-queries=$QUERY_COUNT --host=localhost:9042"
+
+          {
+            echo ""
+            echo "## Query latency summary"
+            echo "| Database | Query type | Min (ms) | Max (ms) | Avg (ms) | Median (ms) |"
+            echo "| --- | --- | ---: | ---: | ---: | ---: |"
+          } >> "$GITHUB_WORKSPACE/benchmarks/tsbs_results.md"
+
+          for db in questdb timescaledb influx cratedb clickhouse victoriametrics cassandra; do
+            for qtype in "${QUERY_TYPES[@]}"; do
+              qlog="$WORKDIR/${db}-${qtype}-query.log"
+              query_stats_row "$db" "$qtype" "$qlog"
+            done
+          done
 
       - name: Upload TSBS results
         uses: actions/upload-artifact@v4
