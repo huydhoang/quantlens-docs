@@ -136,7 +136,7 @@ FastAPI adds ~30% overhead versus Starlette alone. Vanilla ASGI on Uvicorn appro
 
 QuantLens is **database-heavy and I/O-bound** in both tiers:
 
-- **Tier 1 (backtesting/dashboards):** Reads/writes to PostgreSQL (strategy configs, backtest results), MongoDB (fundamentals), and QuestDB (historical OHLCV). Uvicorn's benchmark lead on database queries directly applies.
+- **Tier 1 (backtesting/dashboards):** Reads/writes to PostgreSQL (strategy configs, backtest results), DuckDB (fundamentals), and QuestDB (historical OHLCV). Uvicorn's benchmark lead on database queries directly applies.
 - **Tier 2 (real-time trading):** Continuous QuestDB writes, asyncpg connection pool under sustained load, WebSocket streaming to the React frontend. Uvicorn's lower tail latency and single-event-loop architecture deliver more predictable performance.
 
 Granian's JSON serialization advantage is irrelevant here — QuantLens endpoints are never "return a static JSON string." Every request involves database I/O, compute, or both.
@@ -176,7 +176,7 @@ Uvicorn's uvloop delivers **lower tail latency** than Granian's Tokio-to-asyncio
 
 ### Why Uvicorn (Not Granian) for This Tier
 
-1. **Database queries dominate.** Backtest results, strategy configs, historical OHLCV, and fundamentals all hit PostgreSQL/QuestDB/MongoDB. Uvicorn wins on every database benchmark.
+1. **Database queries dominate.** Backtest results, strategy configs, historical OHLCV, and fundamentals all hit PostgreSQL/QuestDB/DuckDB. Uvicorn wins on every database benchmark.
 2. **asyncpg runs natively.** No Tokio → asyncio context switches. Connection pool performance is optimal.
 3. **Mixed sync/async workload.** skfolio's CPU-heavy optimization runs in process pools via `loop.run_in_executor` — Uvicorn's executor integration is well-optimized and battle-tested.
 4. **NautilusTrader is async-native Python/Rust.** It integrates directly with Python's asyncio ecosystem without an extra FFI layer.
@@ -479,7 +479,7 @@ flowchart TD
         T1B["GET  /backtest/&lbrace;id&rbrace; — Query results"]
         T1C["WS   /backtest/stream — Real-time progress"]
         T1D["POST /optimize — skfolio"]
-        T1E["GET  /fundamentals/&lbrace;ticker&rbrace; — MongoDB"]
+        T1E["GET  /fundamentals/&lbrace;ticker&rbrace; — DuckDB"]
         T1F["Pydantic validation · OpenAPI docs · JWT auth"]
     end
 
@@ -503,7 +503,7 @@ flowchart TD
 
     subgraph storage["Storage"]
         DB1["QuestDB — OHLCV"]
-        DB3["MongoDB — fundamentals"]
+        DB3["DuckDB — fundamentals (embedded)"]
         DB4["PostgreSQL — strategies · results"]
     end
 ```
@@ -555,16 +555,20 @@ async def questdb_query(pool, symbol: str, start: str, end: str):
         )
 ```
 
-### MongoDB (Fundamentals)
+### DuckDB (Fundamentals)
 
 ```python
-from motor.motor_asyncio import AsyncIOMotorClient
+import duckdb
 
-mongo = AsyncIOMotorClient(os.getenv("MONGODB_URI"))  # e.g. mongodb://localhost:27017
-db = mongo.trading
+# DuckDB runs embedded — no connection string, no Docker container
+con = duckdb.connect('fundamentals.db')
 
 async def get_fundamentals(ticker: str) -> dict:
-    return await db.fundamentals.find_one({"ticker": ticker}, {"_id": 0})
+    result = con.execute(
+        "SELECT * FROM fundamentals WHERE symbol = ? ORDER BY period DESC LIMIT 1",
+        [ticker]
+    ).fetchdf()
+    return result.to_dict(orient='records')[0] if not result.empty else {}
 ```
 
 ---

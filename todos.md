@@ -28,7 +28,7 @@ Cross-referencing [system_design.md](system_design.md), [local_frontend.md](loca
 ## Data Layer
 - [x] 🔴 **4.1 QuestDB vs TimescaleDB** — `system_design.md` uses QuestDB; `ohlcv_database.md` recommends TimescaleDB for Phase 1. Which ships in Docker Compose? **RESOLVED: QuestDB** (see ohlcv_database.md for benchmark-driven decision)
 - [ ] 🟠 **4.2 QuestDB write protocol** — Three patterns shown: ILP over HTTP (port 9000), ILP over TCP (port 9009), PGWire SQL INSERT (port 8812). Which is canonical, or are different protocols for different tiers?
-- [ ] 🟠 **4.3 MongoDB presence** — Deployment diagram includes MongoDB; main Local App diagram omits it. Is MongoDB confirmed for the local Docker stack or deferred?
+- [x] 🟠 **4.3 MongoDB → DuckDB** — MongoDB Docker container had persistent connection errors during local benchmarking. **RESOLVED: DuckDB** (embedded, in-process) replaces MongoDB for fundamentals and economic indicators. See nosql_database.md for rationale.
 - [ ] 🟡 **4.4 PostgreSQL connection pools** — How many asyncpg pools does FastAPI maintain (PostgreSQL + QuestDB PGWire + potentially TimescaleDB)?
 
 ## Real-Time Data Flow

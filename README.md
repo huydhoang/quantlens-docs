@@ -24,10 +24,10 @@ Tauri Desktop App (Vite + React SPA)
         ├── Data Providers ──── Tiingo, Alpaca, Finnhub
         └── skfolio ─────────── Portfolio optimization
         │
-   Storage (all local Docker containers)
+   Storage (all local, embedded or Docker containers)
         ├── PostgreSQL ──────── Strategies, results, users
         ├── QuestDB ─────────── OHLCV market data (SAMPLE BY, ASOF JOIN, LATEST ON)
-        ├── MongoDB ─────────── Fundamentals, economic indicators
+        ├── DuckDB ──────────── Fundamentals, economic indicators (embedded, zero-config)
         ├── Redis ───────────── Cache, task queue
         └── Parquet Catalog ─── Immutable validated datasets
 ```
@@ -57,7 +57,7 @@ TanStack Start + React (Frontend + API)
 | **Time-series DB** | QuestDB | Native `SAMPLE BY`, `ASOF JOIN`, `LATEST ON`, 11M+ rows/sec ingestion — purpose-built for financial market data. Running locally in Docker removes the free-tier constraints that previously favored TimescaleDB |
 | **Frontend (local)** | Tauri + Vite + React | Desktop app with TanStack Query (REST caching), TanStack Router (type-safe routing), WebSocket streaming for backtest progress, Monaco Editor for strategy authoring |
 | **Frontend (platform)** | TanStack Start + React | Server functions, SSR for SEO, streaming, TanStack Query for data fetching |
-| **NoSQL DB** | MongoDB (local Docker) | Flexible document model for semi-structured fundamentals and economic data; aggregation framework for screening queries |
+| **Fundamentals DB** | DuckDB (embedded) | Embedded columnar database for semi-structured fundamentals and economic data; SQL interface with zero-copy Pandas/Polars integration; no Docker networking overhead |
 | **Task queue** | Celery | Battle-tested reliability, canvas workflows for backtest pipelines, Redis broker (no new infrastructure), Flower monitoring |
 | **Platform DB** | Neon (managed PostgreSQL) | Serverless PostgreSQL for the deployed platform app — user profiles, submitted results, live strategy tracking |
 | **Deployment (local)** | Tauri desktop app + Docker Compose | Tauri app runs natively; backend services (FastAPI, databases, Redis, workers) start with `docker compose up` |
@@ -73,11 +73,11 @@ TanStack Start + React (Frontend + API)
 | [python_rust_or_go.md](python_rust_or_go.md) | Server language decision analysis — why Python wins given NautilusTrader's hybrid Rust/Python architecture, with ecosystem comparisons across Python, Rust, and Go |
 | [data_providers.md](data_providers.md) | Multi-provider strategy for free-tier data — Tiingo, Alpaca, Finnhub, and Alpha Vantage compared on rate limits, data quality, and coverage, plus the validation pipeline |
 | [ohlcv_database.md](ohlcv_database.md) | Time-series database evaluation — QuestDB vs TimescaleDB vs InfluxDB vs MongoDB for OHLCV storage, with rationale for QuestDB as the local-first default |
-| [nosql_database.md](nosql_database.md) | NoSQL database evaluation — MongoDB vs DataStax Astra vs Cosmos DB vs Firestore for stock fundamentals and economic indicators, leveraging flexible schemas for semi-structured financial data |
+| [nosql_database.md](nosql_database.md) | Fundamentals database evaluation — DuckDB as embedded columnar database for stock fundamentals and economic indicators, replacing MongoDB to eliminate Docker networking complexity for local desktop deployment |
 | [task_queue.md](task_queue.md) | Task queue decision analysis — why Celery over Dramatiq, RQ, and Taskiq, with configuration for NautilusTrader backtest workers |
 | [asgi_rsgi_wsgi.md](asgi_rsgi_wsgi.md) | Web interface decision analysis — why ASGI over WSGI/RSGI for NautilusTrader real-time streaming + skfolio optimization workloads |
 | [asgi_web_server.md](asgi_web_server.md) | ASGI web server architecture decision — FastAPI on Uvicorn by default, with a hybrid two-tier Uvicorn setup for research and real-time trading |
-| [vector_database.md](vector_database.md) | Vector database evaluation — LanceDB vs Qdrant vs Weaviate vs Milvus vs ChromaDB for local LLM chat, semantic search, and RAG pipelines, with embedded-first architecture for local deployment |
+| [vector_database.md](vector_database.md) | Vector database evaluation — LanceDB vs Qdrant vs Weaviate vs Milvus vs ChromaDB for local LLM chat, semantic search, expert analyses, and RAG pipelines, with hybrid DuckDB + LanceDB architecture for LLM-powered financial analysis |
 
 ## Tech Stack
 
@@ -91,7 +91,7 @@ TanStack Start + React (Frontend + API)
 
 **Data:** Tiingo (primary EOD), Alpaca (intraday/paper trading), Finnhub (fundamentals)
 
-**Storage (Local App):** PostgreSQL, QuestDB, MongoDB, Redis, Apache Parquet
+**Storage (Local App):** PostgreSQL, QuestDB, DuckDB, LanceDB, Redis, Apache Parquet
 
 **Storage (Platform App):** Neon (managed PostgreSQL)
 
