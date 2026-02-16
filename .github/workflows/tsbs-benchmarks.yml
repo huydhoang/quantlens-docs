@@ -1,0 +1,239 @@
+name: TSBS Benchmarks
+
+on:
+  workflow_dispatch:
+
+jobs:
+  tsbs-benchmarks:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Pull database Docker images
+        run: |
+          set -euo pipefail
+          mkdir -p benchmarks
+
+          cat <<'EOF' > benchmarks/tsbs_results.md
+          # TSBS Benchmark Results
+
+          ## Pulled Docker images
+          EOF
+
+          images=(
+            "questdb/questdb:latest"
+            "timescale/timescaledb:latest-pg18"
+            "influxdb/influxdb:latest"
+            "clickhouse/clickhouse-server:latest"
+          )
+
+          for image in "${images[@]}"; do
+            pulled_image="$image"
+            if [ "$image" = "influxdb/influxdb:latest" ]; then
+              if ! docker pull "$image"; then
+                docker pull "influxdb:1.8"
+                pulled_image="influxdb:1.8"
+              fi
+            else
+              docker pull "$image"
+            fi
+            echo "- \`$pulled_image\`" >> benchmarks/tsbs_results.md
+          done
+
+      - name: Run TSBS write/read benchmarks
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/questdb/tsbs.git /tmp/tsbs
+          cd /tmp/tsbs
+          make
+
+          WORKDIR=/tmp/tsbs-bench
+          mkdir -p "$WORKDIR"
+
+          # Shared synthetic dataset config (~1M rows per DB format for cpu-only)
+          TS_START="2016-01-01T00:00:00Z"
+          TS_END_DATA="2016-01-02T00:00:00Z"
+          TS_END_QUERY="2016-01-02T00:00:01Z"
+          SCALE=116
+          QUERY_COUNT=100
+          QUERY_TYPES=(single-groupby-1-1-1 double-groupby-1 high-cpu-all)
+          POST_LOAD_WAIT_SECS=5
+          CLICKHOUSE_PASSWORD=$(openssl rand -hex 12)
+
+          CONTAINERS=(tsbs-questdb tsbs-timescaledb tsbs-influx tsbs-clickhouse)
+          trap 'docker rm -f "${CONTAINERS[@]}" >/dev/null 2>&1 || true' EXIT INT TERM
+
+          write_rate() {
+            local log_file="$1"
+            local rate
+            rate=$(sed -nE 's/.*mean rate ([0-9.]+) metrics\/sec.*/\1/p' "$log_file" | head -n 1 || true)
+            if [ -z "${rate:-}" ]; then
+              echo "n/a"
+            else
+              echo "$rate"
+            fi
+          }
+
+          query_stats_row() {
+            local db="$1"
+            local qtype="$2"
+            local log_file="$3"
+            local stats
+            if [ ! -f "$log_file" ]; then
+              echo "| $db | $qtype | n/a | n/a | n/a | n/a |" >> "$GITHUB_WORKSPACE/benchmarks/tsbs_results.md"
+              return
+            fi
+            # Expected TSBS format: "min: Xms, med: Yms, mean: Zms, max: Wms"
+            stats=$(sed -nE 's/^min:[[:space:]]*([0-9.]+)ms, med:[[:space:]]*([0-9.]+)ms, mean:[[:space:]]*([0-9.]+)ms, max:[[:space:]]*([0-9.]+)ms.*/\1|\2|\3|\4/p' "$log_file" | tail -n 1 || true)
+            if [ -z "${stats:-}" ]; then
+              echo "Warning: unable to parse query stats for $db/$qtype from $log_file" >&2
+              echo "| $db | $qtype | n/a | n/a | n/a | n/a |" >> "$GITHUB_WORKSPACE/benchmarks/tsbs_results.md"
+            else
+              IFS='|' read -r min median avg max <<< "$stats"
+              echo "| $db | $qtype | $min | $max | $avg | $median |" >> "$GITHUB_WORKSPACE/benchmarks/tsbs_results.md"
+            fi
+          }
+
+          benchmark_db() {
+            local db="$1"
+            local container="$2"
+            local run_cmd="$3"
+            local wait_cmd="$4"
+            local load_cmd="$5"
+            local query_cmd_tpl="$6"
+
+            docker rm -f "$container" >/dev/null 2>&1 || true
+            eval "$run_cmd"
+            eval "$wait_cmd"
+
+            ./bin/tsbs_generate_data \
+              --use-case=cpu-only \
+              --seed=123 \
+              --scale="$SCALE" \
+              --timestamp-start="$TS_START" \
+              --timestamp-end="$TS_END_DATA" \
+              --log-interval=10s \
+              --format="$db" \
+              | gzip > "$WORKDIR/${db}-data.gz"
+
+            for qtype in "${QUERY_TYPES[@]}"; do
+              ./bin/tsbs_generate_queries \
+                --use-case=cpu-only \
+                --seed=123 \
+                --scale="$SCALE" \
+                --timestamp-start="$TS_START" \
+                --timestamp-end="$TS_END_QUERY" \
+                --queries="$QUERY_COUNT" \
+                --query-type="$qtype" \
+                --format="$db" \
+                | gzip > "$WORKDIR/${db}-${qtype}-queries.gz"
+            done
+
+            set +e
+            eval "$load_cmd" | tee "$WORKDIR/${db}-load.log"
+            local load_status=${PIPESTATUS[0]}
+            set -e
+
+            if [ "$load_status" -eq 0 ]; then
+              echo "| $db | $(write_rate "$WORKDIR/${db}-load.log") |" >> "$GITHUB_WORKSPACE/benchmarks/tsbs_results.md"
+              sleep "$POST_LOAD_WAIT_SECS"
+              for qtype in "${QUERY_TYPES[@]}"; do
+                qfile="$WORKDIR/${db}-${qtype}-queries.gz"
+                qlog="$WORKDIR/${db}-${qtype}-query.log"
+                safe_qfile=$(printf '%q' "$qfile")
+
+                set +e
+                eval "${query_cmd_tpl//__QUERY_FILE__/$safe_qfile}" | tee "$qlog"
+                local query_status=${PIPESTATUS[0]}
+                set -e
+                if [ "$query_status" -ne 0 ]; then
+                  docker rm -f "$container" >/dev/null 2>&1 || true
+                  return 1
+                fi
+              done
+            else
+              echo "| $db | n/a |" >> "$GITHUB_WORKSPACE/benchmarks/tsbs_results.md"
+              docker rm -f "$container" >/dev/null 2>&1 || true
+              return 1
+            fi
+
+            docker rm -f "$container" >/dev/null 2>&1 || true
+          }
+
+          {
+            echo ""
+            echo "## Shared dataset"
+            echo "- use-case: cpu-only"
+            echo "- seed: 123"
+            echo "- scale: $SCALE"
+            echo "- timestamp-start: $TS_START"
+            echo "- timestamp-end (data): $TS_END_DATA"
+            echo "- log-interval: 10s"
+            echo "- target rows: ~1M per database format"
+            echo ""
+            echo "## Insert throughput"
+            echo "| Database | Write throughput (metrics/sec) |"
+            echo "| --- | ---: |"
+          } >> "$GITHUB_WORKSPACE/benchmarks/tsbs_results.md"
+
+          benchmark_db \
+            questdb \
+            tsbs-questdb \
+            "docker run -d --name tsbs-questdb -p 9000:9000 -p 8812:8812 -p 9009:9009 -p 9003:9003 questdb/questdb:latest" \
+            "until curl -fsS http://localhost:9003/ping >/dev/null; do sleep 2; done" \
+            "cat \"$WORKDIR/questdb-data.gz\" | gunzip | ./bin/tsbs_load_questdb --workers=2 --batch-size=5000 --reporting-period=5s --url=http://localhost:9000 --ilp-bind-to localhost:9009" \
+            "cat __QUERY_FILE__ | gunzip | ./bin/tsbs_run_queries_questdb --workers=2 --max-queries=$QUERY_COUNT --url=http://localhost:9000"
+
+          benchmark_db \
+            timescaledb \
+            tsbs-timescaledb \
+            "docker run -d --name tsbs-timescaledb -e POSTGRES_PASSWORD=password -p 5432:5432 timescale/timescaledb:latest-pg18" \
+            "until docker exec tsbs-timescaledb pg_isready -U postgres >/dev/null 2>&1; do sleep 2; done" \
+            "cat \"$WORKDIR/timescaledb-data.gz\" | gunzip | ./bin/tsbs_load_timescaledb --workers=2 --batch-size=5000 --reporting-period=5s --host=localhost --port=5432 --user=postgres --pass=password --db-name=benchmark --admin-db-name=postgres --postgres=sslmode=disable --do-create-db=true" \
+            "cat __QUERY_FILE__ | gunzip | ./bin/tsbs_run_queries_timescaledb --workers=2 --max-queries=$QUERY_COUNT --hosts=localhost --port=5432 --user=postgres --pass=password --db-name=benchmark --postgres=sslmode=disable"
+
+          benchmark_db \
+            influx \
+            tsbs-influx \
+            "docker run -d --name tsbs-influx -p 8086:8086 influxdb:1.8" \
+            "until curl -fsS http://localhost:8086/ping >/dev/null; do sleep 2; done" \
+            "cat \"$WORKDIR/influx-data.gz\" | gunzip | ./bin/tsbs_load_influx --workers=2 --batch-size=5000 --reporting-period=5s --db-name=benchmark --urls=http://localhost:8086" \
+            "cat __QUERY_FILE__ | gunzip | ./bin/tsbs_run_queries_influx --workers=2 --max-queries=$QUERY_COUNT --db-name=benchmark --urls=http://localhost:8086"
+
+          benchmark_db \
+            clickhouse \
+            tsbs-clickhouse \
+            "docker run -d --name tsbs-clickhouse -e CLICKHOUSE_PASSWORD=$CLICKHOUSE_PASSWORD -p 8123:8123 -p 9000:9000 clickhouse/clickhouse-server:latest" \
+            "until docker exec tsbs-clickhouse clickhouse-client --user default --password $CLICKHOUSE_PASSWORD --query \"SELECT 1\" >/dev/null 2>&1; do sleep 2; done" \
+            "cat \"$WORKDIR/clickhouse-data.gz\" | gunzip | ./bin/tsbs_load_clickhouse --workers=2 --batch-size=5000 --reporting-period=5s --host=localhost --db-name=benchmark --user=default --password=$CLICKHOUSE_PASSWORD" \
+            "cat __QUERY_FILE__ | gunzip | ./bin/tsbs_run_queries_clickhouse --workers=2 --max-queries=$QUERY_COUNT --hosts=localhost --db-name=benchmark --user=default --password=$CLICKHOUSE_PASSWORD"
+
+          {
+            echo ""
+            echo "## Query latency summary"
+            echo "| Database | Query type | Min (ms) | Max (ms) | Avg (ms) | Median (ms) |"
+            echo "| --- | --- | ---: | ---: | ---: | ---: |"
+          } >> "$GITHUB_WORKSPACE/benchmarks/tsbs_results.md"
+
+          for container in "${CONTAINERS[@]}"; do
+            db="${container#tsbs-}"
+            for qtype in "${QUERY_TYPES[@]}"; do
+              qlog="$WORKDIR/${db}-${qtype}-query.log"
+              query_stats_row "$db" "$qtype" "$qlog"
+            done
+          done
+
+      - name: Upload TSBS results
+        uses: actions/upload-artifact@v4
+        with:
+          name: tsbs-results
+          path: benchmarks/tsbs_results.md
