@@ -208,7 +208,7 @@ jobs:
           benchmark_db \
             mongo \
             tsbs-mongo \
-            "docker run -d --name tsbs-mongo -p 27017:27017 mongodb/mongodb-community-server:$MONGODB_VERSION" \
+            "docker run -d --name tsbs-mongo -p 27017:27017 mongodb/mongodb-community-server:$MONGODB_VERSION --bind_ip_all" \
             "until docker exec tsbs-mongo mongosh --quiet --eval \"db.runCommand({ ping: 1 }).ok\" | grep -q 1; do sleep 2; done" \
             "cat \"$WORKDIR/mongo-data.gz\" | gunzip | ./bin/tsbs_load_mongo --workers=2 --batch-size=5000 --reporting-period=5s --db-name=benchmark --url=mongodb://localhost:27017" \
             "cat __QUERY_FILE__ | gunzip | ./bin/tsbs_run_queries_mongo --workers=2 --max-queries=$QUERY_COUNT --db-name=benchmark --url=mongodb://localhost:27017"
