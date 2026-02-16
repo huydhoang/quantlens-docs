@@ -44,8 +44,8 @@ jobs:
             pulled_image="$image"
             if [ "$image" = "influxdb/influxdb:latest" ]; then
               if ! docker pull "$image"; then
-                docker pull "influxdb:latest"
-                pulled_image="influxdb:latest"
+                docker pull "influxdb:1.8"
+                pulled_image="influxdb:1.8"
               fi
             else
               docker pull "$image"
@@ -132,12 +132,11 @@ jobs:
             set +e
             eval "$load_cmd" | tee "$WORKDIR/${db}-load.log"
             local load_status=${PIPESTATUS[0]}
+            local query_status=0
             if [ "$load_status" -eq 0 ]; then
               sleep "$POST_LOAD_WAIT_SECS"
               eval "$query_cmd" | tee "$WORKDIR/${db}-query.log"
-              local query_status=${PIPESTATUS[0]}
-            else
-              local query_status=1
+              query_status=${PIPESTATUS[0]}
             fi
             set -e
 
@@ -173,14 +172,14 @@ jobs:
             mongo \
             tsbs-mongo \
             "docker run -d --name tsbs-mongo -p 27017:27017 mongodb/mongodb-community-server:latest --bind_ip_all" \
-            "until docker exec tsbs-mongo mongosh --quiet --eval \"db.runCommand({ ping: 1 }).ok\" | grep -q 1 && nc -z localhost 27017; do sleep 2; done" \
+            "for i in \$(seq 1 90); do if docker exec tsbs-mongo mongosh --quiet --eval \"db.runCommand({ ping: 1 }).ok\" | grep -q 1 && nc -z localhost 27017; then break; fi; if [ \"\$i\" -eq 90 ]; then echo \"MongoDB did not become ready in time\" >&2; exit 1; fi; sleep 2; done" \
             "cat \"$WORKDIR/mongo-data.gz\" | gunzip | ./bin/tsbs_load_mongo --workers=2 --batch-size=5000 --reporting-period=5s --db-name=benchmark --url=mongodb://localhost:27017" \
             "cat \"$WORKDIR/mongo-queries.gz\" | gunzip | ./bin/tsbs_run_queries_mongo --workers=2 --max-queries=$QUERY_COUNT --db-name=benchmark --url=mongodb://localhost:27017"
 
           benchmark_db \
             influx \
             tsbs-influx \
-            "docker run -d --name tsbs-influx -p 8086:8086 influxdb:latest" \
+            "docker run -d --name tsbs-influx -p 8086:8086 influxdb:1.8" \
             "until curl -fsS http://localhost:8086/ping >/dev/null; do sleep 2; done" \
             "cat \"$WORKDIR/influx-data.gz\" | gunzip | ./bin/tsbs_load_influx --workers=2 --batch-size=5000 --reporting-period=5s --db-name=benchmark --urls=http://localhost:8086" \
             "cat \"$WORKDIR/influx-queries.gz\" | gunzip | ./bin/tsbs_run_queries_influx --workers=2 --max-queries=$QUERY_COUNT --db-name=benchmark --urls=http://localhost:8086"
