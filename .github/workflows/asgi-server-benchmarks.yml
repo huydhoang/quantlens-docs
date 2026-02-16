@@ -84,7 +84,7 @@ jobs:
               requests_per_worker = total_requests // concurrency
               remainder = total_requests % concurrency
 
-              async with httpx.AsyncClient(timeout=10.0) as client:
+              async with httpx.AsyncClient(timeout=30.0) as client:
                   start = time.perf_counter()
                   tasks = []
                   for i in range(concurrency):
@@ -151,6 +151,7 @@ jobs:
             if ! curl -fsS "http://127.0.0.1:${port}/" >/dev/null 2>&1; then
               echo "Server failed to start for ${label}" >&2
               cat "$log_file" >&2
+              echo "| ${label} | n/a | n/a | n/a | n/a | n/a |" >> "$RESULTS_FILE"
               if [ -n "${server_pid:-}" ] && [ "$server_pid" -gt 0 ] 2>/dev/null; then
                 kill "$server_pid" || true
                 wait "$server_pid" || true
@@ -159,10 +160,17 @@ jobs:
             fi
 
             local metrics
-            metrics=$(python "$APP_DIR/benchmark_client.py" \
+            if ! metrics=$(python "$APP_DIR/benchmark_client.py" \
               --url "http://127.0.0.1:${port}/" \
               --requests "$REQUESTS" \
-              --concurrency "$CONCURRENCY")
+              --concurrency "$CONCURRENCY"); then
+              echo "| ${label} | n/a | n/a | n/a | n/a | n/a |" >> "$RESULTS_FILE"
+              if [ -n "${server_pid:-}" ] && [ "$server_pid" -gt 0 ] 2>/dev/null; then
+                kill "$server_pid" || true
+                wait "$server_pid" || true
+              fi
+              return 1
+            fi
 
             if [ -n "${server_pid:-}" ] && [ "$server_pid" -gt 0 ] 2>/dev/null; then
               kill "$server_pid" || true
@@ -173,14 +181,18 @@ jobs:
             echo "| ${label} | ${throughput} | ${min_ms} | ${max_ms} | ${mean_ms} | ${median_ms} |" >> "$RESULTS_FILE"
           }
 
-          run_benchmark "FastAPI on uvicorn" "python -m uvicorn fastapi_app:app --host 127.0.0.1 --port 8000 --workers 1" 8000
-          run_benchmark "FastAPI on granian" "granian --interface asgi --host 127.0.0.1 --port 8001 --workers 1 fastapi_app:app" 8001
-          run_benchmark "Vanilla ASGI uvicorn" "python -m uvicorn vanilla_app:app --host 127.0.0.1 --port 8002 --workers 1" 8002
-          run_benchmark "Vanilla ASGI granian" "granian --interface asgi --host 127.0.0.1 --port 8003 --workers 1 vanilla_app:app" 8003
+          benchmark_failed=0
+
+          run_benchmark "FastAPI on uvicorn" "python -m uvicorn fastapi_app:app --host 127.0.0.1 --port 8000 --workers 1" 8000 || benchmark_failed=1
+          run_benchmark "FastAPI on granian" "granian --interface asgi --host 127.0.0.1 --port 8001 --workers 1 fastapi_app:app" 8001 || benchmark_failed=1
+          run_benchmark "Vanilla ASGI uvicorn" "python -m uvicorn vanilla_app:app --host 127.0.0.1 --port 8002 --workers 1" 8002 || benchmark_failed=1
+          run_benchmark "Vanilla ASGI granian" "granian --interface asgi --host 127.0.0.1 --port 8003 --workers 1 vanilla_app:app" 8003 || benchmark_failed=1
 
           cat "$RESULTS_FILE" >> "$GITHUB_STEP_SUMMARY"
+          exit "$benchmark_failed"
 
       - name: Upload benchmark results
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: asgi-server-benchmarks
