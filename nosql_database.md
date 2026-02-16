@@ -45,7 +45,7 @@ The original recommendation was MongoDB (Docker container) for its flexible docu
 
 - **Columnar storage** optimized for analytical queries (aggregations, window functions, time-series joins)
 - Vectorized execution engine specifically designed for OLAP workloads
-- Competitive with ClickHouse on ClickBench benchmarks for analytical queries
+- Competitive with ClickHouse on [ClickBench](https://benchmark.clickhouse.com/) for analytical queries on a single node
 - **In-memory or on-disk**: Load multi-GB datasets into memory for iteration speed, or query larger-than-RAM datasets efficiently
 
 ### Perfect Fit for Backtesting Workloads
@@ -165,6 +165,41 @@ For QuantLens, **both fundamentals and economic indicators fit well in DuckDB** 
 4. **Python-native workflow**: Zero-copy integration with Pandas and Polars DataFrames. Results flow directly into the existing data pipeline without serialization overhead.
 5. **Storage efficiency**: Columnar compression achieves excellent compression ratios for financial data. A typical fundamentals dataset (3,000+ stocks × 20 quarters × 100+ metrics) fits comfortably in a single DuckDB file under 100 MB.
 6. **No cost at any scale**: Fully open-source, embedded, no tiers or limits. Scales from laptop to multi-GB datasets without pricing concerns.
+
+### Why Not Replace PostgreSQL with DuckDB Entirely?
+
+DuckDB excels at analytical queries, but QuantLens's OLTP workloads — strategy CRUD, backtest job tracking, user management — still require PostgreSQL. DuckDB's own documentation explicitly states these limitations:
+
+| Requirement | PostgreSQL | DuckDB |
+|-------------|-----------|--------|
+| **Multi-process writes** | ✅ Celery workers + FastAPI write concurrently | ❌ Single-writer process only — "Writing to DuckDB from multiple processes is not supported automatically and is not a primary design goal" ([DuckDB concurrency docs](https://duckdb.org/docs/stable/connect/concurrency.html)) |
+| **Small, frequent transactions** | ✅ Optimized for OLTP (row-at-a-time updates) | ❌ "DuckDB is optimized for bulk operations, so executing many small transactions is not a primary design goal" ([DuckDB concurrency docs](https://duckdb.org/docs/stable/connect/concurrency.html)) |
+| **Concurrent row updates** | ✅ MVCC with row-level locking | ⚠️ Optimistic concurrency control — concurrent updates to the same row cause `Transaction conflict` errors |
+| **Foreign key enforcement** | ✅ Full FK with cascading deletes/updates | ✅ Supported, but with [index limitations](https://duckdb.org/docs/stable/sql/indexes.html#index-limitations) that can cause spurious constraint errors |
+| **Connection pooling** | ✅ asyncpg connection pools, PgBouncer | ❌ Embedded — no connection protocol, no pooling |
+| **Platform migration path** | ✅ Same schema works on Neon PostgreSQL (deployed platform) | ❌ No managed DuckDB service with OLTP semantics (MotherDuck is OLAP-only) |
+
+**Bottom line**: PostgreSQL handles the **transactional core** (strategies, backtests, users, results) where concurrent writes and relational integrity matter. DuckDB handles the **analytical layer** (fundamentals screening, cross-sectional analysis, window functions) where columnar performance matters. This is the [standard OLTP + OLAP split](https://duckdb.org/docs/stable/connect/concurrency.html) that DuckDB's own team recommends — their documentation suggests using PostgreSQL for multi-process transactions and DuckDB for analytical queries.
+
+**Bonus — DuckDB can query PostgreSQL directly**: DuckDB's [`postgres` extension](https://duckdb.org/docs/stable/core_extensions/postgres.html) lets you run analytical queries against live PostgreSQL data without copying it. This means DuckDB can serve as an OLAP overlay on the OLTP store when needed:
+
+```python
+import duckdb
+
+con = duckdb.connect()
+con.execute("INSTALL postgres; LOAD postgres;")
+con.execute("ATTACH 'dbname=quantlens' AS pg (TYPE postgres, READ_ONLY)")
+
+# Run analytical query on PostgreSQL data using DuckDB's columnar engine
+results = con.execute("""
+    SELECT strategy_id, AVG(sharpe_ratio), COUNT(*)
+    FROM pg.results r
+    JOIN pg.backtests b ON r.backtest_id = b.id
+    WHERE b.completed_at > CURRENT_DATE - INTERVAL '30 days'
+    GROUP BY strategy_id
+    ORDER BY AVG(sharpe_ratio) DESC
+""").df()
+```
 
 ### Alternatives Considered
 
