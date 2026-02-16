@@ -215,8 +215,8 @@ jobs:
             tsbs-clickhouse \
             "docker run -d --name tsbs-clickhouse -p 8123:8123 -p 9000:9000 clickhouse/clickhouse-server:latest" \
             "until docker exec tsbs-clickhouse clickhouse-client --query \"SELECT 1\" >/dev/null 2>&1; do sleep 2; done" \
-            "cat \"$WORKDIR/clickhouse-data.gz\" | gunzip | ./bin/tsbs_load_clickhouse --workers=2 --batch-size=5000 --reporting-period=5s --host=localhost --port=9000 --db-name=benchmark --user=default" \
-            "cat __QUERY_FILE__ | gunzip | ./bin/tsbs_run_queries_clickhouse --workers=2 --max-queries=$QUERY_COUNT --hosts=localhost --port=9000 --db-name=benchmark --user=default"
+            "cat \"$WORKDIR/clickhouse-data.gz\" | gunzip | ./bin/tsbs_load_clickhouse --workers=2 --batch-size=5000 --reporting-period=5s --host=localhost --db-name=benchmark --user=default" \
+            "cat __QUERY_FILE__ | gunzip | ./bin/tsbs_run_queries_clickhouse --workers=2 --max-queries=$QUERY_COUNT --hosts=localhost --db-name=benchmark --user=default"
 
           benchmark_db \
             victoriametrics \
