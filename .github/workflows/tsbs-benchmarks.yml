@@ -33,10 +33,9 @@ jobs:
             "questdb/questdb:latest"
             "timescale/timescaledb:latest-pg16"
             "mongo:latest"
-            "influxdb:latest"
+            "influxdb:1.8"
             "crate:latest"
             "clickhouse/clickhouse-server:latest"
-            "bfolkens/siridb-server:latest"
             "victoriametrics/victoria-metrics:latest"
             "cassandra:latest"
           )
@@ -46,36 +45,153 @@ jobs:
             echo "- \`$image\`" >> benchmarks/tsbs_results.md
           done
 
-      - name: Run TSBS benchmark generation
+      - name: Run TSBS write/read throughput benchmarks
         run: |
           set -euo pipefail
           git clone --depth 1 https://github.com/questdb/tsbs.git /tmp/tsbs
           cd /tmp/tsbs
           make
 
-          echo "" >> "$GITHUB_WORKSPACE/benchmarks/tsbs_results.md"
-          echo "## TSBS generation benchmark (cpu-only)" >> "$GITHUB_WORKSPACE/benchmarks/tsbs_results.md"
-          echo "| Database format | Generated lines | Elapsed seconds |" >> "$GITHUB_WORKSPACE/benchmarks/tsbs_results.md"
-          echo "| --- | ---: | ---: |" >> "$GITHUB_WORKSPACE/benchmarks/tsbs_results.md"
+          WORKDIR=/tmp/tsbs-bench
+          mkdir -p "$WORKDIR"
+          TS_START="2016-01-01T00:00:00Z"
+          TS_END_DATA="2016-01-01T02:00:00Z"
+          TS_END_QUERY="2016-01-01T02:00:01Z"
+          SCALE=100
+          QUERY_COUNT=200
 
-          formats=(questdb timescaledb mongo influx cratedb clickhouse siridb victoriametrics cassandra)
-          for format in "${formats[@]}"; do
-            output="/tmp/${format}-data.txt"
-            start_ns=$(date +%s%N)
+          write_rate() {
+            local log_file="$1"
+            local rate
+            rate=$(awk '/mean rate/ && /metrics\/sec/ {for (i = 1; i <= NF; i++) if ($i == "rate") {print $(i+1); exit}}' "$log_file" || true)
+            if [ -z "${rate:-}" ]; then
+              echo "n/a"
+            else
+              echo "$rate"
+            fi
+          }
+
+          read_qps() {
+            local log_file="$1"
+            local query_count wall_sec
+            query_count=$(grep -Eo '[Rr]un complete after [0-9]+ queries' "$log_file" | tail -n 1 | awk '{print $4}' || true)
+            wall_sec=$(grep -Eo 'wall clock time: [0-9.]+sec' "$log_file" | tail -n 1 | awk -F': ' '{print $2}' | sed 's/sec$//' || true)
+            if [ -z "${query_count:-}" ] || [ -z "${wall_sec:-}" ]; then
+              echo "n/a"
+            else
+              awk -v q="$query_count" -v t="$wall_sec" 'BEGIN { if (t > 0) printf "%.2f", q / t; else print "n/a" }'
+            fi
+          }
+
+          benchmark_db() {
+            local db="$1"
+            local container="$2"
+            local run_cmd="$3"
+            local wait_cmd="$4"
+            local load_cmd="$5"
+            local query_cmd="$6"
+
+            docker rm -f "$container" >/dev/null 2>&1 || true
+            eval "$run_cmd"
+            eval "$wait_cmd"
+
             ./bin/tsbs_generate_data \
               --use-case=cpu-only \
               --seed=123 \
-              --scale=10 \
-              --timestamp-start=2016-01-01T00:00:00Z \
-              --timestamp-end=2016-01-01T00:05:00Z \
+              --scale="$SCALE" \
+              --timestamp-start="$TS_START" \
+              --timestamp-end="$TS_END_DATA" \
               --log-interval=10s \
-              --format="$format" \
-              > "$output"
-            end_ns=$(date +%s%N)
-            elapsed=$(awk "BEGIN {printf \"%.3f\", (${end_ns}-${start_ns})/1000000000}")
-            lines=$(wc -l < "$output")
-            echo "| $format | $lines | $elapsed |" >> "$GITHUB_WORKSPACE/benchmarks/tsbs_results.md"
-          done
+              --format="$db" \
+              | gzip > "$WORKDIR/${db}-data.gz"
+
+            ./bin/tsbs_generate_queries \
+              --use-case=cpu-only \
+              --seed=123 \
+              --scale="$SCALE" \
+              --timestamp-start="$TS_START" \
+              --timestamp-end="$TS_END_QUERY" \
+              --queries="$QUERY_COUNT" \
+              --query-type=single-groupby-1-1-1 \
+              --format="$db" \
+              | gzip > "$WORKDIR/${db}-queries.gz"
+
+            eval "$load_cmd" | tee "$WORKDIR/${db}-load.log"
+            sleep 5
+            eval "$query_cmd" | tee "$WORKDIR/${db}-query.log"
+
+            echo "| $db | $(write_rate "$WORKDIR/${db}-load.log") | $(read_qps "$WORKDIR/${db}-query.log") |" >> "$GITHUB_WORKSPACE/benchmarks/tsbs_results.md"
+            docker rm -f "$container" >/dev/null 2>&1 || true
+          }
+
+          echo "" >> "$GITHUB_WORKSPACE/benchmarks/tsbs_results.md"
+          echo "## TSBS throughput benchmark (cpu-only)" >> "$GITHUB_WORKSPACE/benchmarks/tsbs_results.md"
+          echo "| Database | Write throughput (metrics/sec) | Read throughput (queries/sec) |" >> "$GITHUB_WORKSPACE/benchmarks/tsbs_results.md"
+          echo "| --- | ---: | ---: |" >> "$GITHUB_WORKSPACE/benchmarks/tsbs_results.md"
+
+          benchmark_db \
+            questdb \
+            tsbs-questdb \
+            "docker run -d --name tsbs-questdb -p 9000:9000 -p 8812:8812 -p 9009:9009 -p 9003:9003 questdb/questdb:latest" \
+            "until curl -fsS http://localhost:9003/ping >/dev/null; do sleep 2; done" \
+            "cat \"$WORKDIR/questdb-data.gz\" | gunzip | ./bin/tsbs_load_questdb --workers=2 --batch-size=5000 --reporting-period=5s --url=http://localhost:9000 --ilp-bind-to localhost:9009" \
+            "cat \"$WORKDIR/questdb-queries.gz\" | gunzip | ./bin/tsbs_run_queries_questdb --workers=2 --max-queries=$QUERY_COUNT --url=http://localhost:9000"
+
+          benchmark_db \
+            timescaledb \
+            tsbs-timescaledb \
+            "docker run -d --name tsbs-timescaledb -e POSTGRES_PASSWORD=password -p 5432:5432 timescale/timescaledb:latest-pg16" \
+            "until docker exec tsbs-timescaledb pg_isready -U postgres >/dev/null 2>&1; do sleep 2; done" \
+            "cat \"$WORKDIR/timescaledb-data.gz\" | gunzip | ./bin/tsbs_load_timescaledb --workers=2 --batch-size=5000 --reporting-period=5s --host=localhost --port=5432 --user=postgres --pass=password --db-name=benchmark --admin-db-name=postgres --postgres=sslmode=disable --do-create-db=true" \
+            "cat \"$WORKDIR/timescaledb-queries.gz\" | gunzip | ./bin/tsbs_run_queries_timescaledb --workers=2 --max-queries=$QUERY_COUNT --hosts=localhost --port=5432 --user=postgres --pass=password --db-name=benchmark --postgres=sslmode=disable"
+
+          benchmark_db \
+            mongo \
+            tsbs-mongo \
+            "docker run -d --name tsbs-mongo -p 27017:27017 mongo:latest" \
+            "until docker exec tsbs-mongo mongosh --quiet --eval \"db.runCommand({ ping: 1 }).ok\" | grep -q 1; do sleep 2; done" \
+            "cat \"$WORKDIR/mongo-data.gz\" | gunzip | ./bin/tsbs_load_mongo --workers=2 --batch-size=5000 --reporting-period=5s --db-name=benchmark --url=localhost:27017" \
+            "cat \"$WORKDIR/mongo-queries.gz\" | gunzip | ./bin/tsbs_run_queries_mongo --workers=2 --max-queries=$QUERY_COUNT --db-name=benchmark --url=mongodb://localhost:27017"
+
+          benchmark_db \
+            influx \
+            tsbs-influx \
+            "docker run -d --name tsbs-influx -p 8086:8086 influxdb:1.8" \
+            "until curl -fsS http://localhost:8086/ping >/dev/null; do sleep 2; done" \
+            "cat \"$WORKDIR/influx-data.gz\" | gunzip | ./bin/tsbs_load_influx --workers=2 --batch-size=5000 --reporting-period=5s --db-name=benchmark --urls=http://localhost:8086" \
+            "cat \"$WORKDIR/influx-queries.gz\" | gunzip | ./bin/tsbs_run_queries_influx --workers=2 --max-queries=$QUERY_COUNT --db-name=benchmark --urls=http://localhost:8086"
+
+          benchmark_db \
+            cratedb \
+            tsbs-cratedb \
+            "docker run -d --name tsbs-cratedb -p 5432:5432 -p 4200:4200 crate:latest" \
+            "until curl -fsS http://localhost:4200 >/dev/null; do sleep 2; done" \
+            "cat \"$WORKDIR/cratedb-data.gz\" | gunzip | ./bin/tsbs_load_cratedb --workers=2 --batch-size=5000 --reporting-period=5s --hosts=localhost --port=5432 --user=crate" \
+            "cat \"$WORKDIR/cratedb-queries.gz\" | gunzip | ./bin/tsbs_run_queries_cratedb --workers=2 --max-queries=$QUERY_COUNT --hosts=localhost --port=5432 --user=crate"
+
+          benchmark_db \
+            clickhouse \
+            tsbs-clickhouse \
+            "docker run -d --name tsbs-clickhouse -p 8123:8123 -p 9000:9000 clickhouse/clickhouse-server:latest" \
+            "until docker exec tsbs-clickhouse clickhouse-client --query \"SELECT 1\" >/dev/null 2>&1; do sleep 2; done" \
+            "cat \"$WORKDIR/clickhouse-data.gz\" | gunzip | ./bin/tsbs_load_clickhouse --workers=2 --batch-size=5000 --reporting-period=5s --host=localhost --port=9000 --db-name=benchmark --user=default" \
+            "cat \"$WORKDIR/clickhouse-queries.gz\" | gunzip | ./bin/tsbs_run_queries_clickhouse --workers=2 --max-queries=$QUERY_COUNT --hosts=localhost --port=9000 --db-name=benchmark --user=default"
+
+          benchmark_db \
+            victoriametrics \
+            tsbs-victoriametrics \
+            "docker run -d --name tsbs-victoriametrics -p 8428:8428 victoriametrics/victoria-metrics:latest" \
+            "until curl -fsS http://localhost:8428/health >/dev/null; do sleep 2; done" \
+            "cat \"$WORKDIR/victoriametrics-data.gz\" | gunzip | ./bin/tsbs_load_victoriametrics --workers=2 --batch-size=5000 --reporting-period=5s --urls=http://localhost:8428/write" \
+            "cat \"$WORKDIR/victoriametrics-queries.gz\" | gunzip | ./bin/tsbs_run_queries_victoriametrics --workers=2 --max-queries=$QUERY_COUNT --urls=http://localhost:8428"
+
+          benchmark_db \
+            cassandra \
+            tsbs-cassandra \
+            "docker run -d --name tsbs-cassandra -p 9042:9042 cassandra:latest" \
+            "until docker exec tsbs-cassandra cqlsh -e \"DESCRIBE KEYSPACES\" >/dev/null 2>&1; do sleep 5; done" \
+            "cat \"$WORKDIR/cassandra-data.gz\" | gunzip | ./bin/tsbs_load_cassandra --workers=2 --batch-size=500 --reporting-period=5s --hosts=localhost:9042 --consistency=ONE" \
+            "cat \"$WORKDIR/cassandra-queries.gz\" | gunzip | ./bin/tsbs_run_queries_cassandra --workers=2 --max-queries=$QUERY_COUNT --host=localhost:9042"
 
       - name: Upload TSBS results
         uses: actions/upload-artifact@v4
