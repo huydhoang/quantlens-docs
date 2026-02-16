@@ -28,6 +28,8 @@ export const API_BASE = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
 export const WS_BASE = import.meta.env.VITE_WS_URL ?? "ws://localhost:8000";
 ```
 
+For production or TLS-enabled deployments, override these with `https://` and `wss://` protocols via environment variables.
+
 Tauri IPC is unnecessary for service discovery — the backend services have fixed, known ports.
 
 ### 1.3 CORS configuration — 🟡
@@ -59,7 +61,7 @@ All backtest requests must go through FastAPI for:
 - Job record creation in the database
 - Rate limiting and resource management
 
-The Deployment Architecture diagram's `A -->|Enqueue Jobs| C` (Tauri → Redis) arrow should be updated to `A -->|HTTP| API -->|Enqueue| C` to match the Backtest Execution Flow sequence diagram, which is the authoritative source.
+The Deployment Architecture diagram in `system_design.md` (section "Local App (Docker Compose + Embedded)") has an `A -->|Enqueue Jobs| C` (Tauri → Redis) arrow that should be updated to `A -->|HTTP| API -->|Enqueue| C` to match the Backtest Execution Flow sequence diagram in the same document, which is the authoritative source.
 
 ### 2.2 WebSocket progress ownership — 🟠
 
@@ -73,7 +75,7 @@ This keeps MVP single-tier. When Tier 2 is added for live trading, market data W
 
 ### 2.3 NautilusKernel in FastAPI lifespan — 🔴
 
-**Recommendation: Remove `NautilusKernel` from FastAPI's lifespan. It is a mistake.**
+**Recommendation: Remove `NautilusKernel` from FastAPI's lifespan. It conflicts with the established design patterns across all other architecture documents.**
 
 All docs agree: NautilusTrader is a library used in Celery workers, not in the API process. The `NautilusKernel` in `asgi_web_server.md`'s Tier 1 example is incorrect — it conflicts with:
 - `system_design.md`: "NautilusTrader is a library, not a service"
@@ -274,7 +276,7 @@ Correct the `data_providers.md` table row for Tiingo to:
 | Tiingo | Plan-dependent (see pricing page) · ~1,000 req/day (free) · 500 unique symbols/month | ...
 ```
 
-Remove the specific "50 requests/hour" claim, which was identified as incorrect in `todos.md`.
+Remove the specific "50 requests/hour" claim, which was identified as incorrect in `todos.md`. Also update the `RateLimitedClient` example in `data_providers.md` (which references `max_per_hour=50`) to use `max_per_day=1000` instead, and cross-reference `system_design.md`'s data management section for consistency.
 
 ---
 
@@ -439,6 +441,8 @@ def run_backtest(strategy_id: str, config: dict):
     node.run()
     return node.get_results()
 ```
+
+**Security note:** `exec()` runs arbitrary Python in the Celery worker process. For the single-user local MVP, this is acceptable (the user is running their own code on their own machine). For the future multi-tenant platform, replace `exec()` with a sandboxed execution environment (see §7.1). As an interim measure, consider restricting built-ins: `exec(code, {"__builtins__": safe_builtins}, namespace)` to prevent accidental use of `os`, `subprocess`, etc.
 
 This keeps Celery messages small (just IDs) and avoids passing Python source through the message queue.
 
