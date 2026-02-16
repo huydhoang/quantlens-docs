@@ -26,7 +26,7 @@ Cross-referencing [system_design.md](system_design.md), [local_frontend.md](loca
 - [ ] 🟠 **3.2 Shared NautilusTrader kernel** — The two-tier diagram shows a "shared" kernel, but NautilusTrader enforces one-BacktestNode-per-process. How do two Uvicorn processes share it?
 
 ## Data Layer
-- [ ] 🔴 **4.1 QuestDB vs TimescaleDB** — `system_design.md` uses QuestDB; `ohlcv_database.md` recommends TimescaleDB for Phase 1. Which ships in Docker Compose?
+- [x] 🔴 **4.1 QuestDB vs TimescaleDB** — `system_design.md` uses QuestDB; `ohlcv_database.md` recommends TimescaleDB for Phase 1. Which ships in Docker Compose? **RESOLVED: QuestDB** (see ohlcv_database.md for benchmark-driven decision)
 - [ ] 🟠 **4.2 QuestDB write protocol** — Three patterns shown: ILP over HTTP (port 9000), ILP over TCP (port 9009), PGWire SQL INSERT (port 8812). Which is canonical, or are different protocols for different tiers?
 - [ ] 🟠 **4.3 MongoDB presence** — Deployment diagram includes MongoDB; main Local App diagram omits it. Is MongoDB confirmed for the local Docker stack or deferred?
 - [ ] 🟡 **4.4 PostgreSQL connection pools** — How many asyncpg pools does FastAPI maintain (PostgreSQL + QuestDB PGWire + potentially TimescaleDB)?

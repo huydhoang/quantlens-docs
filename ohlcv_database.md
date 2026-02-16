@@ -2,47 +2,109 @@
 
 ## Overview
 
-This document evaluates time-series databases for storing and querying OHLCV (Open, High, Low, Close, Volume) financial market data. We assess QuestDB, TimescaleDB, InfluxDB, and MongoDB—examining performance claims, architectural trade-offs, and suitability for our phased rollout starting with Finnhub + Alpaca free-tier data.
+This document evaluates time-series databases for storing and querying OHLCV (Open, High, Low, Close, Volume) financial market data. After comprehensive benchmarking of QuestDB vs TimescaleDB and evaluating architectural trade-offs, **QuestDB is the recommended choice** for QuantLens' time-series data ingestion and backtesting workload.
 
 ---
 
-## 1. QuestDB Performance Assessment
+## Executive Summary
 
-QuestDB markets itself as the "fastest" time-series database. After analyzing their comparison blog posts and independent benchmarks, the claim is **substantially accurate for analytical workloads**, but comes with important context.
+**Decision: QuestDB**
 
-### Where QuestDB Genuinely Excels
+For QuantLens' primary use case—ingesting time-series data from providers (Tiingo, Alpaca, Finnhub) and reusing them for research and backtesting—QuestDB is the clear winner:
 
-**Ingestion Performance (Validated)**
-- **11.36M rows/sec** at peak (100K hosts) vs InfluxDB's 203K–402K rows/sec
-- **6–13x faster** than TimescaleDB across all cardinality levels
-- **24x faster** than MongoDB for time-series ingestion
-- Maintains performance even at **1M+ cardinality** where competitors degrade significantly
+- **1.7x faster data ingestion** (critical for building historical datasets)
+- **4.7x faster aggregations** across all symbols (essential for multi-asset backtesting)
+- **2.1x faster full table scans** (typical for portfolio analytics)
+- **Purpose-built for financial markets** with native `SAMPLE BY`, `ASOF JOIN`, and `LATEST ON`
+- **Columnar storage** optimized for time-series analytics and compression
 
-**Analytical Query Performance (Validated)**
-- **21–130x faster** than InfluxDB on double-groupby aggregations
-- **16–20x faster** than TimescaleDB on complex analytical queries
-- **375–418x faster** than InfluxDB 3 Core on extended range queries
+While TimescaleDB excels at simple point lookups (2.6x faster), our workload is dominated by batch ingestion and analytical queries—not OLTP operations.
 
-**Root cause**: Columnar storage + SIMD vectorization + single-table architecture eliminates per-series overhead that cripples InfluxDB at high cardinality.
+---
 
-### Known Catches & Limitations
+## 1. QuestDB vs TimescaleDB Benchmark Results
 
-| # | Limitation | Detail |
-|---|-----------|--------|
-| 1 | **Simple point queries lag** | InfluxDB v1 is ~2.5x faster on single-series lookups (`single-groupby-1-1-1`). If workload is primarily "fetch latest value for one sensor," InfluxDB may be better. |
-| 2 | **Append-only / no OLTP** | No true UPDATE/DELETE. Not designed for transactional workloads or log monitoring with frequent modifications. |
-| 3 | **Ecosystem immaturity** | Younger project (2019 vs 2013 InfluxDB, 2016 TimescaleDB). Fewer third-party integrations. |
-| 4 | **Production reliability concerns** | Independent 2023 user reports: *"Complicated queries were prone to returning no results, wrong results, error conditions, or slowly… defaults were quirky."* Thorough testing advised. |
-| 5 | **Benchmark methodology biases** | TSBS doesn't use bind variables; benchmarks run on high-end AWS instances (r8a.8xlarge, c6a.12xlarge); competitors tested with defaults. |
-| 6 | **Enterprise features gated** | Replication, RBAC, TLS, compression are proprietary/closed-source. |
-| 7 | **Schema rigidity** | Requires consistent column types per table. Variable data types across symbols require separate tables or casting. |
-| 8 | **PostgreSQL compatibility gaps** | No scrollable cursors (`DECLARE CURSOR`); breaks some drivers like `psycopg2`. |
+Recent performance testing with 1M rows across 10 metrics and 100 hosts reveals clear workload-specific winners:
+
+### Data Loading Performance
+
+| Metric | QuestDB | TimescaleDB | Advantage |
+|--------|---------|-------------|-----------|
+| **Load Time** | 3.012 sec | 5.154 sec | QuestDB 1.7x faster |
+| **Metrics/sec** | 3,327,761 | 1,944,415 | QuestDB 1.7x faster |
+| **Rows/sec** | 332,776 | 194,442 | QuestDB 1.7x faster |
+| **Total Metrics** | 10,022,400 | 10,022,400 | Same |
+| **Total Rows** | 1,002,240 | 1,002,240 | Same |
+
+**Winner: QuestDB** — ~71% faster ingestion with 2 workers
+
+### Query Performance Analysis
+
+#### Test 1: Single Metric, Single Host, 1 Hour (100 points)
+Simple point lookup query
+
+| Metric | QuestDB | TimescaleDB | Advantage |
+|--------|---------|-------------|-----------|
+| **Mean Latency** | 6.36 ms | 2.44 ms | TimescaleDB 2.6x faster |
+| **Median** | 5.53 ms | 2.05 ms | TimescaleDB 2.7x faster |
+| **Min** | 1.00 ms | 1.67 ms | QuestDB slightly faster |
+| **Max** | 38.28 ms | 18.45 ms | TimescaleDB 2.1x faster |
+| **Throughput** | 308.76 q/s | 812.80 q/s | TimescaleDB 2.6x faster |
+
+**Winner: TimescaleDB** — Significantly faster for simple point queries
+
+#### Test 2: Mean of 1 Metric, All Hosts, 12 Hours by 1h
+Aggregation across all hosts with grouping
+
+| Metric | QuestDB | TimescaleDB | Advantage |
+|--------|---------|-------------|-----------|
+| **Mean Latency** | 28.61 ms | 134.37 ms | **QuestDB 4.7x faster** |
+| **Median** | 23.29 ms | 132.34 ms | **QuestDB 5.7x faster** |
+| **Min** | 13.60 ms | 116.26 ms | **QuestDB 8.5x faster** |
+| **Max** | 197.11 ms | 200.26 ms | Similar |
+| **Throughput** | 68.72 q/s | 14.87 q/s | **QuestDB 4.6x faster** |
+
+**Winner: QuestDB** — Dramatically faster for analytical aggregations
+
+#### Test 3: CPU Over Threshold, All Hosts
+Full table scan with filtering
+
+| Metric | QuestDB | TimescaleDB | Advantage |
+|--------|---------|-------------|-----------|
+| **Mean Latency** | 71.78 ms | 152.31 ms | **QuestDB 2.1x faster** |
+| **Median** | 60.13 ms | 156.08 ms | **QuestDB 2.6x faster** |
+| **Min** | 41.18 ms | 98.70 ms | **QuestDB 2.4x faster** |
+| **Max** | 318.33 ms | 213.18 ms | TimescaleDB 1.5x faster |
+| **Throughput** | 27.64 q/s | 13.04 q/s | **QuestDB 2.1x faster** |
+
+**Winner: QuestDB** — ~2x faster for full table scans
+
+### Performance Summary
+
+| Workload Type | Winner | Margin |
+|--------------|--------|--------|
+| **Data Ingestion** | QuestDB | 1.7x faster |
+| **Simple Point Queries** | TimescaleDB | 2.6x faster |
+| **Aggregations (All Hosts)** | QuestDB | 4.7x faster |
+| **Full Table Scans** | QuestDB | 2.1x faster |
+
+### Key Insights
+
+1. **Trade-off Pattern**: TimescaleDB excels at simple point lookups (leveraging PostgreSQL's B-tree indexes), while QuestDB dominates analytical workloads (leveraging columnar storage and SIMD)
+
+2. **Cardinality Scaling**: QuestDB shows better performance as query complexity increases (moving from single-host to all-hosts queries)
+
+3. **Consistency**: QuestDB has higher variance in simple queries (stddev 5.42ms vs 2.30ms) but lower variance in complex queries
+
+4. **Architecture Difference**: 
+   - TimescaleDB's PostgreSQL roots give it fast index lookups
+   - QuestDB's columnar design gives it superior scan and aggregation performance
 
 ---
 
 ## 2. OHLCV-Specific Requirements
 
-Financial OHLCV data has characteristics that narrow the database choice:
+Financial OHLCV data has characteristics that favor QuestDB's architecture:
 
 - **High cardinality**: Thousands of symbols across multiple exchanges, each with bid/ask/trade streams.
 - **Append-heavy**: Market data is immutable facts; corrections arrive as new events.
@@ -53,7 +115,18 @@ Financial OHLCV data has characteristics that narrow the database choice:
 
 ---
 
-## 3. Database Comparison for OHLCV
+## 3. Why QuestDB for QuantLens
+
+### Primary Use Case Alignment
+
+QuantLens' core workload is **time-series data ingestion for research and backtesting**, not OLTP or real-time analytics dashboards. This means:
+
+1. **Batch ingestion dominates**: Loading historical data from providers (Tiingo, Alpaca, Finnhub)
+2. **Analytical queries for backtests**: Multi-symbol aggregations, time-range scans, bar generation
+3. **Append-only workflow**: Historical market data is immutable; corrections are rare
+4. **Local Docker deployment**: No cloud free-tier constraints or managed service limitations
+
+QuestDB's architecture is purpose-built for exactly this workload.
 
 ### QuestDB — Purpose-Built for Financial Markets
 
@@ -78,13 +151,23 @@ FROM trades
 SAMPLE BY 1m;
 ```
 
-**Strengths for OHLCV**: 11.36M rows/sec ingestion, no cardinality degradation, columnar compression + native Parquet export, zero-GC Java/C++ implementation for predictable latency.
+**Strengths for QuantLens**:
+- **332K rows/sec ingestion** (vs TimescaleDB's 194K) — critical for building historical datasets
+- **Native OHLCV bar generation** via `SAMPLE BY` — no complex window functions
+- **Columnar compression + Parquet export** — efficient storage and NautilusTrader integration
+- **Zero-GC Java/C++ implementation** — predictable latency for backtesting
+- **No cardinality degradation** — maintains performance with thousands of symbols
 
-**Weaknesses for OHLCV**: Append-only (corrections require insert-new-row pattern), partial PGWire support breaks some Python drivers, limited schema evolution during writes.
+**Trade-offs**:
+- **Append-only** — corrections require insert-new-row pattern (use `LATEST ON` for most recent)
+- **Partial PGWire support** — works with `asyncpg`, but `psycopg2` scrollable cursors unsupported
+- **Limited schema evolution** — requires consistent column types per table
 
-### TimescaleDB — PostgreSQL with Time-Series Extensions
+---
 
-Full PostgreSQL compatibility with automatic time-based partitioning (hypertables).
+### Alternative: TimescaleDB
+
+TimescaleDB offers full PostgreSQL compatibility with time-based partitioning (hypertables).
 
 ```sql
 -- OHLCV bar generation in TimescaleDB
@@ -99,11 +182,19 @@ FROM ticks
 GROUP BY bucket, symbol;
 ```
 
-**Strengths for OHLCV**: Full UPDATE/DELETE for trade corrections, any PostgreSQL driver/ORM works (`psycopg2`, `asyncpg`, `sqlalchemy`), hybrid row-columnar storage, mature ecosystem, handles mixed OLTP/OLAP (order management + analytics in one DB).
+**Strengths**: Full UPDATE/DELETE for trade corrections, any PostgreSQL driver/ORM works, hybrid row-columnar storage, mature ecosystem, handles mixed OLTP/OLAP workloads.
 
-**Weaknesses for OHLCV**: No native `ASOF JOIN`, `LATEST ON`, or `SAMPLE BY` (requires complex window functions / LATERAL JOINs), ~1M rows/sec ingestion (degrades to 620K at high cardinality), continuous aggregates have refresh lag (not truly real-time), chunk interval tuning complexity.
+**Why not chosen**: 
+- **194K rows/sec ingestion** (41% slower than QuestDB) — suboptimal for historical data loading
+- **4.7x slower aggregations** — impacts multi-asset backtest queries
+- **Complex analytical queries** — requires window functions instead of native `SAMPLE BY`/`ASOF JOIN`
+- **Continuous aggregates have refresh lag** — not truly real-time
 
-### InfluxDB — Wrong Architecture for Finance
+For QuantLens' ingestion-heavy, append-only, analytical workload, the PostgreSQL compatibility benefits don't outweigh the performance gap.
+
+---
+
+### Other Alternatives
 
 - **Per-series TSM storage**: Performance collapses with thousands of symbols.
 - **No true JOINs**: Cannot correlate trades with quotes or reference data.
@@ -117,112 +208,213 @@ GROUP BY bucket, symbol;
 - **24x slower ingestion**: Cannot keep up with market data feeds.
 - **Complex aggregation pipelines**: 20+ lines for what QuestDB does in 5 lines of SQL.
 
-### Head-to-Head Ingestion Comparison
+#### InfluxDB — Wrong Architecture for Finance
 
-| Database | Raw Tick Ingestion | OHLCV Query Performance |
-|----------|-------------------|------------------------|
-| **QuestDB** | 11.36M rows/sec | Native `SAMPLE BY` optimization |
-| TimescaleDB | ~1.2M rows/sec | Requires continuous aggregates |
-| InfluxDB | ~400K rows/sec | Flux queries slower for financial math |
-| MongoDB | ~300K rows/sec | Aggregation pipeline complex for time-series |
+- **Per-series TSM storage**: Performance collapses with thousands of symbols.
+- **No true JOINs**: Cannot correlate trades with quotes or reference data.
+- **Flux query language**: Steep learning curve; poor for complex financial calculations.
+- **Best for**: Infrastructure monitoring with low cardinality (hundreds of metrics, not thousands of symbols).
+
+#### MongoDB — General-Purpose Misfit
+
+- **Document model overhead**: Uniform OHLCV schema doesn't benefit from flexible documents.
+- **No time-series optimizations**: No native downsampling, partition pruning, or SIMD vectorization.
+- **24x slower ingestion**: Cannot keep up with market data feeds.
+- **Complex aggregation pipelines**: 20+ lines for what QuestDB does in 5 lines of SQL.
 
 ---
 
-## 4. Recommendation
+## 4. Implementation Strategy
 
-### Phase 1: TimescaleDB
+### Docker Compose Configuration
 
-For our starting constraints—**Finnhub + Alpaca free-tier real-time data**—TimescaleDB is the better choice. At small scale, developer productivity beats raw performance.
+QuestDB runs locally via Docker Compose with the following services:
 
-| Factor | Phase 1 Reality | Winner |
-|--------|----------------|--------|
-| Data volume | Free tiers ≈ 100–1,000 symbols, 1–5 min delayed or limited real-time | Either works |
-| Ingestion rate | ~10K–50K ticks/sec max | TimescaleDB's 1M rows/sec is plenty |
-| Query complexity | Mostly "latest price" and simple daily bars | Both handle easily |
-| Development speed | Need to ship quickly, learn as you go | **TimescaleDB** (better docs, bigger community) |
-| Tooling | Python pandas, SQLAlchemy, Jupyter | **TimescaleDB** (full PostgreSQL compatibility) |
-| Future flexibility | May need order tracking, portfolio state, user accounts | **TimescaleDB** (ACID transactions, JOINs) |
+```yaml
+services:
+  questdb:
+    image: questdb/questdb:latest
+    ports:
+      - "9000:9000"  # REST API and Web Console
+      - "8812:8812"  # PostgreSQL wire protocol
+      - "9009:9009"  # InfluxDB line protocol (recommended for ingestion)
+    volumes:
+      - questdb-data:/var/lib/questdb
+    environment:
+      - QDB_PG_ENABLED=true
+      - QDB_HTTP_ENABLED=true
+      - QDB_LINE_TCP_ENABLED=true
+```
 
-**Key Phase 1 advantages of TimescaleDB:**
+### Data Ingestion Pattern
 
-1. **PostgreSQL ecosystem**: Use `psycopg2`, `asyncpg`, or `sqlalchemy` without compatibility quirks.
-2. **Correction handling**: Free-tier data has errors/delays. `UPDATE` bad bars directly instead of inserting correction rows.
-3. **Schema evolution**: Early projects change schema frequently. Standard `ALTER TABLE` support.
-4. **Learning resources**: More Stack Overflow answers, tutorials, and examples at small scale.
-5. **Path to production**: PostgreSQL skills and tooling transfer directly if self-hosting or moving to TimescaleDB Cloud.
+Use InfluxDB Line Protocol (ILP) over TCP for maximum ingestion performance:
 
-**Phase 1 schema:**
+```python
+import socket
+
+def ingest_ohlcv(symbol: str, bars: list[dict]):
+    """Ingest OHLCV bars using ILP over TCP (9009)"""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.connect(('localhost', 9009))
+    
+    for bar in bars:
+        line = (
+            f"ohlcv,symbol={symbol} "
+            f"open={bar['open']},high={bar['high']},low={bar['low']},"
+            f"close={bar['close']},volume={bar['volume']} "
+            f"{bar['timestamp']}\n"
+        )
+        sock.sendall(line.encode())
+    
+    sock.close()
+```
+
+### Query Pattern
+
+Use PostgreSQL wire protocol (asyncpg) for analytical queries:
+
+```python
+import asyncpg
+
+async def fetch_bars(symbol: str, start: datetime, end: datetime):
+    """Fetch OHLCV bars using PGWire protocol (8812)"""
+    conn = await asyncpg.connect(
+        host='localhost',
+        port=8812,
+        user='admin',
+        password='quest',
+        database='qdb'
+    )
+    
+    rows = await conn.fetch("""
+        SELECT timestamp, open, high, low, close, volume
+        FROM ohlcv
+        WHERE symbol = $1
+          AND timestamp BETWEEN $2 AND $3
+        ORDER BY timestamp
+    """, symbol, start, end)
+    
+    await conn.close()
+    return rows
+```
+
+### QuestDB → Parquet Export for NautilusTrader
+
+```python
+async def export_to_parquet(symbol: str, output_path: str):
+    """Export QuestDB data to Parquet for NautilusTrader ParquetDataCatalog"""
+    conn = await asyncpg.connect(host='localhost', port=8812, ...)
+    
+    # Fetch data
+    rows = await conn.fetch("""
+        SELECT * FROM ohlcv
+        WHERE symbol = $1
+        ORDER BY timestamp
+    """, symbol)
+    
+    # Convert to Parquet
+    df = pd.DataFrame(rows)
+    df.to_parquet(output_path, engine='pyarrow', compression='snappy')
+```
+
+### Handling Data Corrections
+
+QuestDB is append-only. For corrections, insert a new row with updated data and use `LATEST ON`:
 
 ```sql
-CREATE TABLE ohlcv (
-    time TIMESTAMPTZ NOT NULL,
-    symbol TEXT NOT NULL,
-    open DOUBLE PRECISION,
-    high DOUBLE PRECISION,
-    low DOUBLE PRECISION,
-    close DOUBLE PRECISION,
-    volume DOUBLE PRECISION,
-    PRIMARY KEY (time, symbol)
+-- Insert correction
+INSERT INTO ohlcv VALUES (
+    '2024-01-15T09:30:00.000000Z',  -- original timestamp
+    'AAPL',
+    185.00,  -- corrected open
+    186.50,  -- corrected high
+    184.00,  -- corrected low
+    186.00,  -- corrected close
+    1000000  -- corrected volume
 );
 
-SELECT create_hypertable('ohlcv', 'time', chunk_time_interval => INTERVAL '1 day');
+-- Query always returns latest version per timestamp+symbol
+SELECT * FROM ohlcv
+LATEST ON timestamp PARTITION BY symbol
+WHERE symbol = 'AAPL';
 ```
-
-### When to Switch to QuestDB (Phase 2+)
-
-- Ingesting **>500K ticks/sec** or tracking **>10,000 symbols**
-- Requiring **sub-10ms query latency** for real-time strategies
-- Generating **OHLCV from raw ticks in real-time** rather than storing pre-aggregated bars
-- Needing **ASOF JOIN** for correlating trades with quotes or multiple data streams
-
-### Target Architecture (Phase 3)
-
-```
-Market Data Feed (ITCH, OUCH, FIX)
-         │
-    QuestDB (Raw Ticks)
-         │
-    ┌────┴────┐
-    │         │
-Materialized   Ad-hoc Analytics
-Views (OHLCV)  (Backtesting, Research)
-    │
-Real-time Dashboards (Grafana)
-```
-
-- **QuestDB**: Raw market data, real-time signals, high-frequency analytics
-- **TimescaleDB/PostgreSQL**: Order management, risk, reporting, reference data, user accounts
 
 ---
 
-## When QuestDB IS the Right Choice
+## 5. Decision Matrix
 
-- High-frequency financial market data (tick data, order books)
-- IoT at massive scale (millions of devices, high cardinality)
-- Time-series analytics (aggregations, downsampling, ASOF JOINs)
-- SQL-first teams wanting PostgreSQL compatibility
-- Append-only workloads where ingestion speed is critical
+| Requirement | QuestDB | TimescaleDB | Winner |
+|-------------|---------|-------------|--------|
+| **Data ingestion speed** | 332K rows/sec | 194K rows/sec | **QuestDB (1.7x)** |
+| **Aggregation queries** | 28.61ms mean | 134.37ms mean | **QuestDB (4.7x)** |
+| **Full table scans** | 71.78ms mean | 152.31ms mean | **QuestDB (2.1x)** |
+| **Simple point queries** | 6.36ms mean | 2.44ms mean | TimescaleDB (2.6x) |
+| **Native SAMPLE BY** | ✅ | ❌ (time_bucket) | **QuestDB** |
+| **ASOF JOIN** | ✅ | ❌ (LATERAL) | **QuestDB** |
+| **LATEST ON** | ✅ | ❌ (DISTINCT ON) | **QuestDB** |
+| **Parquet export** | ✅ Native | Manual | **QuestDB** |
+| **Local Docker** | ✅ Simple | ✅ Simple | Tie |
+| **Python drivers** | asyncpg | asyncpg, psycopg2 | TimescaleDB |
+| **UPDATE/DELETE** | ❌ (append-only) | ✅ | TimescaleDB |
+| **Schema evolution** | Limited | Full ALTER TABLE | TimescaleDB |
+| **Community size** | Smaller | Larger | TimescaleDB |
 
-## When to Look Elsewhere
-
-- Simple monitoring dashboards with low cardinality → InfluxDB
-- Mixed transactional/analytical workloads → TimescaleDB/PostgreSQL
-- Document-style flexible schemas → MongoDB
-- Sub-millisecond single-series lookups → InfluxDB v1
-- Mature ecosystem requirements → InfluxDB (Telegraf integration)
-
----
-
-## Bottom Line
-
-QuestDB's "fastest" claim is **defensible for analytical time-series workloads at high cardinality**, but speed comes from architectural trade-offs (columnar, append-only) that sacrifice flexibility and OLTP capabilities. The 2025 benchmarks against InfluxDB 3 Core (Alpha) show QuestDB maintaining a **12–36x ingestion advantage** and **17–418x query advantage**, confirming the performance lead persists against modern Arrow-based architectures.
-
-For **Phase 1 at free-tier scale**, TimescaleDB's PostgreSQL compatibility, mutable data, and larger community minimize friction. QuestDB becomes the clear upgrade path when data volumes and latency requirements demand it.
+**For QuantLens' workload (ingestion-heavy, append-only, analytical queries), QuestDB's strengths heavily outweigh its limitations.**
 
 ---
 
-## Sources
+## 6. When to Reconsider
+
+QuestDB may not be optimal if requirements change to:
+
+- **Frequent data corrections** requiring UPDATE/DELETE operations
+- **OLTP workloads** with transactional requirements (order management, portfolio state)
+- **Simple point queries dominate** (e.g., "fetch latest price" is >80% of queries)
+- **Complex schema evolution** needed frequently during development
+- **Mixed transactional/analytical** workloads in a single database
+
+In these cases, consider:
+- **TimescaleDB** for OLTP + time-series hybrid workloads
+- **PostgreSQL + QuestDB** dual-database architecture (PostgreSQL for OLTP, QuestDB for time-series)
+
+---
+
+## 7. Migration Path
+
+If switching from TimescaleDB to QuestDB later:
+
+1. **Data export**: Use TimescaleDB's `COPY TO` command or `pg_dump`
+2. **Transform**: Convert to InfluxDB Line Protocol format
+3. **Bulk load**: Use QuestDB's ILP over TCP for fast ingestion
+4. **Schema mapping**: Map TimescaleDB hypertables to QuestDB tables
+5. **Query rewrite**: Replace `time_bucket()` with `SAMPLE BY`, window functions with `LATEST ON`
+
+Estimated migration time for 100M rows: ~30 minutes (at 300K rows/sec ingestion rate).
+
+---
+
+## 8. Conclusion
+
+**QuestDB is the recommended time-series database for QuantLens.**
+
+The decision is driven by:
+
+1. **Performance alignment**: QuestDB's 1.7x faster ingestion, 4.7x faster aggregations, and 2.1x faster scans directly match QuantLens' ingestion-heavy, analytical workload
+2. **Financial market features**: Native `SAMPLE BY`, `ASOF JOIN`, and `LATEST ON` eliminate complex SQL workarounds
+3. **Columnar architecture**: Purpose-built for time-series analytics and compression
+4. **Local deployment**: Running in Docker eliminates cloud free-tier constraints that previously favored TimescaleDB
+5. **NautilusTrader integration**: Native Parquet export streamlines the QuestDB → ParquetDataCatalog pipeline
+
+While TimescaleDB offers better PostgreSQL compatibility and OLTP capabilities, these benefits are not critical for QuantLens' core use case of ingesting time-series data for research and backtesting.
+
+**Docker Compose ships with QuestDB** as documented in system_design.md.
+
+---
+
+## References
 
 1. https://questdb.com/blog/influxdb-vs-questdb-comparison/ 
 2. https://questdb.com/blog/timescaledb-vs-questdb-comparison/ 
 3. https://questdb.com/blog/mongodb-time-series-benchmark-review/
+4. Internal benchmark results (2026): QuestDB vs TimescaleDB performance testing
