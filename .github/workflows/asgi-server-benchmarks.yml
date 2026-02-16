@@ -84,7 +84,7 @@ jobs:
               requests_per_worker = total_requests // concurrency
               remainder = total_requests % concurrency
 
-              async with httpx.AsyncClient(timeout=30.0) as client:
+              async with httpx.AsyncClient(timeout=60.0) as client:
                   start = time.perf_counter()
                   tasks = []
                   for i in range(concurrency):
@@ -131,6 +131,7 @@ jobs:
 
           REQUESTS=1000000
           CONCURRENCY=200
+          STARTUP_WAIT_SECONDS=60
 
           run_benchmark() {
             local label="$1"
@@ -141,7 +142,7 @@ jobs:
             (cd "$APP_DIR" && bash -c "$server_cmd") > "$log_file" 2>&1 &
             local server_pid=$!
 
-            for _ in $(seq 1 60); do
+            for _ in $(seq 1 "$STARTUP_WAIT_SECONDS"); do
               if curl -fsS "http://127.0.0.1:${port}/" >/dev/null 2>&1; then
                 break
               fi
