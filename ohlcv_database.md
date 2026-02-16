@@ -258,20 +258,6 @@ For QuantLens' ingestion-heavy, append-only, analytical workload, the PostgreSQL
 - **24x slower ingestion**: Cannot keep up with market data feeds.
 - **Complex aggregation pipelines**: 20+ lines for what QuestDB does in 5 lines of SQL.
 
-#### InfluxDB — Wrong Architecture for Finance
-
-- **Per-series TSM storage**: Performance collapses with thousands of symbols.
-- **No true JOINs**: Cannot correlate trades with quotes or reference data.
-- **Flux query language**: Steep learning curve; poor for complex financial calculations.
-- **Best for**: Infrastructure monitoring with low cardinality (hundreds of metrics, not thousands of symbols).
-
-#### MongoDB — General-Purpose Misfit
-
-- **Document model overhead**: Uniform OHLCV schema doesn't benefit from flexible documents.
-- **No time-series optimizations**: No native downsampling, partition pruning, or SIMD vectorization.
-- **24x slower ingestion**: Cannot keep up with market data feeds.
-- **Complex aggregation pipelines**: 20+ lines for what QuestDB does in 5 lines of SQL.
-
 ---
 
 ## 4. Implementation Strategy
@@ -490,4 +476,4 @@ The decision is driven by benchmark results across 4 leading time-series databas
 1. https://questdb.com/blog/influxdb-vs-questdb-comparison/ 
 2. https://questdb.com/blog/timescaledb-vs-questdb-comparison/ 
 3. https://questdb.com/blog/mongodb-time-series-benchmark-review/
-4. Internal benchmark results (2026): 4-database comparison (QuestDB, ClickHouse, TimescaleDB, InfluxDB)
+4. QuantLens's benchmark results (2026): 4-database comparison (QuestDB, ClickHouse, TimescaleDB, InfluxDB)
