@@ -126,12 +126,15 @@ The two-tier diagram in `asgi_web_server.md` shows both tiers connecting to a "S
 
 ### 4.1 QuestDB vs TimescaleDB — which is the local default?
 
-`system_design.md` and `asgi_web_server.md` both use QuestDB as the OHLCV store. But `ohlcv_database.md` recommends **TimescaleDB for Phase 1** and QuestDB only for Phase 2+.
+**RESOLVED:** QuestDB is the confirmed database for OHLCV data in Docker Compose.
 
-**Question:** Which time-series database ships with the local Docker Compose setup?
-- The system_design.md diagrams all show QuestDB — does this mean the Phase 1 TimescaleDB recommendation was overridden?
-- If QuestDB, how are the `psycopg2` compatibility issues (documented in `ohlcv_database.md` — no scrollable cursors) handled with asyncpg in the FastAPI stack?
-- Should `ohlcv_database.md` be updated to reflect QuestDB as the default, or should system_design.md add TimescaleDB as the Phase 1 option?
+After comprehensive benchmarking (see `ohlcv_database.md`), QuestDB was selected because:
+- **1.7x faster data ingestion** (332K vs 194K rows/sec)
+- **4.7x faster aggregations** across all symbols (critical for multi-asset backtesting)
+- **Purpose-built for financial markets** with native `SAMPLE BY`, `ASOF JOIN`, and `LATEST ON`
+- **Local Docker deployment** eliminates the free-tier constraints that previously favored TimescaleDB
+
+The `psycopg2` compatibility issues (no scrollable cursors) are not a concern because the stack uses `asyncpg` for all PostgreSQL wire protocol connections, which works correctly with QuestDB.
 
 ### 4.2 QuestDB access protocol inconsistency
 
@@ -161,8 +164,7 @@ The two-tier diagram in `asgi_web_server.md` shows both tiers connecting to a "S
 
 **Question:** How many PostgreSQL-compatible connections does the FastAPI app maintain?
 - One `asyncpg` pool for PostgreSQL (strategies, results, users)
-- One `asyncpg` pool for QuestDB (OHLCV via PGWire)
-- Potentially one for TimescaleDB if it's the Phase 1 OHLCV store
+- One `asyncpg` pool for QuestDB (OHLCV via PGWire on port 8812)
 - Are these pools configured separately, or does a connection manager abstract them?
 
 ---
