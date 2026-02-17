@@ -20,7 +20,7 @@ jobs:
             start: >-
               uvicorn benchmarks.fastapi_app:app
               --host 0.0.0.0 --port 8000
-              --workers 4 --log-level warning
+              --workers 2 --log-level warning
           - name: fastapi-granian
             label: "FastAPI + granian"
             app: benchmarks.fastapi_app:app
@@ -28,7 +28,7 @@ jobs:
             start: >-
               granian --interface asgi
               --host 0.0.0.0 --port 8000
-              --workers 4 --log-level warning
+              --workers 2 --log-level warning
               benchmarks.fastapi_app:app
           - name: fastapi-gunicorn-uvicorn
             label: "FastAPI + gunicorn + uvicorn workers"
@@ -37,7 +37,7 @@ jobs:
             start: >-
               gunicorn benchmarks.fastapi_app:app
               -k uvicorn.workers.UvicornWorker
-              --workers 4 --bind 0.0.0.0:8000
+              --workers 2 --bind 0.0.0.0:8000
               --log-level warning
           - name: vanilla-uvicorn
             label: "Vanilla ASGI + uvicorn"
@@ -46,7 +46,7 @@ jobs:
             start: >-
               uvicorn benchmarks.asgi_app:app
               --host 0.0.0.0 --port 8000
-              --workers 4 --log-level warning
+              --workers 2 --log-level warning
           - name: vanilla-granian
             label: "Vanilla ASGI + granian"
             app: benchmarks.asgi_app:app
@@ -54,7 +54,7 @@ jobs:
             start: >-
               granian --interface asgi
               --host 0.0.0.0 --port 8000
-              --workers 4 --log-level warning
+              --workers 2 --log-level warning
               benchmarks.asgi_app:app
           - name: vanilla-gunicorn-uvicorn
             label: "Vanilla ASGI + gunicorn + uvicorn workers"
@@ -63,7 +63,7 @@ jobs:
             start: >-
               gunicorn benchmarks.asgi_app:app
               -k uvicorn.workers.UvicornWorker
-              --workers 4 --bind 0.0.0.0:8000
+              --workers 2 --bind 0.0.0.0:8000
               --log-level warning
 
     name: ${{ matrix.label }}
