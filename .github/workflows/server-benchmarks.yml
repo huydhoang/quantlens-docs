@@ -1,0 +1,186 @@
+name: Server Benchmarks
+
+on:
+  push:
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: fastapi-uvicorn
+            label: "FastAPI + uvicorn"
+            app: benchmarks.fastapi_app:app
+            server: uvicorn
+            start: >-
+              uvicorn benchmarks.fastapi_app:app
+              --host 0.0.0.0 --port 8000
+              --workers 2 --log-level warning
+          - name: fastapi-granian
+            label: "FastAPI + granian"
+            app: benchmarks.fastapi_app:app
+            server: granian
+            start: >-
+              granian --interface asgi
+              --host 0.0.0.0 --port 8000
+              --workers 2 --log-level warning
+              benchmarks.fastapi_app:app
+          - name: vanilla-uvicorn
+            label: "Vanilla ASGI + uvicorn"
+            app: benchmarks.asgi_app:app
+            server: uvicorn
+            start: >-
+              uvicorn benchmarks.asgi_app:app
+              --host 0.0.0.0 --port 8000
+              --workers 2 --log-level warning
+          - name: vanilla-granian
+            label: "Vanilla ASGI + granian"
+            app: benchmarks.asgi_app:app
+            server: granian
+            start: >-
+              granian --interface asgi
+              --host 0.0.0.0 --port 8000
+              --workers 2 --log-level warning
+              benchmarks.asgi_app:app
+          - name: gunicorn-uvicorn
+            label: "gunicorn + uvicorn workers"
+            app: benchmarks.fastapi_app:app
+            server: gunicorn
+            start: >-
+              gunicorn benchmarks.fastapi_app:app
+              -k uvicorn.workers.UvicornWorker
+              --workers 2 --bind 0.0.0.0:8000
+              --log-level warning
+
+    name: ${{ matrix.label }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Install Python dependencies
+        run: |
+          pip install fastapi uvicorn[standard] granian gunicorn
+
+      - name: Install hey
+        run: |
+          go install github.com/rakyll/hey@latest
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+
+      - name: Start server
+        run: |
+          ${{ matrix.start }} &
+          SERVER_PID=$!
+          echo "SERVER_PID=$SERVER_PID" >> "$GITHUB_ENV"
+
+          # Wait for server to be ready
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:8000/health >/dev/null 2>&1; then
+              echo "Server is ready (attempt $i)"
+              break
+            fi
+            sleep 1
+          done
+
+          # Final check
+          curl -fsS http://localhost:8000/health
+
+      - name: Measure memory before load
+        run: |
+          mkdir -p results
+
+          # Collect memory of the server process tree (master + workers)
+          TOTAL_RSS=0
+          for pid in $(pgrep -P "$SERVER_PID" 2>/dev/null) $SERVER_PID; do
+            if [ -f "/proc/$pid/status" ]; then
+              RSS=$(awk '/VmRSS/{print $2}' "/proc/$pid/status" 2>/dev/null || echo 0)
+              TOTAL_RSS=$((TOTAL_RSS + RSS))
+            fi
+          done
+          echo "idle_rss_kb=$TOTAL_RSS" >> "$GITHUB_ENV"
+          echo "Idle RSS: ${TOTAL_RSS} kB"
+
+      - name: Run throughput benchmark
+        run: |
+          # Warmup
+          hey -n 500 -c 50 http://localhost:8000/json > /dev/null 2>&1
+
+          # Benchmark: 30 seconds, 200 concurrent connections
+          hey -z 30s -c 200 http://localhost:8000/json | tee results/hey-output.txt
+
+      - name: Measure memory after load
+        run: |
+          TOTAL_RSS=0
+          for pid in $(pgrep -P "$SERVER_PID" 2>/dev/null) $SERVER_PID; do
+            if [ -f "/proc/$pid/status" ]; then
+              RSS=$(awk '/VmRSS/{print $2}' "/proc/$pid/status" 2>/dev/null || echo 0)
+              TOTAL_RSS=$((TOTAL_RSS + RSS))
+            fi
+          done
+          echo "loaded_rss_kb=$TOTAL_RSS" >> "$GITHUB_ENV"
+          echo "Loaded RSS: ${TOTAL_RSS} kB"
+
+      - name: Generate summary
+        run: |
+          RPS=$(awk '/Requests\/sec/{print $2}' results/hey-output.txt || echo "n/a")
+          AVG=$(awk '/Average/{print $2}' results/hey-output.txt | head -1 || echo "n/a")
+          P99=$(awk '/99%/{print $2}' results/hey-output.txt | head -1 || echo "n/a")
+          TOTAL=$(awk '/\[200\]/{print $2}' results/hey-output.txt || echo "n/a")
+
+          cat > results/summary.txt <<EOF
+          === ${{ matrix.label }} ===
+          Requests/sec:     ${RPS}
+          Avg latency:      ${AVG}
+          P99 latency:      ${P99}
+          2xx responses:    ${TOTAL}
+          Idle memory (kB): ${{ env.idle_rss_kb }}
+          Load memory (kB): ${{ env.loaded_rss_kb }}
+          EOF
+
+          cat results/summary.txt
+
+          # GitHub Actions Job Summary
+          {
+            echo "## ${{ matrix.label }}"
+            echo ""
+            echo "| Metric | Value |"
+            echo "| --- | ---: |"
+            echo "| Requests/sec | ${RPS} |"
+            echo "| Avg latency | ${AVG} |"
+            echo "| P99 latency | ${P99} |"
+            echo "| 2xx responses | ${TOTAL} |"
+            echo "| Idle memory (kB) | ${{ env.idle_rss_kb }} |"
+            echo "| Loaded memory (kB) | ${{ env.loaded_rss_kb }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Stop server
+        if: always()
+        run: |
+          kill "$SERVER_PID" 2>/dev/null || true
+          sleep 1
+          # Kill any remaining child processes
+          for pid in $(pgrep -P "$SERVER_PID" 2>/dev/null); do
+            kill "$pid" 2>/dev/null || true
+          done
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-${{ matrix.name }}
+          path: results/
