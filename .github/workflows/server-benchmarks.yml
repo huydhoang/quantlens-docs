@@ -30,6 +30,15 @@ jobs:
               --host 0.0.0.0 --port 8000
               --workers 2 --log-level warning
               benchmarks.fastapi_app:app
+          - name: fastapi-gunicorn-uvicorn
+            label: "FastAPI + gunicorn + uvicorn workers"
+            app: benchmarks.fastapi_app:app
+            server: gunicorn
+            start: >-
+              gunicorn benchmarks.fastapi_app:app
+              -k uvicorn.workers.UvicornWorker
+              --workers 2 --bind 0.0.0.0:8000
+              --log-level warning
           - name: vanilla-uvicorn
             label: "Vanilla ASGI + uvicorn"
             app: benchmarks.asgi_app:app
