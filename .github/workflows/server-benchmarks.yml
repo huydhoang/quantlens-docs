@@ -49,10 +49,10 @@ jobs:
               benchmarks.asgi_app:app
           - name: gunicorn-uvicorn
             label: "gunicorn + uvicorn workers"
-            app: benchmarks.fastapi_app:app
+            app: benchmarks.asgi_app:app
             server: gunicorn
             start: >-
-              gunicorn benchmarks.fastapi_app:app
+              gunicorn benchmarks.asgi_app:app
               -k uvicorn.workers.UvicornWorker
               --workers 2 --bind 0.0.0.0:8000
               --log-level warning
