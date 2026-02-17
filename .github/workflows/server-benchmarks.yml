@@ -101,6 +101,7 @@ jobs:
           curl -fsS http://localhost:8000/health
 
       - name: Measure memory before load
+        id: measure-memory-before-load
         run: |
           mkdir -p results
 
@@ -112,7 +113,7 @@ jobs:
               TOTAL_RSS=$((TOTAL_RSS + RSS))
             fi
           done
-          echo "idle_rss_kb=$TOTAL_RSS" >> "$GITHUB_ENV"
+          echo "idle_rss_kb=$TOTAL_RSS" >> "$GITHUB_OUTPUT"
           echo "Idle RSS: ${TOTAL_RSS} kB"
 
       - name: Run throughput benchmark
@@ -124,6 +125,7 @@ jobs:
           hey -z 300s -c 200 http://localhost:8000/json | tee results/hey-output.txt
 
       - name: Measure memory after load
+        id: measure-memory-after-load
         run: |
           TOTAL_RSS=0
           for pid in $(pgrep -P "$SERVER_PID" 2>/dev/null) $SERVER_PID; do
@@ -132,7 +134,7 @@ jobs:
               TOTAL_RSS=$((TOTAL_RSS + RSS))
             fi
           done
-          echo "loaded_rss_kb=$TOTAL_RSS" >> "$GITHUB_ENV"
+          echo "loaded_rss_kb=$TOTAL_RSS" >> "$GITHUB_OUTPUT"
           echo "Loaded RSS: ${TOTAL_RSS} kB"
 
       - name: Generate summary
@@ -142,14 +144,17 @@ jobs:
           P99=$(awk '/99%/{print $2}' results/hey-output.txt | head -1 || echo "n/a")
           TOTAL=$(awk '/\[200\]/{print $2}' results/hey-output.txt || echo "n/a")
 
+          IDLE_MEM="${{ steps.measure-memory-before-load.outputs.idle_rss_kb }}"
+          LOADED_MEM="${{ steps.measure-memory-after-load.outputs.loaded_rss_kb }}"
+
           cat > results/summary.txt <<EOF
           === ${{ matrix.label }} ===
           Requests/sec:     ${RPS}
           Avg latency:      ${AVG}
           P99 latency:      ${P99}
           2xx responses:    ${TOTAL}
-          Idle memory (kB): ${{ env.idle_rss_kb }}
-          Load memory (kB): ${{ env.loaded_rss_kb }}
+          Idle memory (kB): ${IDLE_MEM}
+          Load memory (kB): ${LOADED_MEM}
           EOF
 
           cat results/summary.txt
@@ -164,8 +169,8 @@ jobs:
             echo "| Avg latency | ${AVG} |"
             echo "| P99 latency | ${P99} |"
             echo "| 2xx responses | ${TOTAL} |"
-            echo "| Idle memory (kB) | ${{ env.idle_rss_kb }} |"
-            echo "| Loaded memory (kB) | ${{ env.loaded_rss_kb }} |"
+            echo "| Idle memory (kB) | ${IDLE_MEM} |"
+            echo "| Loaded memory (kB) | ${LOADED_MEM} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Stop server
