@@ -1,217 +1,361 @@
-# Deep Dive: Why Uvicorn Beats Granian in Database Queries (But Loses in JSON Serialization)
-
-## The Architectural Paradox
-
-Your benchmark results reveal a fascinating paradox that challenges the assumption "Rust = faster." Let me explain the architectural reasons why **Uvicorn (Python + Cython)** outperforms **Granian (Rust)** in database queries, but falls behind in raw JSON serialization.
+Here's your comprehensive guide to setting up and optimizing **Uvicorn** and **Granian** for maximum performance across all 4 variants. Based on [benchmarks](https://github.com/emmett-framework/granian/blob/master/benchmarks/vs.md) and best practices, Granian generally outperforms Uvicorn in raw throughput, while Uvicorn offers broader compatibility and a more mature ecosystem.
 
 ---
 
-## 1. Uvicorn's Architecture: The "Optimized Python" Approach
+## 1. FastAPI on Uvicorn (Production-Optimized)
 
-Uvicorn is not pure Python—it's a **hybrid C/Python architecture** specifically optimized for I/O-bound workloads:
+**Best for:** Compatibility, mature ecosystem, moderate traffic
 
-### Core Components
-
-| Component | Implementation | Purpose |
-|-----------|---------------|---------|
-| **uvloop** | Cython (compiled to C) | Event loop replacement using libuv (Node.js's I/O engine)  |
-| **httptools** | C (Node.js HTTP parser) | HTTP parsing at C speed  |
-| **asyncio** | C-optimized Python stdlib | Coroutine scheduling |
-
-### Why Uvicorn Wins at Database Queries
-
-**The Secret: Zero-Copy I/O and Mature Async Ecosystem**
-
-1. **uvloop's libuv Integration**: Uvicorn uses uvloop, which is **Cython code on top of libuv**—the same battle-tested async I/O library that powers Node.js . This provides:
-   - **2-4x faster** event loop operations than standard asyncio 
-   - Extremely efficient **epoll/kqueue/IOCP** abstractions
-   - Zero-copy buffer management for network I/O
-
-2. **asyncpg: The C-Implemented Driver**: In TechEmpower's "Single Query" test, frameworks use **asyncpg**—a PostgreSQL driver written in **C with a thin Python wrapper** . It uses:
-   - PostgreSQL's **binary protocol** (faster than text)
-   - **Prepared statements** with automatic caching
-   - Native asyncio integration without Rust FFI overhead
-
-3. **No FFI Boundary Crossing**: The entire request path stays in **C/Python memory space**:
-   ```
-   Client → httptools (C) → uvloop (Cython/C) → asyncio → asyncpg (C) → PostgreSQL
-   ```
-   No Rust ↔ Python serialization overhead at the server level.
-
----
-
-## 2. Granian's Architecture: The "Rust Wrapper" Approach
-
-Granian takes a different approach—it's a **Rust HTTP server** that embeds Python:
-
-### Core Components
-
-| Component | Implementation | Purpose |
-|-----------|---------------|---------|
-| **Hyper** | Rust | HTTP/1.1 and HTTP/2 protocol handling |
-| **Tokio** | Rust | Async runtime (Rust's equivalent of asyncio) |
-| **PyO3** | Rust | Python bindings and FFI layer |
-| **RSGI/ASGI** | Rust ↔ Python bridge | Application interface |
-
-### Why Granian Loses at Database Queries
-
-**The Problem: The FFI Tax and Mismatched Optimizations**
-
-1. **Python ↔ Rust FFI Overhead**: Every request crosses the **FFI boundary** (Foreign Function Interface):
-   ```rust
-   // Simplified: Rust receives HTTP request, calls Python app
-   async fn handle_request(req: Request) -> Response {
-       // Rust side (Hyper/Tokio)
-       let scope = create_asgi_scope(&req);
-       
-       // FFI call into Python - EXPENSIVE
-       let response = Python::with_gil(|py| {
-           app.call(py, (scope, receive, send))
-       }).await;
-       
-       response
-   }
-   ```
-
-   This boundary crossing involves:
-   - **GIL acquisition** (Global Interpreter Lock)
-   - **Memory marshalling** between Rust and Python heaps
-   - **Object conversion** (Rust types → Python objects)
-
-2. **Tokio/asyncio Mismatch**: Granian runs Python's asyncio on top of Tokio . This creates **two event loops**:
-   ```
-   Client → Hyper (Rust/Tokio) → FFI → asyncio (Python) → asyncpg → PostgreSQL
-                    ↑___________________________↓
-                         Context switches!
-   ```
-
-   When asyncpg (which expects native asyncio) runs under Granian, there's **scheduling overhead** between Tokio and asyncio.
-
-3. **Blocking Thread Configuration**: Granian uses `--blocking-threads` for sync code and `--runtime-threads` for I/O . For async database queries, misconfiguration can limit concurrency.
-
----
-
-## 3. Why Granian Wins at JSON Serialization
-
-Here's where the tables turn. In the **JSON Serialization** test, Granian dominates because:
-
-### The Test Characteristics
-
-TechEmpower's JSON test is **pure compute**: it serializes a tiny `{"message": "Hello, World!"}` object . No I/O, no database, just:
-1. Parse HTTP headers
-2. Create Python dict
-3. Serialize to JSON
-4. Return response
-
-### Granian's Advantages
-
-| Factor | Granian | Uvicorn |
-|--------|---------|---------|
-| **HTTP Parsing** | Native Rust (Hyper) | C (httptools) - comparable |
-| **JSON Serialization** | **orjson/ujson in Python** (C/Rust) | **Same** |
-| **Response Construction** | **Rust-side optimization** | Python asyncio overhead |
-| **GIL Release** | **Can release GIL during HTTP parsing** | Holds GIL in Python layer |
-
-**The Key Difference**: Granian's **RSGI interface** allows it to optimize the "trivial response" case. As the Granian author notes :
-> "RSGI changed this in a way that you have interfaces which are synchronous or asynchronous depending on what you're actually planning to do... if your route returns a JSON string, you don't need to await for sending the body because you already have all the body."
-
-Granian can **short-circuit** the async ceremony for simple responses, while ASGI requires:
-```python
-# ASGI (Uvicorn) - requires await for every step
-await send({"type": "http.response.start", ...})
-await send({"type": "http.response.body", ...})  # Extra event loop cycle
-
-# RSGI (Granian) - synchronous for complete responses
-proto.response_str(status=200, body="{}")  # Single call, no await
+### Installation
+```bash
+pip install fastapi uvicorn[standard] gunicorn
 ```
 
-For micro-benchmarks, this **protocol overhead** matters more than I/O efficiency.
+### Configuration Options
 
----
-
-## 4. The Database Query Deep Dive
-
-Let's analyze why Uvicorn's advantage reverses in database tests:
-
-### Single Query Test Flow
-
-| Step | Uvicorn Path | Granian Path |
-|------|-------------|--------------|
-| 1. HTTP Parse | httptools (C) | Hyper (Rust) |
-| 2. Route to App | asyncio (Cython) | Tokio → FFI → asyncio |
-| 3. DB Connection | asyncpg pool (C) | asyncpg pool (C) |
-| 4. Query Execution | asyncpg (C) → PostgreSQL | asyncpg (C) → PostgreSQL |
-| 5. Result Fetch | asyncpg (C) | asyncpg (C) |
-| 6. JSON Serialize | orjson/ujson (C/Rust) | orjson/ujson (C/Rust) |
-| 7. HTTP Response | asyncio → httptools | asyncio → FFI → Hyper |
-
-**The Bottleneck Shift**: In JSON tests, steps 3-5 don't exist. In DB tests, they dominate. The **FFI overhead** (step 2 and 7) becomes significant relative to total time.
-
-### Why Uvicorn Excels at Multiple Queries
-
-Your benchmark shows **Uvicorn #1 in single query, #2 in multiple queries**—both ahead of Granian. This is because:
-
-1. **Connection Pool Efficiency**: Uvicorn + asyncpg maintains **persistent connections** efficiently. The pool is optimized for asyncio's event loop without Tokio interference.
-
-2. **Latency Sensitivity**: Database queries have **high variance** (network + disk I/O). Uvicorn's uvloop has **lower tail latency** for I/O operations .
-
-3. **No Double Event Loop**: Uvicorn runs one event loop; Granian runs **Tokio + asyncio**, adding scheduling complexity.
-
----
-
-## 5. What This Means for Your Use Case (NautilusTrader + PyPortfolioOpt)
-
-Based on this analysis, here's the strategic recommendation:
-
-### Choose Uvicorn If:
-
-| Scenario | Rationale |
-|----------|-----------|
-| **Real-time market data streaming** | WebSocket performance is critical; Uvicorn has mature WebSocket support with **wsproto** or **websockets** |
-| **High-frequency trading signals** | Lower latency variance matters more than peak throughput |
-| **Mixed sync/async workload** | PyPortfolioOpt's CPU-heavy optimization runs in thread pools; Uvicorn's **loop.run_in_executor** is well-optimized |
-| **Database-heavy operations** | Your benchmarks confirm Uvicorn wins on DB queries |
-
-### Choose Granian If:
-
-| Scenario | Rationale |
-|----------|-----------|
-| **HTTP/2 or HTTP/3 required** | Granian has native HTTP/2 support  |
-| **Simple REST API, low latency** | JSON serialization advantage matters for simple responses |
-| **Static file serving** | Granian's `pathsend` extension is efficient |
-| **Long-running WebSockets** | Granian's Rust runtime handles connection stability well |
-
-### The Hybrid Recommendation
-
-For **NautilusTrader + PyPortfolioOpt**, I recommend **Uvicorn with specific optimizations**:
-
-```python
-# Production configuration
+**Option A: Pure Uvicorn (Development/Low Traffic)**
+```bash
 uvicorn main:app \
-    --loop uvloop \           # Use Cython event loop (2-4x faster)
-    --http httptools \        # C-based HTTP parser
-    --workers 4 \             # Match CPU cores
-    --limit-concurrency 1000   # Prevent overload
+  --host 0.0.0.0 \
+  --port 8000 \
+  --workers $(nproc) \
+  --loop uvloop \
+  --http httptools \
+  --interface asgi3 \
+  --no-access-log \
+  --timeout-keep-alive 5 \
+  --limit-concurrency 1000 \
+  --backlog 2048
 ```
 
-**Why not Granian for your trading use case?**
+**Option B: Gunicorn + Uvicorn Workers (Recommended for Production)**
 
-1. **NautilusTrader is async-native Rust** —it will integrate better with Uvicorn's Python async ecosystem
-2. **WebSocket streaming** is your likely bottleneck, not JSON serialization
-3. **Database queries** (portfolio state, trade history) are I/O-bound where Uvicorn wins
-4. **PyPortfolioOpt is CPU-bound**—you'll run it in process pools anyway, neutralizing Granian's Rust advantage
+> **Note:** `uvicorn.workers` is deprecated. Install the standalone package:
+> `pip install uvicorn-worker`
+
+```bash
+gunicorn main:app \
+  -w $(nproc) \
+  -k uvicorn_worker.UvicornWorker \
+  --bind 0.0.0.0:8000 \
+  --keep-alive 5 \
+  --timeout 120 \
+  --graceful-timeout 30 \
+  --preload \
+  --log-level warning
+```
+
+### FastAPI App Optimization
+```python
+from fastapi import FastAPI
+from fastapi.responses import ORJSONResponse
+
+app = FastAPI(
+    title="High Performance API",
+    openapi_url=None,  # Disable docs in production
+    docs_url=None,
+    redoc_url=None,
+    default_response_class=ORJSONResponse,  # Faster JSON serialization
+)
+
+@app.get("/")
+async def root():
+    return {"message": "Hello World"}
+```
+
+**Key Optimizations:**
+- **`uvicorn[standard]`**: Installs `httptools` (C-based HTTP parser via Cython bindings) and `uvloop` for significant performance gains
+- **Workers**: Set to number of CPU cores (not 2x+1 like WSGI)
+- **`--preload`**: Reduces memory usage via copy-on-write (Gunicorn only)
+- **`ORJSONResponse`**: Faster JSON serialization than standard `json` module
+- **`uvicorn.workers`**: Deprecated — use the `uvicorn-worker` package (`pip install uvicorn-worker`)
 
 ---
 
-## Summary: The Performance Hierarchy
+## 2. FastAPI on Granian (Maximum Performance)
 
-| Test Type | Winner | Key Factor |
-|-----------|--------|------------|
-| **JSON Serialization** | Granian | Protocol overhead, Rust HTTP optimization |
-| **Single Database Query** | Uvicorn | FFI-free path, mature asyncpg integration |
-| **Multiple Database Queries** | Uvicorn | Connection pool efficiency, lower latency variance |
-| **WebSocket Streaming** | Uvicorn | Ecosystem maturity, lower tail latency |
-| **HTTP/2 Throughput** | Granian | Native Rust HTTP/2 implementation |
-| **Mixed CPU/I/O Workload** | Uvicorn | Better executor integration for sync code |
+**Best for:** Raw throughput, modern deployments, Rust-backed performance
 
-**The Takeaway**: Rust doesn't automatically win. Uvicorn's **Cython + C + libuv** architecture is specifically optimized for the I/O patterns in database-heavy applications, while Granian's **Rust + FFI** overhead hurts it in these scenarios. For a trading system integrating NautilusTrader, Uvicorn's proven ecosystem and lower latency variance make it the safer, faster choice.
+### Installation
+```bash
+pip install fastapi granian
+```
+
+### Configuration
+
+**Basic High-Performance Setup**
+```bash
+granian main:app \
+  --interface asgi \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --workers $(nproc) \
+  --runtime-threads 2 \
+  --loop uvloop \
+  --http auto \
+  --backlog 2048 \
+  --no-ws \
+  --log-level warning
+```
+
+**Advanced Production Configuration**
+```bash
+granian main:app \
+  --interface asgi \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --workers $(nproc) \
+  --runtime-threads 2 \
+  --loop uvloop \
+  --http 1 \
+  --backlog 8192 \
+  --no-ws \
+  --log-level error \
+  --no-access-log \
+  --http1-keep-alive \
+  --http1-pipeline-flush \
+  --http1-buffer-size 417792
+```
+
+### FastAPI App (Granian-Optimized)
+```python
+from fastapi import FastAPI
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: Granian handles process forking efficiently
+    print("Starting up...")
+    yield
+    # Shutdown
+    print("Shutting down...")
+
+app = FastAPI(
+    lifespan=lifespan,
+    openapi_url=None,
+    docs_url=None,
+    redoc_url=None,
+)
+
+@app.get("/")
+async def root():
+    return {"message": "Hello from Granian"}
+```
+
+**Key Optimizations:**
+- **`--runtime-threads`**: Number of Rust I/O threads per worker; default of 1 is fine for most apps, increase for heavy websocket/HTTP2 use
+- **`--http 1`**: Lock to HTTP/1 if HTTP/2 is not needed, avoiding protocol negotiation overhead
+- **`--http1-pipeline-flush`**: Aggregates HTTP/1 flushes for better pipelined response support (experimental)
+- **`--no-ws`**: Disable WebSocket if not needed to reduce overhead
+- **`--no-access-log`**: Access logging is disabled by default; ensure it stays off for max throughput
+- **Memory**: Granian has lower memory footprint than Uvicorn+Gunicorn as a single Rust binary
+
+---
+
+## 3. Vanilla ASGI on Uvicorn (Minimal Overhead)
+
+**Best for:** Custom ASGI apps, maximum control, protocol experimentation
+
+### Installation
+```bash
+pip install uvicorn[standard] starlette
+```
+
+### Pure ASGI Application
+```python
+# asgi_app.py
+from starlette.responses import PlainTextResponse, JSONResponse
+
+async def app(scope, receive, send):
+    """
+    Pure ASGI application - no framework overhead
+    """
+    if scope["type"] == "http":
+        # Minimal routing
+        path = scope["path"]
+        
+        if path == "/":
+            response = PlainTextResponse("Hello World")
+        elif path == "/json":
+            response = JSONResponse({"message": "Hello"})
+        else:
+            response = PlainTextResponse("Not Found", status_code=404)
+        
+        await response(scope, receive, send)
+    elif scope["type"] == "websocket":
+        # Handle WebSocket if needed
+        pass
+```
+
+### Optimized Uvicorn Command
+```bash
+uvicorn asgi_app:app \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --workers $(nproc) \
+  --loop uvloop \
+  --http httptools \
+  --interface asgi3 \
+  --no-access-log \
+  --timeout-keep-alive 5 \
+  --limit-concurrency 2000 \
+  --backlog 4096 \
+  --h11-max-incomplete-event-size 16384
+```
+
+**Performance Tweaks:**
+- **`--interface asgi3`**: Explicitly select ASGI 3.0 spec (avoids auto-detection overhead)
+- **`--h11-max-incomplete-event-size`**: Set max buffer for incomplete HTTP events (only applies when using `h11`, not `httptools`)
+- **Pure ASGI**: Eliminates FastAPI/Starlette routing overhead
+
+---
+
+## 4. Vanilla ASGI on Granian (Fastest Possible)
+
+**Best for:** Microservices, edge computing, extreme performance requirements
+
+### Installation
+```bash
+pip install granian
+```
+
+### Optimized ASGI Application
+```python
+# granian_asgi.py
+import orjson
+
+async def app(scope, receive, send):
+    """
+    Ultra-minimal ASGI app optimized for Granian's Rust runtime
+    """
+    assert scope["type"] == "http"
+    
+    # Minimal scope extraction
+    method = scope["method"]
+    path = scope["path"]
+    
+    # Direct response construction (no framework)
+    if path == "/":
+        body = b"Hello World"
+        content_type = b"text/plain"
+    elif path == "/json":
+        body = orjson.dumps({"status": "ok", "path": path})
+        content_type = b"application/json"
+    else:
+        body = b"Not Found"
+        content_type = b"text/plain"
+    
+    # Direct ASGI send calls (fastest path)
+    await send({
+        "type": "http.response.start",
+        "status": 200 if path in ("/", "/json") else 404,
+        "headers": [
+            [b"content-type", content_type],
+            [b"content-length", str(len(body)).encode()],
+        ],
+    })
+    await send({
+        "type": "http.response.body",
+        "body": body,
+    })
+```
+
+### Maximum Performance Granian Command
+```bash
+granian granian_asgi:app \
+  --interface asgi \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --workers $(nproc) \
+  --runtime-threads 1 \
+  --loop uvloop \
+  --http 1 \
+  --backlog 8192 \
+  --no-ws \
+  --no-log \
+  --no-access-log \
+  --http1-keep-alive \
+  --http1-pipeline-flush \
+  --http1-buffer-size 417792 \
+  --process-name granian-worker
+```
+
+> **Note:** `--process-name` requires the `granian[pname]` extra: `pip install granian[pname,uvloop]`
+
+**Extreme Optimizations:**
+- **`--runtime-threads 1`**: For pure async I/O bound workloads, single Rust I/O thread per worker reduces context switching
+- **`--no-log`**: Disables all runtime logging for zero logging overhead
+- **`--http 1`**: Locks to HTTP/1 only, avoiding HTTP/2 negotiation overhead
+- **`--http1-pipeline-flush`**: Aggregates flushes for pipelined responses
+- **`orjson`**: Fastest Python JSON library (use for serialization)
+- **Direct ASGI**: Bypass all framework abstractions
+
+---
+
+## Performance Comparison Summary
+
+| Variant | Relative Performance* | Best Use Case |
+|---------|----------------------|---------------|
+| FastAPI + Uvicorn | Baseline | General production, compatibility |
+| FastAPI + Granian | Faster | High-throughput APIs |
+| Vanilla ASGI + Uvicorn | Faster | Custom protocols, minimal overhead |
+| Vanilla ASGI + Granian | Fastest | Microservices, edge computing |
+
+*Absolute RPS depends heavily on hardware, payload, and application logic. See [Granian benchmarks](https://github.com/emmett-framework/granian/blob/master/benchmarks/vs.md) for comparative data. Always profile your own workload.
+
+---
+
+## System-Level Optimizations (Apply to All)
+
+```bash
+# /etc/sysctl.conf for Linux
+net.core.somaxconn = 65535
+net.ipv4.tcp_max_syn_backlog = 65535
+net.ipv4.ip_local_port_range = 1024 65535
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.tcp_fin_timeout = 15
+
+# File descriptors
+ulimit -n 100000
+```
+
+---
+
+## Docker Compose Example
+
+```yaml
+version: '3.8'
+services:
+  # Variant 1: Uvicorn + FastAPI
+  fastapi-uvicorn:
+    build: .
+    command: >
+      gunicorn main:app -w 4 -k uvicorn_worker.UvicornWorker
+      --bind 0.0.0.0:8000
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 2G
+  
+  # Variant 2: Granian + FastAPI
+  fastapi-granian:
+    build: .
+    command: >
+      granian main:app --interface asgi --workers 4 --runtime-threads 2
+      --host 0.0.0.0 --port 8000 --no-ws
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 1G  # Lower memory usage
+  
+  # Variant 3 & 4: Vanilla ASGI
+  vanilla-granian:
+    build: .
+    command: >
+      granian asgi_app:app --interface asgi --workers 4
+      --host 0.0.0.0 --port 8000 --no-log
+```
+
+**Recommendation**: Start with **FastAPI + Granian** for new projects—it offers the best balance of developer experience and performance. Use **Vanilla ASGI + Granian** only when you've proven FastAPI is the bottleneck through profiling.
