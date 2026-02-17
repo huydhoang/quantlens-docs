@@ -1,3 +1,31 @@
+Datetime: 2026-02-18 00:00
+
+Created two files:
+
+**[.github/workflows/extended-server-benchmarks.yml](.github/workflows/extended-server-benchmarks.yml)** — `workflow_dispatch` trigger with configurable `duration`, `workers`, and `stacks` inputs. Installs Python deps (uvicorn, granian, gunicorn, fastapi, skfolio), Go-based `hey` load tester, runs the orchestrator, posts summary to Job Summary, and uploads raw results as artifacts.
+
+**[benchmarks/run_extended_benchmarks.py](benchmarks/run_extended_benchmarks.py)** — Orchestrator that benchmarks all 6 stacks sequentially on the same machine for fair comparison. Key design:
+
+**NautilusTrader mocking** — A meta-path import hook is injected into each server subprocess via `python -c`. It intercepts all `nautilus_trader.*` imports with lightweight stubs that support `__call__`, `__await__`, `__iter__`, `__bool__`, `__float__`, etc. — so every code path survives. `skfolio` runs for real, providing genuine CPU-bound work.
+
+**7 scenarios designed to reveal stack differences:**
+
+| Scenario | What it reveals |
+|---|---|
+| `GET /health` at c=50 | Steady-state request handling overhead |
+| `GET /health` at c=200 | Max throughput ceiling |
+| `POST /portfolio/optimize` at c=10 | CPU-bound work under moderate load |
+| `POST /portfolio/optimize` at c=50 | CPU contention + GIL pressure |
+| `POST /portfolio/hierarchical` at c=10 | Different compute profile (clustering) |
+| Burst: 5000 × `/health` at c=200 | Connection handling under spike |
+| Burst: 100 × `/portfolio/optimize` at c=50 | Queuing under CPU burst |
+
+**Output** — Generates a Markdown comparison table (Req/s, Avg, P50, P90, P99, Errors) per scenario + memory usage (idle vs after load), saved to `benchmarks/results/summary.md` and posted to the GitHub Actions Step Summary. Raw `hey` output and JSON results are uploaded as artifacts.
+
+---
+
+Datetime: 2026-02-18 00:00
+
 All 6 files are now fixed and consistent. Here's a summary of what was changed:
 
 ---

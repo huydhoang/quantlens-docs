@@ -1,0 +1,97 @@
+name: Extended Server Benchmarks
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: "Duration per timed scenario (seconds)"
+        required: false
+        default: "30"
+        type: string
+      workers:
+        description: "Worker count for multi-process stacks (Gunicorn)"
+        required: false
+        default: "2"
+        type: string
+      stacks:
+        description: "Space-separated stack IDs to benchmark (empty = all)"
+        required: false
+        default: ""
+        type: string
+
+# Cancel previous runs on re-dispatch
+concurrency:
+  group: extended-benchmarks
+  cancel-in-progress: true
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Go (for hey)
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install \
+            uvicorn[standard] granian gunicorn \
+            fastapi pydantic \
+            skfolio scikit-learn pandas numpy scipy
+
+      - name: Install hey
+        run: |
+          go install github.com/rakyll/hey@latest
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+
+      - name: Verify tools
+        run: |
+          python --version
+          hey 2>&1 | head -1 || true
+          uvicorn --version
+          granian --version
+          pip show gunicorn | grep Version
+
+      - name: Run benchmarks
+        env:
+          BENCH_DURATION: ${{ inputs.duration }}
+          BENCH_WORKERS: ${{ inputs.workers }}
+          BENCH_STACKS: ${{ inputs.stacks }}
+        run: |
+          STACKS_ARG=""
+          if [ -n "$BENCH_STACKS" ]; then
+            STACKS_ARG="--stacks $BENCH_STACKS"
+          fi
+          python benchmarks/run_extended_benchmarks.py \
+            --duration "$BENCH_DURATION" \
+            --workers "$BENCH_WORKERS" \
+            $STACKS_ARG
+
+      - name: Post summary
+        if: always()
+        run: |
+          if [ -f benchmarks/results/summary.md ]; then
+            cat benchmarks/results/summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: extended-benchmark-results
+          path: benchmarks/results/
+          retention-days: 90
