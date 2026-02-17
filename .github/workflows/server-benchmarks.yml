@@ -1,7 +1,7 @@
 name: Server Benchmarks
 
 on:
-  push:
+  workflow_dispatch:
 
 jobs:
   benchmark:
@@ -120,8 +120,8 @@ jobs:
           # Warmup
           hey -n 500 -c 50 http://localhost:8000/json > /dev/null 2>&1
 
-          # Benchmark: 30 seconds, 200 concurrent connections
-          hey -z 30s -c 200 http://localhost:8000/json | tee results/hey-output.txt
+          # Benchmark: 300 seconds, 200 concurrent connections
+          hey -z 300s -c 200 http://localhost:8000/json | tee results/hey-output.txt
 
       - name: Measure memory after load
         run: |
