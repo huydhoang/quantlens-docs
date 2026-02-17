@@ -18,11 +18,18 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
       - name: Install benchmark dependencies
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-          python -m pip install fastapi uvicorn granian httpx
+          python -m pip install fastapi uvicorn granian uvloop httptools
+          go install github.com/rakyll/hey@v0.1.4
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       - name: Benchmark FastAPI and vanilla ASGI servers
         run: |
@@ -62,63 +69,6 @@ jobs:
               await send({"type": "http.response.body", "body": body})
           PY
 
-          cat <<'PY' > "$APP_DIR/benchmark_client.py"
-          import argparse
-          import asyncio
-          import statistics
-          import time
-
-          import httpx
-
-
-          async def worker(client: httpx.AsyncClient, url: str, requests: int, durations: list[float]) -> None:
-              for _ in range(requests):
-                  start = time.perf_counter()
-                  response = await client.get(url)
-                  response.raise_for_status()
-                  durations.append((time.perf_counter() - start) * 1000.0)
-
-
-          async def run(url: str, total_requests: int, concurrency: int) -> tuple[float, float, float, float, float]:
-              durations: list[float] = []
-              requests_per_worker = total_requests // concurrency
-              remainder = total_requests % concurrency
-
-              async with httpx.AsyncClient(timeout=60.0) as client:
-                  start = time.perf_counter()
-                  tasks = []
-                  for i in range(concurrency):
-                      n = requests_per_worker + (1 if i < remainder else 0)
-                      tasks.append(asyncio.create_task(worker(client, url, n, durations)))
-                  await asyncio.gather(*tasks)
-                  elapsed = time.perf_counter() - start
-
-              throughput = total_requests / elapsed
-              min_ms = min(durations)
-              max_ms = max(durations)
-              mean_ms = statistics.fmean(durations)
-              median_ms = statistics.median(durations)
-              return throughput, min_ms, max_ms, mean_ms, median_ms
-
-
-          def main() -> None:
-              parser = argparse.ArgumentParser()
-              parser.add_argument("--url", required=True)
-              parser.add_argument("--requests", type=int, required=True)
-              parser.add_argument("--concurrency", type=int, required=True)
-              args = parser.parse_args()
-
-              throughput, min_ms, max_ms, mean_ms, median_ms = asyncio.run(
-                  run(args.url, args.requests, args.concurrency)
-              )
-
-              print(f"{throughput:.2f},{min_ms:.4f},{max_ms:.4f},{mean_ms:.4f},{median_ms:.4f}")
-
-
-          if __name__ == "__main__":
-              main()
-          PY
-
           {
             echo "# ASGI Server Benchmark Results"
             echo
@@ -131,8 +81,23 @@ jobs:
 
           REQUESTS=100000
           CONCURRENCY=4
-          SERVER_WORKERS=4
+          CPU_COUNT="$(getconf _NPROCESSORS_ONLN || echo 1)"
+          if [ "$CPU_COUNT" -lt 1 ]; then
+            CPU_COUNT=1
+          fi
+          if [ "$CPU_COUNT" -gt 4 ]; then
+            SERVER_WORKERS=4
+          else
+            SERVER_WORKERS="$CPU_COUNT"
+          fi
           STARTUP_WAIT_SECONDS=60
+          REQUEST_TIMEOUT_SECONDS=30
+          WARMUP_REQUESTS=200
+
+          secs_to_ms() {
+            local seconds="$1"
+            awk -v s="$seconds" 'BEGIN { printf "%.4f", s * 1000 }'
+          }
 
           cleanup_server() {
             local server_pid="${1:-}"
@@ -158,6 +123,7 @@ jobs:
             local server_cmd="$2"
             local port="$3"
             local log_file="/tmp/asgi-bench-${port}.log"
+            local hey_log_file="/tmp/asgi-bench-hey-${port}.log"
 
             (cd "$APP_DIR" && bash -c "$server_cmd") > "$log_file" 2>&1 &
             local server_pid=$!
@@ -174,31 +140,58 @@ jobs:
               cat "$log_file" >&2
               echo "| ${label} | n/a | n/a | n/a | n/a | n/a |" >> "$RESULTS_FILE"
               cleanup_server "$server_pid" "$log_file"
+              rm -f "$hey_log_file"
               return 1
             fi
 
-            local metrics
-            if ! metrics=$(python "$APP_DIR/benchmark_client.py" \
-              --url "http://127.0.0.1:${port}/" \
-              --requests "$REQUESTS" \
-              --concurrency "$CONCURRENCY"); then
+            # Warm-up run so worker processes/threads and connection pools are initialized before measuring.
+            hey -n "$WARMUP_REQUESTS" -c "$CONCURRENCY" -t "$REQUEST_TIMEOUT_SECONDS" "http://127.0.0.1:${port}/" >/dev/null 2>&1 || true
+
+            if ! hey -n "$REQUESTS" -c "$CONCURRENCY" -t "$REQUEST_TIMEOUT_SECONDS" "http://127.0.0.1:${port}/" > "$hey_log_file"; then
               echo "| ${label} | n/a | n/a | n/a | n/a | n/a |" >> "$RESULTS_FILE"
               cleanup_server "$server_pid" "$log_file"
+              rm -f "$hey_log_file"
               return 1
             fi
 
             cleanup_server "$server_pid" "$log_file"
 
-            IFS=',' read -r throughput min_ms max_ms mean_ms median_ms <<< "$metrics"
+            local throughput fastest_s slowest_s avg_s median_s min_ms max_ms mean_ms median_ms
+            throughput="$(sed -nE 's/^[[:space:]]*Requests\/sec:[[:space:]]*([0-9.]+).*/\1/p' "$hey_log_file" | tail -n1)"
+            fastest_s="$(sed -nE 's/^[[:space:]]*Fastest:[[:space:]]*([0-9.]+)[[:space:]]*secs/\1/p' "$hey_log_file" | tail -n1)"
+            slowest_s="$(sed -nE 's/^[[:space:]]*Slowest:[[:space:]]*([0-9.]+)[[:space:]]*secs/\1/p' "$hey_log_file" | tail -n1)"
+            avg_s="$(sed -nE 's/^[[:space:]]*Average:[[:space:]]*([0-9.]+)[[:space:]]*secs/\1/p' "$hey_log_file" | tail -n1)"
+            median_s="$(awk '/^[[:space:]]*50%/ {v=$(NF-1)} END {print v}' "$hey_log_file")"
+
+            if [ -z "${throughput:-}" ] || [ -z "${fastest_s:-}" ] || [ -z "${slowest_s:-}" ] || [ -z "${avg_s:-}" ] || [ -z "${median_s:-}" ]; then
+              echo "| ${label} | n/a | n/a | n/a | n/a | n/a |" >> "$RESULTS_FILE"
+              rm -f "$hey_log_file"
+              return 1
+            fi
+            local number_re='^[0-9]+([.][0-9]+)?$'
+            for metric in "$throughput" "$fastest_s" "$slowest_s" "$avg_s" "$median_s"; do
+              if ! [[ "$metric" =~ $number_re ]]; then
+                echo "| ${label} | n/a | n/a | n/a | n/a | n/a |" >> "$RESULTS_FILE"
+                rm -f "$hey_log_file"
+                return 1
+              fi
+            done
+
+            min_ms="$(secs_to_ms "$fastest_s")"
+            max_ms="$(secs_to_ms "$slowest_s")"
+            mean_ms="$(secs_to_ms "$avg_s")"
+            median_ms="$(secs_to_ms "$median_s")"
             echo "| ${label} | ${throughput} | ${min_ms} | ${max_ms} | ${mean_ms} | ${median_ms} |" >> "$RESULTS_FILE"
+            rm -f "$hey_log_file"
           }
 
           benchmark_failed=0
 
-          run_benchmark "FastAPI on uvicorn" "python -m uvicorn fastapi_app:app --host 127.0.0.1 --port 8000 --workers $SERVER_WORKERS" 8000 || benchmark_failed=1
-          run_benchmark "FastAPI on granian" "granian --interface asgi --host 127.0.0.1 --port 8001 --workers $SERVER_WORKERS fastapi_app:app" 8001 || benchmark_failed=1
-          run_benchmark "Vanilla ASGI uvicorn" "python -m uvicorn vanilla_app:app --host 127.0.0.1 --port 8002 --workers $SERVER_WORKERS" 8002 || benchmark_failed=1
-          run_benchmark "Vanilla ASGI granian" "granian --interface asgi --host 127.0.0.1 --port 8003 --workers $SERVER_WORKERS vanilla_app:app" 8003 || benchmark_failed=1
+          run_benchmark "FastAPI on uvicorn" "python -m uvicorn fastapi_app:app --host 127.0.0.1 --port 8000 --workers $SERVER_WORKERS --loop uvloop --http httptools --no-access-log --lifespan off" 8000 || benchmark_failed=1
+          # In Granian mt mode, a single worker with runtime threads avoids worker*thread oversubscription on CI runners.
+          run_benchmark "FastAPI on granian" "granian --interface asgi --host 127.0.0.1 --port 8001 --workers 1 --runtime-mode mt --runtime-threads $SERVER_WORKERS --loop uvloop fastapi_app:app" 8001 || benchmark_failed=1
+          run_benchmark "Vanilla ASGI uvicorn" "python -m uvicorn vanilla_app:app --host 127.0.0.1 --port 8002 --workers $SERVER_WORKERS --loop uvloop --http httptools --no-access-log --lifespan off" 8002 || benchmark_failed=1
+          run_benchmark "Vanilla ASGI granian" "granian --interface asgi --host 127.0.0.1 --port 8003 --workers 1 --runtime-mode mt --runtime-threads $SERVER_WORKERS --loop uvloop vanilla_app:app" 8003 || benchmark_failed=1
 
           cat "$RESULTS_FILE" >> "$GITHUB_STEP_SUMMARY"
           exit "$benchmark_failed"
