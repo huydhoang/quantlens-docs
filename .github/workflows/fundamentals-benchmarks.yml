@@ -179,7 +179,7 @@ jobs:
           docker run -d --name bench-ferretdb \
             -p 27018:27017 \
             -e FERRETDB_POSTGRESQL_URL="postgres://ferretdb:ferretdb@${FERRET_PG_IP}:5432/ferretdb" \
-            ghcr.io/ferretdb/ferretdb:latest
+            ghcr.io/ferretdb/ferretdb:1
           echo "Waiting for FerretDB to be ready …"
           for i in $(seq 1 30); do
             if docker exec bench-ferretdb mongosh --port 27017 --eval "db.runCommand({ping:1})" >/dev/null 2>&1; then
