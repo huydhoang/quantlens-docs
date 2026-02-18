@@ -30,7 +30,7 @@ from urllib.request import urlopen
 # code-path in the app modules survives without the real package.
 
 MOCK_PREAMBLE = textwrap.dedent("""\
-    import sys, types
+    import sys, types, importlib, importlib.util
     class _MC:
         def __call__(self, *a, **kw): return _MC()
         def __getattr__(self, n):
@@ -50,12 +50,15 @@ MOCK_PREAMBLE = textwrap.dedent("""\
             if n[:2] == n[-2:] == "__": raise AttributeError(n)
             return _MC()
     class _F:
-        def find_module(self, n, p=None):
-            return self if n == "nautilus_trader" or n.startswith("nautilus_trader.") else None
-        def load_module(self, n):
-            if n in sys.modules: return sys.modules[n]
-            m = _MM(n); m.__path__ = [n]; m.__package__ = n
-            sys.modules[n] = m; return m
+        def find_spec(self, name, path, target=None):
+            if name == "nautilus_trader" or name.startswith("nautilus_trader."):
+                return importlib.util.spec_from_loader(name, loader=self, origin="mock",
+                    is_package=True)
+            return None
+        def create_module(self, spec):
+            m = _MM(spec.name); m.__path__ = [spec.name]; m.__package__ = spec.name
+            m.__loader__ = self; return m
+        def exec_module(self, module): pass
     sys.meta_path.insert(0, _F())
 """)
 
@@ -214,7 +217,7 @@ def _server_code(stack, port, workers):
             import sys as _s
             _s.argv = [
                 "gunicorn", "{module}:app",
-                "-k", "uvicorn.workers.UvicornWorker",
+                "-k", "uvicorn_worker.UvicornWorker",
                 "-w", "{workers}",
                 "--bind", "0.0.0.0:{port}",
                 "--log-level", "warning",
