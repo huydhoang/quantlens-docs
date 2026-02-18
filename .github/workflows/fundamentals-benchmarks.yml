@@ -161,12 +161,24 @@ jobs:
 
       - name: Start FerretDB
         run: |
+          docker run -d --name bench-ferretdb-pg \
+            -p 5434:5432 \
+            -e POSTGRES_USER=ferretdb \
+            -e POSTGRES_PASSWORD=ferretdb \
+            -e POSTGRES_DB=ferretdb \
+            postgres:17
+          echo "Waiting for FerretDB PostgreSQL backend …"
+          for i in $(seq 1 30); do
+            if docker exec bench-ferretdb-pg pg_isready -U ferretdb >/dev/null 2>&1; then
+              echo "FerretDB backend ready (attempt $i)"
+              break
+            fi
+            sleep 2
+          done
+          FERRET_PG_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' bench-ferretdb-pg)
           docker run -d --name bench-ferretdb \
             -p 27018:27017 \
-            -e FERRETDB_POSTGRESQL_URL="postgres://bench:bench@$( \
-              docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' \
-              $(docker ps -qf "ancestor=postgres:17") \
-            ):5432/bench" \
+            -e FERRETDB_POSTGRESQL_URL="postgres://ferretdb:ferretdb@${FERRET_PG_IP}:5432/ferretdb" \
             ghcr.io/ferretdb/ferretdb:latest
           echo "Waiting for FerretDB to be ready …"
           for i in $(seq 1 30); do
@@ -218,4 +230,4 @@ jobs:
       - name: Cleanup containers
         if: always()
         run: |
-          docker rm -f bench-cassandra bench-scylla bench-ferretdb bench-ravendb 2>/dev/null || true
+          docker rm -f bench-cassandra bench-scylla bench-ferretdb bench-ferretdb-pg bench-ravendb 2>/dev/null || true

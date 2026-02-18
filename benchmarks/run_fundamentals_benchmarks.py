@@ -1091,7 +1091,7 @@ class RedisAdapter(DBAdapter):
             pipe.hset(key, mapping={k: str(v) for k, v in row.items()})
         pipe.execute()
         pipe = self.r.pipeline()
-        for i, row in enumerate(economic):
+        for row in economic:
             key = f"econ:{row['indicator_id']}:{row['timestamp']}:{row['revision_number']}"
             pipe.hset(key, mapping={k: str(v) for k, v in row.items()})
         pipe.execute()
@@ -1210,7 +1210,13 @@ class RavenDBAdapter(DBAdapter):
             timeout=10,
         )
         total += len(resp.json().get("Results", []))
-        total += total
+        # Re-fetch fundamentals for a third read pass (mimics multi-query pattern)
+        resp = requests.get(
+            f"{self.base_url}/databases/{self.db_name}/docs",
+            params={"startsWith": "fundamentals/", "pageSize": 1024},
+            timeout=10,
+        )
+        total += len(resp.json().get("Results", []))
         return total
 
 
