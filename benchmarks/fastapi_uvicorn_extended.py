@@ -26,10 +26,10 @@ from nautilus_trader.adapters.binance.config import BinanceDataClientConfig
 from nautilus_trader.adapters.binance.common.enums import BinanceAccountType
 
 # skfolio imports
-from skfolio import MeanRisk, ObjectiveFunction, RiskMeasure
+from skfolio import RiskMeasure
 from skfolio.datasets import load_sp500_dataset
 from skfolio.preprocessing import prices_to_returns
-from skfolio.optimization import HierarchicalRiskParity
+from skfolio.optimization import MeanRisk, ObjectiveFunction, HierarchicalRiskParity
 
 # Pydantic Models
 class PortfolioRequest(BaseModel):
