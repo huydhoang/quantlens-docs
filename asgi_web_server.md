@@ -2,7 +2,7 @@
 
 ## Decision Summary
 
-**FastAPI on Uvicorn** is the default ASGI web server stack for QuantLens. For production systems that combine research dashboards with live trading, use a **hybrid two-tier architecture**: FastAPI on Uvicorn for strategy backtesting and data dashboards, and a **lightweight Uvicorn gateway** (vanilla ASGI or Starlette-thin) for real-time market data ingestion and signal processing.
+**FastAPI on Gunicorn+Uvicorn** is the default ASGI web server stack for QuantLens. Internal extended benchmarks confirm that multi-worker stacks sustain ~2× the throughput of single-worker Uvicorn for CPU-bound portfolio optimization and backtesting. For production systems that combine research dashboards with live trading, use a **hybrid two-tier architecture**: FastAPI on Gunicorn+Uvicorn (or Granian) for strategy backtesting and data dashboards, and a **vanilla ASGI Granian gateway** for real-time market data ingestion and signal processing.
 
 ---
 
@@ -10,10 +10,10 @@
 
 QuantLens serves two distinct workload profiles through its web layer:
 
-1. **Research, backtesting & dashboards** — REST endpoints for running NautilusTrader simulations, portfolio optimization via skfolio, strategy CRUD, and serving results to a React frontend. These are compute-bound and database-heavy; the HTTP framework is not the bottleneck.
+1. **Research, backtesting & dashboards** — REST endpoints for running NautilusTrader simulations, portfolio optimization via skfolio, strategy CRUD, and serving results to a React frontend. These are compute-bound; internal benchmarks confirm that worker parallelism (not framework choice) is the bottleneck.
 2. **Real-time trading** — WebSocket streaming of market data from multiple providers (Finnhub, Alpaca), live signal processing, QuestDB writes, and order execution. These are I/O-bound and latency-sensitive.
 
-This document evaluates server architectures based on TechEmpower benchmark data, the internal mechanics of Uvicorn and Granian, and QuantLens's specific workload profile.
+This document evaluates server architectures based on TechEmpower benchmark data, internal extended ASGI stack benchmarks (skfolio CPU-bound and health check I/O-bound scenarios), the internal mechanics of Uvicorn and Granian, and QuantLens's specific workload profile.
 
 ---
 
@@ -110,7 +110,7 @@ In TechEmpower benchmarks, **Uvicorn ranks #1 in single-query and #2 in multiple
 
 ---
 
-## TechEmpower Benchmark Results
+## TechEmpower Benchmark Results (External Reference)
 
 ### By Test Type
 
@@ -132,38 +132,96 @@ In TechEmpower benchmarks, **Uvicorn ranks #1 in single-query and #2 in multiple
 
 FastAPI adds ~30% overhead versus Starlette alone. Vanilla ASGI on Uvicorn approaches BlackSheep/Sanic speeds.
 
+---
+
+## Extended ASGI Stack Benchmark Results (QuantLens Workload)
+
+These results are from the internal extended benchmark suite run against QuantLens's actual workload patterns: I/O-light health checks and CPU-bound skfolio portfolio optimization. NautilusTrader is mocked; skfolio runs for real. All runs: 30 s per timed scenario, 2 workers for multi-process stacks, GitHub Actions `ubuntu-latest`.
+
+### Memory Footprint
+
+| Stack | Idle RSS | After Load RSS |
+|-------|----------|----------------|
+| Uvicorn · Raw ASGI | 180 MB | 190 MB |
+| FastAPI · Uvicorn | 194 MB | 205 MB |
+| Gunicorn+Uvicorn · Raw ASGI | 385 MB | 405 MB |
+| FastAPI · Gunicorn+Uvicorn | 407 MB | 435 MB |
+| Granian · Raw ASGI | 423 MB | 445 MB |
+| FastAPI · Granian | 448 MB | 472 MB |
+
+Single-worker Uvicorn is the lightest option. Multi-worker stacks (Granian, Gunicorn+Uvicorn) cost roughly 2–2.5× more RAM in exchange for parallelism.
+
+### I/O-Bound: GET /health
+
+| Stack | Req/s (c=50) | Req/s (c=200) | P99 (c=200) |
+|-------|-------------:|--------------:|------------:|
+| Granian · Raw ASGI | 25,421 | 30,618 | 13.2 ms |
+| Gunicorn+Uvicorn · Raw ASGI | 22,706 | 25,353 | 13.9 ms |
+| Uvicorn · Raw ASGI | 17,546 | 17,253 | 47.9 ms |
+| FastAPI · Gunicorn+Uvicorn | 11,992 | 13,122 | 21.3 ms |
+| FastAPI · Granian | 11,831 | 11,626 | 26.4 ms |
+| FastAPI · Uvicorn | 7,661 | 7,476 | 82.1 ms |
+
+For I/O-light requests, Granian Raw leads at all concurrency levels. Single-worker Uvicorn's P99 degrades sharply at c=200 (47.9 ms), while multi-worker stacks hold tighter tail latency.
+
+### CPU-Bound: POST /portfolio/optimize (skfolio MeanRisk)
+
+| Stack | Req/s (c=10) | Req/s (c=50) | P99 (c=50) |
+|-------|-------------:|-------------:|-----------:|
+| Gunicorn+Uvicorn · Raw ASGI | 49 | 49 | 4.0 s |
+| Granian · Raw ASGI | 48 | 49 | 1.2 s |
+| FastAPI · Granian | 49 | 48 | 1.1 s |
+| FastAPI · Gunicorn+Uvicorn | 47 | 48 | 4.0 s |
+| Uvicorn · Raw ASGI | 25 | 24 | 14.4 s |
+| FastAPI · Uvicorn | 24 | 24 | 14.5 s |
+
+**Multi-worker stacks deliver ~2× the throughput of single-worker Uvicorn for CPU-bound optimization work.** Single-worker Uvicorn's P99 at c=50 reaches 14.4 s — unacceptable for interactive analyst workflows. Granian's multi-worker model shows the lowest P99 tail latency at high concurrency.
+
+### CPU-Bound: POST /portfolio/hierarchical (skfolio HRP, 10 assets)
+
+| Stack | Req/s (c=10) | P99 (c=10) |
+|-------|-------------:|-----------:|
+| FastAPI · Gunicorn+Uvicorn | 56 | 188 ms |
+| Gunicorn+Uvicorn · Raw ASGI | 55 | 214 ms |
+| Granian · Raw ASGI | 54 | 343 ms |
+| FastAPI · Granian | 29 | 387 ms |
+| Uvicorn · Raw ASGI | 28 | 373 ms |
+| FastAPI · Uvicorn | 27 | 386 ms |
+
+Gunicorn+Uvicorn wins on HRP throughput. FastAPI overhead matters less when compute dominates.
+
 ### What This Means for QuantLens
 
-QuantLens is **database-heavy and I/O-bound** in both tiers:
+QuantLens has two distinct workload profiles across its tiers:
 
-- **Tier 1 (backtesting/dashboards):** Reads/writes to PostgreSQL (strategy configs, backtest results), DuckDB (fundamentals), and QuestDB (historical OHLCV). Uvicorn's benchmark lead on database queries directly applies.
-- **Tier 2 (real-time trading):** Continuous QuestDB writes, asyncpg connection pool under sustained load, WebSocket streaming to the React frontend. Uvicorn's lower tail latency and single-event-loop architecture deliver more predictable performance.
+- **Tier 1 (backtesting/portfolio optimization — CPU-bound):** Benchmarks confirm that **single-worker Uvicorn throughput collapses under concurrent CPU load** (~24 req/s vs ~49 req/s for multi-worker stacks). For skfolio MeanRisk and NautilusTrader backtesting, Granian or Gunicorn+Uvicorn are the correct choices. FastAPI on Gunicorn+Uvicorn provides the best combination of developer experience and multi-worker parallelism; FastAPI on Granian offers similar throughput with better P99 tail latency.
+- **Tier 2 (real-time trading — I/O-bound):** Granian Raw leads throughput (30K req/s) with tighter tail latency at high concurrency. Uvicorn Raw's P99 degrades to 47.9 ms at c=200, while Granian holds 13.2 ms. For the low-latency WebSocket path, Granian or Gunicorn+Uvicorn both handle burst traffic more predictably.
 
-Granian's JSON serialization advantage is irrelevant here — QuantLens endpoints are never "return a static JSON string." Every request involves database I/O, compute, or both.
+The TechEmpower advantage for Uvicorn on database queries is not contradicted by these results — no DB path was tested — but for QuantLens endpoints where the compute cost dominates (backtesting, optimization), worker parallelism outweighs event-loop efficiency.
 
 ---
 
 ## Performance Reality Check
 
-Backtesting is **compute-bound, not I/O-bound**. A NautilusTrader simulation taking seconds to minutes will not be materially faster with Uvicorn's microsecond-level advantages over Granian. The server overhead is noise compared to engine runtime.
+Backtesting is **compute-bound, not I/O-bound**. Extended benchmark results confirm this directly: single-worker Uvicorn handles only ~24–25 req/s for concurrent portfolio optimizations, while multi-worker Granian or Gunicorn+Uvicorn sustain ~48–49 req/s — a 2× throughput difference. A NautilusTrader simulation taking seconds to minutes will be meaningfully slower at the server tier when multiple analysts run concurrent backtests against a single-worker process.
 
-For the real-time path, the overhead matters:
+For the real-time path, tail latency matters more than peak throughput:
 
 ### Latency Budget — Real-Time Trading Path
 
-| Component | Target | FastAPI + Uvicorn | Vanilla Uvicorn |
-|-----------|--------|-------------------|-----------------|
-| Market data ingest (Finnhub/Alpaca) | < 5 ms | +2–5 ms | +0.3 ms |
-| Signal calculation (NautilusTrader) | 10–50 ms | same | same |
-| DB write (QuestDB) | 5–10 ms | same | same |
-| WebSocket push to React | < 10 ms | +2–3 ms | +0.3 ms |
-| **Total round-trip** | **~30–75 ms** | **+4–8 ms (10–25%)** | **Minimal** |
+| Component | Target | FastAPI + Uvicorn | FastAPI + Granian | Vanilla Granian |
+|-----------|--------|-------------------|-------------------|-----------------|
+| Market data ingest (Finnhub/Alpaca) | < 5 ms | +2–5 ms | +1–3 ms | +0.3 ms |
+| Signal calculation (NautilusTrader) | 10–50 ms | same | same | same |
+| DB write (QuestDB) | 5–10 ms | same | same | same |
+| WebSocket push to React | < 10 ms | +2–3 ms | +1–2 ms | +0.3 ms |
+| **Total round-trip** | **~30–75 ms** | **+4–8 ms (10–25%)** | **+2–5 ms** | **Minimal** |
 
-Uvicorn's uvloop delivers **lower tail latency** than Granian's Tokio-to-asyncio bridge for sustained I/O, making it the better foundation for both tiers.
+Internal benchmarks show Granian's P99 at high concurrency (13.2 ms at c=200) significantly outperforms single-worker Uvicorn (47.9 ms at c=200) for I/O-bound requests. Multi-worker stacks provide more predictable tail latency across both tiers.
 
 ---
 
-## Tier 1: FastAPI on Uvicorn — Backtesting & Dashboards
+## Tier 1: FastAPI on Gunicorn+Uvicorn (or Granian) — Backtesting & Dashboards
 
 ### Why FastAPI
 
@@ -174,12 +232,16 @@ Uvicorn's uvloop delivers **lower tail latency** than Granian's Tokio-to-asyncio
 | **Trading System Fit** | Native Pydantic matches NautilusTrader data models, WebSocket support, seamless skfolio integration | Extra layers versus vanilla ASGI |
 | **Maintenance** | Large community, extensive documentation, battle-tested in production | Framework updates may break APIs |
 
-### Why Uvicorn (Not Granian) for This Tier
+### Why Multi-Worker (Gunicorn+Uvicorn or Granian) for This Tier
 
-1. **Database queries dominate.** Backtest results, strategy configs, historical OHLCV, and fundamentals all hit PostgreSQL/QuestDB/DuckDB. Uvicorn wins on every database benchmark.
-2. **asyncpg runs natively.** No Tokio → asyncio context switches. Connection pool performance is optimal.
-3. **Mixed sync/async workload.** skfolio's CPU-heavy optimization runs in process pools via `loop.run_in_executor` — Uvicorn's executor integration is well-optimized and battle-tested.
-4. **NautilusTrader is async-native Python/Rust.** It integrates directly with Python's asyncio ecosystem without an extra FFI layer.
+Internal benchmarks confirm that single-worker Uvicorn is the wrong choice when concurrent CPU-bound requests are expected:
+
+1. **CPU-bound optimization throughput.** FastAPI on Gunicorn+Uvicorn and FastAPI on Granian both sustain ~48–49 req/s for concurrent skfolio MeanRisk optimization; FastAPI on single-worker Uvicorn caps at ~24 req/s — a 2× deficit.
+2. **P99 tail latency under load.** Single-worker Uvicorn P99 reaches 14.5 s at c=50 for CPU-bound requests; FastAPI on Granian holds 1.1 s P99.
+3. **NautilusTrader backtesting is also CPU-bound.** A simulation that ties up the single worker blocks all other requests; multiple workers keep the API responsive.
+4. **asyncpg still runs natively on the Uvicorn workers** inside Gunicorn, preserving the database query advantages from TechEmpower benchmarks.
+
+**FastAPI on Gunicorn+Uvicorn** is the default recommendation: familiar Uvicorn worker model, process-level parallelism, and predictable P99. **FastAPI on Granian** is the alternative if lower P99 tail latency at high concurrency is a priority (Granian P99 at c=50: 1.1 s vs Gunicorn+Uvicorn P99: 4.0 s).
 
 ### React Frontend Integration
 
@@ -281,29 +343,35 @@ async def optimize_portfolio(holdings: dict):
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(executor, run_optimization_sync, holdings)
 
-# Run with:
-# uvicorn main:app --loop uvloop --http httptools --workers 4 --limit-concurrency 1000
+# Run with Gunicorn+Uvicorn (recommended for CPU-bound workloads):
+# gunicorn main:app -k uvicorn_worker.UvicornWorker -w 4 --bind 0.0.0.0:8000 --log-level warning
+# Or with Granian (lower P99 under high concurrency):
+# granian main:app --interface asgi --workers 4 --port 8000
 ```
 
 ---
 
-## Tier 2: Vanilla Uvicorn Gateway — Real-Time Trading
+## Tier 2: Vanilla Granian Gateway — Real-Time Trading
 
 ### Why Vanilla ASGI (Not FastAPI) for This Tier
 
-When the system handles multiple streaming data sources, live signal processing, and order execution, FastAPI's middleware stack adds measurable latency to the hot path. Stripping down to vanilla ASGI on Uvicorn provides:
+When the system handles multiple streaming data sources, live signal processing, and order execution, FastAPI's middleware stack adds measurable latency to the hot path. Stripping down to vanilla ASGI provides:
 
 - **No middleware traversal** — direct WebSocket handling
 - **Custom serialization** — MessagePack/Protobuf instead of JSON
 - **Direct kernel integration** — NautilusTrader tick injection with zero framework overhead
 - **Backpressure control** — fine-grained queue management for sustained ingestion
 
-### Why Uvicorn (Not Granian) for This Tier
+### Why Granian (Not Single-Worker Uvicorn) for This Tier
 
-1. **WebSocket streaming is the bottleneck.** Uvicorn's uvloop has mature, low-variance WebSocket performance. Granian's Tokio → asyncio bridge adds scheduling jitter under sustained streaming load.
-2. **QuestDB writes on every tick.** QuestDB's high-performance Influx Line Protocol (ILP) over TCP handles writes efficiently under Uvicorn's single event loop, while PGWire queries for reads integrate cleanly with asyncio-native drivers.
-3. **Lower tail latency.** For real-time trading, p99 latency matters more than peak throughput. Uvicorn's libuv foundation delivers more predictable I/O scheduling.
-4. **Ecosystem maturity.** The `websockets` library, asyncpg, and aioredis are all optimized for asyncio/uvloop — no FFI friction.
+Internal benchmarks confirm that Granian Raw ASGI outperforms single-worker Uvicorn on I/O-bound requests at all tested concurrency levels:
+
+1. **Higher throughput under load.** Granian Raw sustains 30,618 req/s at c=200 versus Uvicorn Raw's 17,253 req/s — a 1.8× difference.
+2. **Tighter P99 tail latency.** Granian Raw P99 at c=200: 13.2 ms; Uvicorn Raw P99: 47.9 ms. For real-time trading, the 3.6× tail latency gap is directly observable as jitter in the signal pipeline.
+3. **Stable burst handling.** Burst benchmark (5,000 × GET /health, c=200): Granian P99 is 20.8 ms versus Uvicorn P99 of 199.7 ms. Uvicorn single-worker buffers requests under spike load in a way that degrades predictability.
+4. **Ecosystem compatibility.** Granian's ASGI interface is fully compatible with the `websockets` library, asyncpg, and aioredis — no behavioral changes required.
+
+Gunicorn+Uvicorn Raw (25,353 req/s, P99 13.9 ms) is an acceptable alternative if operational familiarity with Gunicorn is important.
 
 ### WebSocket Performance
 
@@ -455,15 +523,17 @@ async def app(scope, receive, send):
             "body": b'{"status": "live"}',
         })
 
-# Run with:
-# uvicorn realtime_gateway:app --loop uvloop --http httptools --workers 2 --port 8001
+# Run with Granian (recommended — lowest P99 tail latency for I/O-bound path):
+# granian realtime_gateway:app --interface asgi --workers 2 --port 8001
+# Or with Gunicorn+Uvicorn:
+# gunicorn realtime_gateway:app -k uvicorn_worker.UvicornWorker -w 2 --bind 0.0.0.0:8001
 ```
 
 ---
 
 ## Recommended Architecture: Hybrid Two-Tier
 
-For production systems that combine research and real-time trading, split the workload across two Uvicorn processes:
+For production systems that combine research and real-time trading, split the workload across two multi-worker server processes:
 
 ```mermaid
 flowchart TD
@@ -474,7 +544,7 @@ flowchart TD
     frontend -->|HTTP / WebSocket| tier1
     frontend -->|WebSocket| tier2
 
-    subgraph tier1["Tier 1 — FastAPI · Uvicorn · Port 8000"]
+    subgraph tier1["Tier 1 — FastAPI · Gunicorn+Uvicorn (or Granian) · Port 8000"]
         T1A["POST /backtest — Run NautilusTrader"]
         T1B["GET  /backtest/&lbrace;id&rbrace; — Query results"]
         T1C["WS   /backtest/stream — Real-time progress"]
@@ -483,7 +553,7 @@ flowchart TD
         T1F["Pydantic validation · OpenAPI docs · JWT auth"]
     end
 
-    subgraph tier2["Tier 2 — Vanilla ASGI · Uvicorn · Port 8001"]
+    subgraph tier2["Tier 2 — Vanilla ASGI · Granian (or Gunicorn+Uvicorn) · Port 8001"]
         T2A["WS /ws/market-data"]
         T2B["WS /ws/signals"]
         T2C["WS /ws/execution"]
@@ -510,13 +580,13 @@ flowchart TD
 
 ### Benefits
 
-- **Both tiers run on Uvicorn**, leveraging its database query and WebSocket streaming advantages across the board.
+- **Tier 1 runs on Gunicorn+Uvicorn or Granian** — multi-worker parallelism provides 2× the throughput of single-worker Uvicorn for CPU-bound backtesting and portfolio optimization, confirmed by internal benchmarks.
+- **Tier 2 runs on Granian (or Gunicorn+Uvicorn)** — Granian delivers 1.8× higher I/O throughput and 3.6× better P99 tail latency at c=200 compared to single-worker Uvicorn.
 - **FastAPI** handles business logic (portfolio optimization, backtesting, reporting) with full developer experience — OpenAPI docs, Pydantic validation, CORS middleware.
 - **Vanilla ASGI** handles the hot path (market data ingestion, order execution, real-time risk) with minimal latency and direct asyncpg/WebSocket control.
 - Both tiers share Pydantic models via a shared library.
 - Isolated failure domains — a crash in the research API does not affect live trading.
 - **Redis pub/sub** decouples the tiers with built-in backpressure handling.
-- A single event loop architecture (uvloop) on both tiers means **no Tokio ↔ asyncio scheduling friction** for database operations.
 
 ---
 
@@ -573,17 +643,18 @@ async def get_fundamentals(ticker: str) -> dict:
 
 ---
 
-## When to Consider Granian
+## When to Use Granian vs Gunicorn+Uvicorn
 
-Granian is not the right default for QuantLens, but there are scenarios where it could be worth evaluating:
+Internal benchmarks provide direct guidance for QuantLens's workloads:
 
-| Scenario | Rationale |
-|----------|-----------|
-| **HTTP/2 or HTTP/3 required** | Granian has native HTTP/2 support via Hyper; Uvicorn does not |
-| **Pure JSON API with no database** | Granian's RSGI protocol optimization provides an edge for trivial responses |
-| **Static file serving** | Granian's `pathsend` extension is efficient |
-
-If any of these become a priority, benchmark against Uvicorn on QuantLens's actual workload before switching. Synthetic micro-benchmarks (JSON serialization) can be misleading for database-heavy applications.
+| Scenario | Recommendation | Benchmark Evidence |
+|----------|---------------|-------------------|
+| **CPU-bound Tier 1 (backtesting, portfolio optimization)** | FastAPI on Gunicorn+Uvicorn **or** FastAPI on Granian | Both sustain ~48–49 req/s vs ~24 req/s for single-worker Uvicorn |
+| **P99 tail latency matters (Tier 1 interactive use)** | FastAPI on Granian | Granian P99 at c=50: 1.1 s vs Gunicorn+Uvicorn P99: 4.0 s |
+| **I/O-bound Tier 2 (WebSocket, real-time trading)** | Granian Raw ASGI | 30,618 req/s at c=200, P99 13.2 ms vs Uvicorn Raw P99 47.9 ms |
+| **Memory-constrained environment** | Gunicorn+Uvicorn | Uvicorn workers (194–385 MB) vs Granian (448–472 MB for FastAPI) |
+| **HTTP/2 required** | Granian | Native HTTP/2 via Hyper; Uvicorn does not support HTTP/2 |
+| **Single developer / minimal ops** | FastAPI on Gunicorn+Uvicorn | Familiar stack, good multi-worker CPU throughput |
 
 ---
 
@@ -591,20 +662,20 @@ If any of these become a priority, benchmark against Uvicorn on QuantLens's actu
 
 | Use Case | Recommendation |
 |----------|----------------|
-| **Research / backtesting platform** | FastAPI on Uvicorn |
-| **Data dashboards (React frontend)** | FastAPI on Uvicorn |
-| **Live trading with low latency** | Vanilla ASGI on Uvicorn |
-| **Mixed system (research + production)** | Hybrid — FastAPI on Uvicorn for Tier 1, vanilla ASGI on Uvicorn for Tier 2 |
-| **Small team, rapid development** | FastAPI on Uvicorn (single tier, add Tier 2 when needed) |
-| **Multiple real-time data sources** | Build the vanilla ASGI gateway on Uvicorn from day one |
+| **Research / backtesting platform** | FastAPI on Gunicorn+Uvicorn (or Granian) |
+| **Data dashboards (React frontend)** | FastAPI on Gunicorn+Uvicorn (or Granian) |
+| **Live trading with low latency** | Vanilla ASGI on Granian |
+| **Mixed system (research + production)** | Hybrid — FastAPI on Gunicorn+Uvicorn for Tier 1, vanilla ASGI on Granian for Tier 2 |
+| **Small team, rapid development** | FastAPI on Gunicorn+Uvicorn (single tier, add Tier 2 when needed) |
+| **Multiple real-time data sources** | Build the vanilla ASGI gateway on Granian from day one |
 
-For QuantLens specifically — backtesting NautilusTrader strategies, running skfolio optimization, and serving dashboards to a React frontend — start with **FastAPI on Uvicorn**. Uvicorn's Cython/C architecture (uvloop + httptools + asyncpg) delivers benchmark-leading database query performance, and FastAPI's developer experience (OpenAPI docs, Pydantic validation, CORS middleware) eliminates boilerplate. When live trading is added, extract real-time endpoints to a vanilla ASGI service on a second Uvicorn process using the hybrid architecture above.
+For QuantLens specifically — backtesting NautilusTrader strategies, running skfolio optimization, and serving dashboards to a React frontend — start with **FastAPI on Gunicorn+Uvicorn**. Internal benchmarks confirm it sustains ~2× the throughput of single-worker Uvicorn for CPU-bound optimization endpoints, while retaining FastAPI's developer experience (OpenAPI docs, Pydantic validation, CORS middleware) and the asyncpg database query advantages from TechEmpower benchmarks. When live trading is added, extract real-time endpoints to a vanilla ASGI service on Granian (or Gunicorn+Uvicorn) using the hybrid architecture above.
 
 | Component | Technology | Reason |
 |-----------|-----------|--------|
-| Research / backtest API | FastAPI on Uvicorn | Developer experience, docs, validation, DB query performance |
-| Real-time market data gateway | Vanilla ASGI on Uvicorn | Low-latency WebSocket streaming, native asyncpg, single event loop |
-| Signal processing | Vanilla ASGI + NautilusTrader | Direct kernel integration, no FFI overhead |
+| Research / backtest API | FastAPI on Gunicorn+Uvicorn | Developer experience, docs, validation, 2× CPU throughput over single-worker Uvicorn |
+| Real-time market data gateway | Vanilla ASGI on Granian | 1.8× higher I/O throughput, 3.6× better P99 at c=200 vs single-worker Uvicorn |
+| Signal processing | Vanilla ASGI + NautilusTrader | Direct kernel integration, no framework overhead |
 | Data persistence | QuestDB primary | Time-series optimized, 11M+ rows/sec ingestion, native OHLCV features |
 | Cross-service communication | Redis pub/sub | Decoupling, backpressure handling |
 | Frontend | React + WebSocket (msgpack) | Binary framing for efficiency |
@@ -612,11 +683,14 @@ For QuantLens specifically — backtesting NautilusTrader strategies, running sk
 ### Production Configuration
 
 ```bash
-# Tier 1 — FastAPI (backtesting, dashboards)
-uvicorn main:app --loop uvloop --http httptools --workers 4 --limit-concurrency 1000
+# Tier 1 — FastAPI (backtesting, dashboards) — Gunicorn+Uvicorn
+gunicorn main:app -k uvicorn_worker.UvicornWorker -w 4 --bind 0.0.0.0:8000 --log-level warning
 
-# Tier 2 — Vanilla ASGI (real-time trading)
-uvicorn realtime_gateway:app --loop uvloop --http httptools --workers 2 --port 8001
+# Tier 1 — FastAPI (backtesting, dashboards) — Granian (alternative, lower P99)
+granian main:app --interface asgi --workers 4 --port 8000
+
+# Tier 2 — Vanilla ASGI (real-time trading) — Granian
+granian realtime_gateway:app --interface asgi --workers 2 --port 8001
 ```
 
 See also: [asgi_rsgi_wsgi.md](asgi_rsgi_wsgi.md) for the ASGI vs WSGI vs RSGI interface decision.
