@@ -21,6 +21,7 @@ jobs:
               uvicorn benchmarks.fastapi_app:app
               --host 0.0.0.0 --port 8000
               --workers 2 --log-level warning
+              --no-access-log
           - name: fastapi-granian
             label: "FastAPI + granian"
             app: benchmarks.fastapi_app:app
@@ -29,6 +30,7 @@ jobs:
               granian --interface asgi
               --host 0.0.0.0 --port 8000
               --workers 2 --log-level warning
+              --no-ws --http 1
               benchmarks.fastapi_app:app
           - name: fastapi-gunicorn-uvicorn
             label: "FastAPI + gunicorn + uvicorn workers"
@@ -36,9 +38,10 @@ jobs:
             server: gunicorn
             start: >-
               gunicorn benchmarks.fastapi_app:app
-              -k uvicorn.workers.UvicornWorker
+              -k uvicorn_worker.UvicornWorker
               --workers 2 --bind 0.0.0.0:8000
               --log-level warning
+              --keep-alive 5 --worker-tmp-dir /dev/shm
           - name: vanilla-uvicorn
             label: "Vanilla ASGI + uvicorn"
             app: benchmarks.asgi_app:app
@@ -47,6 +50,7 @@ jobs:
               uvicorn benchmarks.asgi_app:app
               --host 0.0.0.0 --port 8000
               --workers 2 --log-level warning
+              --no-access-log
           - name: vanilla-granian
             label: "Vanilla ASGI + granian"
             app: benchmarks.asgi_app:app
@@ -55,6 +59,7 @@ jobs:
               granian --interface asgi
               --host 0.0.0.0 --port 8000
               --workers 2 --log-level warning
+              --no-ws --http 1
               benchmarks.asgi_app:app
           - name: vanilla-gunicorn-uvicorn
             label: "Vanilla ASGI + gunicorn + uvicorn workers"
@@ -62,9 +67,10 @@ jobs:
             server: gunicorn
             start: >-
               gunicorn benchmarks.asgi_app:app
-              -k uvicorn.workers.UvicornWorker
+              -k uvicorn_worker.UvicornWorker
               --workers 2 --bind 0.0.0.0:8000
               --log-level warning
+              --keep-alive 5 --worker-tmp-dir /dev/shm
 
     name: ${{ matrix.label }}
 
@@ -84,7 +90,7 @@ jobs:
 
       - name: Install Python dependencies
         run: |
-          pip install fastapi uvicorn[standard] granian gunicorn
+          pip install fastapi uvicorn[standard] granian gunicorn uvicorn-worker
 
       - name: Install hey
         run: |
@@ -125,13 +131,24 @@ jobs:
           echo "idle_rss_kb=$TOTAL_RSS" >> "$GITHUB_OUTPUT"
           echo "Idle RSS: ${TOTAL_RSS} kB"
 
-      - name: Run throughput benchmark
+      - name: "Benchmark: /json (c=200, 60s)"
         run: |
-          # Warmup
           hey -n 500 -c 50 http://localhost:8000/json > /dev/null 2>&1
+          hey -z 60s -c 200 http://localhost:8000/json | tee results/hey-json.txt
 
-          # Benchmark: 300 seconds, 200 concurrent connections
-          hey -z 300s -c 200 http://localhost:8000/json | tee results/hey-output.txt
+      - name: "Benchmark: /compute (c=50, 60s)"
+        run: |
+          hey -n 100 -c 10 http://localhost:8000/compute > /dev/null 2>&1
+          hey -z 60s -c 50 http://localhost:8000/compute | tee results/hey-compute.txt
+
+      - name: "Benchmark: /async-io (c=200, 60s)"
+        run: |
+          hey -n 500 -c 50 http://localhost:8000/async-io > /dev/null 2>&1
+          hey -z 60s -c 200 http://localhost:8000/async-io | tee results/hey-async-io.txt
+
+      - name: "Benchmark: /json burst (5000 reqs, c=200)"
+        run: |
+          hey -n 5000 -c 200 http://localhost:8000/json | tee results/hey-json-burst.txt
 
       - name: Measure memory after load
         id: measure-memory-after-load
@@ -148,39 +165,44 @@ jobs:
 
       - name: Generate summary
         run: |
-          RPS=$(awk '/Requests\/sec/{print $2}' results/hey-output.txt || echo "n/a")
-          AVG=$(awk '/Average/{print $2}' results/hey-output.txt | head -1 || echo "n/a")
-          P99=$(awk '/99%/{print $2}' results/hey-output.txt | head -1 || echo "n/a")
-          TOTAL=$(awk '/\[200\]/{print $2}' results/hey-output.txt || echo "n/a")
-
           IDLE_MEM="${{ steps.measure-memory-before-load.outputs.idle_rss_kb }}"
           LOADED_MEM="${{ steps.measure-memory-after-load.outputs.loaded_rss_kb }}"
 
-          cat > results/summary.txt <<EOF
-          === ${{ matrix.label }} ===
-          Requests/sec:     ${RPS}
-          Avg latency:      ${AVG}
-          P99 latency:      ${P99}
-          2xx responses:    ${TOTAL}
-          Idle memory (kB): ${IDLE_MEM}
-          Load memory (kB): ${LOADED_MEM}
-          EOF
+          extract() {
+            local file="$1"
+            RPS=$(awk '/Requests\/sec/{print $2}' "$file" 2>/dev/null || echo "n/a")
+            AVG=$(awk '/Average/{print $2}' "$file" 2>/dev/null | head -1 || echo "n/a")
+            P50=$(awk '/50% in/{print $3}' "$file" 2>/dev/null | head -1 || echo "n/a")
+            P99=$(awk '/99% in/{print $3}' "$file" 2>/dev/null | head -1 || echo "n/a")
+            TOTAL=$(awk '/\[200\]/{print $2}' "$file" 2>/dev/null || echo "n/a")
+          }
 
-          cat results/summary.txt
-
-          # GitHub Actions Job Summary
           {
             echo "## ${{ matrix.label }}"
             echo ""
+            echo "### Memory"
             echo "| Metric | Value |"
             echo "| --- | ---: |"
-            echo "| Requests/sec | ${RPS} |"
-            echo "| Avg latency | ${AVG} |"
-            echo "| P99 latency | ${P99} |"
-            echo "| 2xx responses | ${TOTAL} |"
-            echo "| Idle memory (kB) | ${IDLE_MEM} |"
-            echo "| Loaded memory (kB) | ${LOADED_MEM} |"
-          } >> "$GITHUB_STEP_SUMMARY"
+            echo "| Idle RSS (kB) | ${IDLE_MEM} |"
+            echo "| Loaded RSS (kB) | ${LOADED_MEM} |"
+            echo ""
+
+            for scenario in json compute async-io json-burst; do
+              file="results/hey-${scenario}.txt"
+              if [ ! -f "$file" ]; then continue; fi
+              extract "$file"
+
+              echo "### /${scenario}"
+              echo "| Metric | Value |"
+              echo "| --- | ---: |"
+              echo "| Requests/sec | ${RPS} |"
+              echo "| Avg latency | ${AVG} |"
+              echo "| P50 latency | ${P50} |"
+              echo "| P99 latency | ${P99} |"
+              echo "| 2xx responses | ${TOTAL} |"
+              echo ""
+            done
+          } | tee results/summary.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Stop server
         if: always()
