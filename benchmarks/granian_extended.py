@@ -201,8 +201,8 @@ async def optimize_portfolio(scope: Dict, data: Dict) -> Dict:
 
     return {
         "weights": dict(zip(available, model.weights_.tolist())),
-        "expected_return": float(portfolio.annualized_mean_return),
-        "volatility": float(portfolio.annualized_volatility),
+        "expected_return": float(portfolio.annualized_mean),
+        "volatility": float(portfolio.annualized_standard_deviation),
         "sharpe_ratio": float(portfolio.annualized_sharpe_ratio),
         "max_drawdown": float(portfolio.max_drawdown)
     }
