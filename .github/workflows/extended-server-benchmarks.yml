@@ -49,7 +49,7 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install \
-            uvicorn[standard] granian gunicorn \
+            uvicorn[standard] granian gunicorn uvicorn-worker \
             fastapi pydantic \
             skfolio scikit-learn pandas numpy scipy
 
