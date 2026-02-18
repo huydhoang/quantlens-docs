@@ -332,7 +332,7 @@ def parse_hey(text):
         r[key] = float(m.group(1)) if m else None
 
     for pct in ("50", "75", "90", "95", "99"):
-        m = re.search(rf"{pct}%\s+in\s+([\d.]+)\s+secs", text)
+        m = re.search(rf"{pct}%%\s+in\s+([\d.]+)\s+secs", text)
         r[f"p{pct}"] = float(m.group(1)) if m else None
 
     codes = {}
