@@ -29,7 +29,8 @@ jobs:
             start: >-
               granian --interface asgi
               --host 0.0.0.0 --port 8000
-              --workers 2 --log-level warning
+              --workers 2 --runtime-mode mt --runtime-threads 2
+              --log-level warning
               --no-ws --http 1
               benchmarks.fastapi_app:app
           - name: fastapi-gunicorn-uvicorn
@@ -58,7 +59,8 @@ jobs:
             start: >-
               granian --interface asgi
               --host 0.0.0.0 --port 8000
-              --workers 2 --log-level warning
+              --workers 2 --runtime-mode mt --runtime-threads 2
+              --log-level warning
               --no-ws --http 1
               benchmarks.asgi_app:app
           - name: vanilla-gunicorn-uvicorn

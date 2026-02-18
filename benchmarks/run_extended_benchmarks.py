@@ -209,7 +209,7 @@ def _server_code(stack, port, workers):
     if server == "granian":
         return MOCK_PREAMBLE + textwrap.dedent(f"""\
             from granian import Granian
-            Granian("{module}:app", address="0.0.0.0", port={port}, interface="asgi").serve()
+            Granian("{module}:app", address="0.0.0.0", port={port}, interface="asgi", runtime_mode="mt", runtime_threads=2).serve()
         """)
 
     if server == "gunicorn":
