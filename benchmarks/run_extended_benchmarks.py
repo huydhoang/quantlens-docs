@@ -203,13 +203,13 @@ def _server_code(stack, port, workers):
     if server == "uvicorn":
         return MOCK_PREAMBLE + textwrap.dedent(f"""\
             import uvicorn
-            uvicorn.run("{module}:app", host="0.0.0.0", port={port}, log_level="warning")
+            uvicorn.run("{module}:app", host="0.0.0.0", port={port}, workers={workers}, log_level="warning")
         """)
 
     if server == "granian":
         return MOCK_PREAMBLE + textwrap.dedent(f"""\
             from granian import Granian
-            Granian("{module}:app", address="0.0.0.0", port={port}, interface="asgi", runtime_mode="mt", runtime_threads=2).serve()
+            Granian("{module}:app", address="0.0.0.0", port={port}, interface="asgi", runtime_mode="mt", runtime_threads={workers}).serve()
         """)
 
     if server == "gunicorn":
