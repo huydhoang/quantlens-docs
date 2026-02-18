@@ -202,7 +202,7 @@ class DuckDBAdapter(DBAdapter):
                 debt_to_equity DOUBLE, roe DOUBLE, roa DOUBLE,
                 current_ratio DOUBLE, gross_margin DOUBLE,
                 operating_margin DOUBLE, free_cash_flow DOUBLE,
-                market_cap DOUBLE, balance_sheet JSON, cash_flow JSON,
+                market_cap DOUBLE, balance_sheet VARCHAR, cash_flow VARCHAR,
                 PRIMARY KEY (symbol, period)
             )
         """)
@@ -760,6 +760,7 @@ class CassandraAdapter(DBAdapter):
 
     def setup(self, fundamentals, economic):
         from cassandra.cluster import Cluster
+        from datetime import datetime
 
         self.cluster = Cluster(["127.0.0.1"], port=9042)
         self.session = self.cluster.connect()
@@ -803,7 +804,9 @@ class CassandraAdapter(DBAdapter):
         for r in fundamentals:
             self.session.execute(fund_stmt, list(r.values()))
         for r in economic:
-            self.session.execute(econ_stmt, list(r.values()))
+            vals = list(r.values())
+            vals[2] = datetime.fromisoformat(vals[2])
+            self.session.execute(econ_stmt, vals)
 
     def single_query_fundamentals(self):
         rows = self.session.execute(
@@ -842,6 +845,7 @@ class ScyllaDBAdapter(DBAdapter):
 
     def setup(self, fundamentals, economic):
         from cassandra.cluster import Cluster
+        from datetime import datetime
 
         self.cluster = Cluster(["127.0.0.1"], port=9043)
         self.session = self.cluster.connect()
@@ -885,7 +889,9 @@ class ScyllaDBAdapter(DBAdapter):
         for r in fundamentals:
             self.session.execute(fund_stmt, list(r.values()))
         for r in economic:
-            self.session.execute(econ_stmt, list(r.values()))
+            vals = list(r.values())
+            vals[2] = datetime.fromisoformat(vals[2])
+            self.session.execute(econ_stmt, vals)
 
     def single_query_fundamentals(self):
         rows = self.session.execute(
@@ -924,6 +930,7 @@ class ClickHouseAdapter(DBAdapter):
 
     def setup(self, fundamentals, economic):
         import clickhouse_connect
+        from datetime import datetime
 
         self.client = clickhouse_connect.get_client(host="localhost", port=8123, username="default", password="bench")
         self.client.command("DROP TABLE IF EXISTS bench.fundamentals")
@@ -951,7 +958,11 @@ class ClickHouseAdapter(DBAdapter):
         data_f = [list(r.values()) for r in fundamentals]
         self.client.insert("bench.fundamentals", data_f, column_names=cols_f)
         cols_e = list(economic[0].keys())
-        data_e = [list(r.values()) for r in economic]
+        ts_idx = cols_e.index("timestamp")
+        data_e = [
+            [datetime.fromisoformat(v) if i == ts_idx else v for i, v in enumerate(r.values())]
+            for r in economic
+        ]
         self.client.insert("bench.economic_indicators", data_e, column_names=cols_e)
 
     def single_query_fundamentals(self):
@@ -1089,42 +1100,53 @@ class RedisAdapter(DBAdapter):
         for row in fundamentals:
             key = f"fund:{row['symbol']}:{row['period']}"
             pipe.hset(key, mapping={k: str(v) for k, v in row.items()})
+            pipe.sadd("fund:index", key)
         pipe.execute()
         pipe = self.r.pipeline()
         for row in economic:
             key = f"econ:{row['indicator_id']}:{row['timestamp']}:{row['revision_number']}"
             pipe.hset(key, mapping={k: str(v) for k, v in row.items()})
+            pipe.sadd("econ:index", key)
         pipe.execute()
         self._fundamentals = fundamentals
         self._economic = economic
 
     def single_query_fundamentals(self):
-        results = []
-        for key in self.r.scan_iter("fund:*"):
-            data = self.r.hgetall(key)
-            if float(data.get("pe_ratio", 999)) < 20 and float(data.get("revenue", 0)) > 1e10:
-                results.append(data)
-        return len(results)
+        keys = list(self.r.smembers("fund:index"))
+        if not keys:
+            return 0
+        pipe = self.r.pipeline()
+        for key in keys:
+            pipe.hgetall(key)
+        all_data = pipe.execute()
+        return len([d for d in all_data if float(d.get("pe_ratio", 999)) < 20 and float(d.get("revenue", 0)) > 1e10])
 
     def single_query_economic(self):
-        results = []
-        for key in self.r.scan_iter("econ:*"):
-            data = self.r.hgetall(key)
-            results.append(data)
-            if len(results) >= 100:
-                break
-        return len(results)
+        keys = list(self.r.smembers("econ:index"))[:100]
+        if not keys:
+            return 0
+        pipe = self.r.pipeline()
+        for key in keys:
+            pipe.hgetall(key)
+        return len(pipe.execute())
 
     def multi_query_workload(self):
         total = 0
+        fund_keys = list(self.r.smembers("fund:index"))
         all_fund = []
-        for key in self.r.scan_iter("fund:*"):
-            all_fund.append(self.r.hgetall(key))
-        total += len(all_fund)
-        all_econ = []
-        for key in self.r.scan_iter("econ:*"):
-            all_econ.append(self.r.hgetall(key))
-        total += len(all_econ)
+        if fund_keys:
+            pipe = self.r.pipeline()
+            for key in fund_keys:
+                pipe.hgetall(key)
+            all_fund = pipe.execute()
+            total += len(all_fund)
+        econ_keys = list(self.r.smembers("econ:index"))
+        if econ_keys:
+            pipe = self.r.pipeline()
+            for key in econ_keys:
+                pipe.hgetall(key)
+            all_econ = pipe.execute()
+            total += len(all_econ)
         total += len(all_fund)
         return total
 
