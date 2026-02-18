@@ -613,8 +613,8 @@ class MongoDBAdapter(DBAdapter):
         self.db = self.client["bench"]
         self.db.drop_collection("fundamentals")
         self.db.drop_collection("economic_indicators")
-        self.db["fundamentals"].insert_many(fundamentals)
-        self.db["economic_indicators"].insert_many(economic)
+        self.db["fundamentals"].insert_many([dict(r) for r in fundamentals])
+        self.db["economic_indicators"].insert_many([dict(r) for r in economic])
         self.db["fundamentals"].create_index([("symbol", 1), ("period", 1)], unique=True)
         self.db["economic_indicators"].create_index(
             [("indicator_id", 1), ("timestamp", 1), ("revision_number", -1)]
@@ -687,12 +687,12 @@ class FerretDBAdapter(DBAdapter):
     def setup(self, fundamentals, economic):
         from pymongo import MongoClient
 
-        self.client = MongoClient("mongodb://localhost:27018", serverSelectionTimeoutMS=5000)
+        self.client = MongoClient("mongodb://ferretdb:ferretdb@localhost:27018", serverSelectionTimeoutMS=5000)
         self.db = self.client["bench"]
         self.db.drop_collection("fundamentals")
         self.db.drop_collection("economic_indicators")
-        self.db["fundamentals"].insert_many(fundamentals)
-        self.db["economic_indicators"].insert_many(economic)
+        self.db["fundamentals"].insert_many([dict(r) for r in fundamentals])
+        self.db["economic_indicators"].insert_many([dict(r) for r in economic])
 
     def single_query_fundamentals(self):
         return len(
