@@ -9,7 +9,7 @@ on:
         default: "30"
         type: string
       workers:
-        description: "Worker count for multi-process stacks"
+        description: "Worker count for multi-process stacks (Granian and Gunicorn)"
         required: false
         default: "2"
         type: string
