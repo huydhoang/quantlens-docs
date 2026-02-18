@@ -1,0 +1,233 @@
+name: Fundamentals Database Benchmarks
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: fundamentals-benchmarks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+
+    services:
+      postgres:
+        image: postgres:17
+        ports:
+          - 5432:5432
+        env:
+          POSTGRES_USER: bench
+          POSTGRES_PASSWORD: bench
+          POSTGRES_DB: bench
+        options: >-
+          --health-cmd="pg_isready -U bench"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+      mysql:
+        image: mysql:8
+        ports:
+          - 3306:3306
+        env:
+          MYSQL_ROOT_PASSWORD: bench
+          MYSQL_USER: bench
+          MYSQL_PASSWORD: bench
+          MYSQL_DATABASE: bench
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -ubench -pbench"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+      mariadb:
+        image: mariadb:11
+        ports:
+          - 3307:3306
+        env:
+          MARIADB_ROOT_PASSWORD: bench
+          MARIADB_USER: bench
+          MARIADB_PASSWORD: bench
+          MARIADB_DATABASE: bench
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+      mongo:
+        image: mongo:7
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd="mongosh --eval 'db.runCommand({ ping: 1 })'"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+      clickhouse:
+        image: clickhouse/clickhouse-server:latest
+        ports:
+          - 8123:8123
+        env:
+          CLICKHOUSE_PASSWORD: bench
+          CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+        options: >-
+          --health-cmd="wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+      timescaledb:
+        image: timescale/timescaledb:latest-pg17
+        ports:
+          - 5433:5432
+        env:
+          POSTGRES_USER: bench
+          POSTGRES_PASSWORD: bench
+          POSTGRES_DB: bench
+        options: >-
+          --health-cmd="pg_isready -U bench"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install \
+            duckdb \
+            psycopg2-binary \
+            mysql-connector-python \
+            pymongo \
+            cassandra-driver \
+            clickhouse-connect \
+            redis \
+            requests
+
+      - name: Start Cassandra
+        run: |
+          docker run -d --name bench-cassandra \
+            -p 9042:9042 \
+            cassandra:5
+          echo "Waiting for Cassandra to be ready …"
+          for i in $(seq 1 60); do
+            if docker exec bench-cassandra cqlsh -e "SELECT now() FROM system.local" >/dev/null 2>&1; then
+              echo "Cassandra ready (attempt $i)"
+              break
+            fi
+            sleep 5
+          done
+          docker exec bench-cassandra cqlsh -e "SELECT now() FROM system.local"
+
+      - name: Start ScyllaDB
+        run: |
+          docker run -d --name bench-scylla \
+            -p 9043:9042 \
+            scylladb/scylla:latest \
+            --smp 1 --developer-mode 1
+          echo "Waiting for ScyllaDB to be ready …"
+          for i in $(seq 1 60); do
+            if docker exec bench-scylla cqlsh -e "SELECT now() FROM system.local" >/dev/null 2>&1; then
+              echo "ScyllaDB ready (attempt $i)"
+              break
+            fi
+            sleep 5
+          done
+          docker exec bench-scylla cqlsh -e "SELECT now() FROM system.local"
+
+      - name: Start FerretDB
+        run: |
+          docker run -d --name bench-ferretdb-pg \
+            -p 5434:5432 \
+            -e POSTGRES_USER=ferretdb \
+            -e POSTGRES_PASSWORD=ferretdb \
+            -e POSTGRES_DB=ferretdb \
+            postgres:17
+          echo "Waiting for FerretDB PostgreSQL backend …"
+          for i in $(seq 1 30); do
+            if docker exec bench-ferretdb-pg pg_isready -U ferretdb >/dev/null 2>&1; then
+              echo "FerretDB backend ready (attempt $i)"
+              break
+            fi
+            sleep 2
+          done
+          FERRET_PG_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' bench-ferretdb-pg)
+          docker run -d --name bench-ferretdb \
+            -p 27018:27017 \
+            -e FERRETDB_POSTGRESQL_URL="postgres://ferretdb:ferretdb@${FERRET_PG_IP}:5432/ferretdb" \
+            ghcr.io/ferretdb/ferretdb:latest
+          echo "Waiting for FerretDB to be ready …"
+          for i in $(seq 1 30); do
+            if docker exec bench-ferretdb mongosh --port 27017 --eval "db.runCommand({ping:1})" >/dev/null 2>&1; then
+              echo "FerretDB ready (attempt $i)"
+              break
+            fi
+            sleep 3
+          done
+
+      - name: Start RavenDB
+        run: |
+          docker run -d --name bench-ravendb \
+            -p 8080:8080 \
+            -e RAVEN_Setup_Mode=None \
+            -e RAVEN_License_Eula_Accepted=true \
+            -e RAVEN_Security_UnsecuredAccessAllowed=PublicNetwork \
+            ravendb/ravendb:latest
+          echo "Waiting for RavenDB to be ready …"
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:8080/studio/index.html >/dev/null 2>&1; then
+              echo "RavenDB ready (attempt $i)"
+              break
+            fi
+            sleep 3
+          done
+
+      - name: Run fundamentals benchmarks
+        run: |
+          python benchmarks/run_fundamentals_benchmarks.py \
+            --iterations 3 \
+            --output-dir benchmarks/results/fundamentals
+
+      - name: Post summary
+        if: always()
+        run: |
+          if [ -f benchmarks/results/fundamentals/summary.md ]; then
+            cat benchmarks/results/fundamentals/summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fundamentals-benchmark-results
+          path: benchmarks/results/fundamentals/
+          retention-days: 90
+
+      - name: Cleanup containers
+        if: always()
+        run: |
+          docker rm -f bench-cassandra bench-scylla bench-ferretdb bench-ferretdb-pg bench-ravendb 2>/dev/null || true
