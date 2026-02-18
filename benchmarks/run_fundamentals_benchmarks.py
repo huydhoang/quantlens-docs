@@ -1,18 +1,19 @@
 """
 Fundamentals Database Benchmark Suite
 
-Benchmarks 13 databases for stock fundamentals and economic data workloads:
+Benchmarks 12 databases for stock fundamentals and economic data workloads:
   - DuckDB, SQLite (embedded)
   - PostgreSQL, MariaDB, MySQL, TimescaleDB (relational / Docker)
-  - MongoDB, FerretDB (document / Docker)
+  - MongoDB (document / Docker)
   - Cassandra, ScyllaDB (wide-column / Docker)
   - Redis (key-value / Docker)
   - ClickHouse (columnar / Docker)
   - RavenDB (document / Docker)
 
-Generates synthetic stock fundamentals and economic indicator data, then runs:
-  1. Single-query workload  (one query type at a time)
-  2. Multi-query workload   (mixed query types in sequence)
+Generates synthetic stock fundamentals (~100 K rows) and economic indicator
+data, then runs:
+  1. Simple Query workload  (targeted single-table queries)
+  2. Complex Query workload (double groupby + full table scan)
 """
 
 from __future__ import annotations
@@ -39,7 +40,7 @@ SYMBOLS = [
     "AMD", "AMAT", "SBUX",
 ]
 
-PERIODS = [f"{y}-Q{q}" for y in range(2018, 2025) for q in range(1, 5)]
+PERIODS = [f"{y}-Q{q}" for y in range(1975, 2026) for q in range(1, 5)]
 
 ECON_INDICATORS = [
     "GDP_US", "CPI_US", "UNRATE_US", "GDP_EU", "CPI_EU", "FEDFUNDS",
@@ -53,10 +54,12 @@ def _rand_float(lo: float, hi: float) -> float:
     return round(random.uniform(lo, hi), 4)
 
 
-def generate_fundamentals(n_symbols: int = 30, n_periods: int = 28) -> list[dict]:
-    """Return a list of fundamental records (symbol x period)."""
+def generate_fundamentals(n_symbols: int = 500, n_periods: int = 200) -> list[dict]:
+    """Return a list of fundamental records (symbol x period). ~100 K rows by default."""
     random.seed(42)
-    symbols = SYMBOLS[:n_symbols]
+    real = SYMBOLS[:min(n_symbols, len(SYMBOLS))]
+    synth = [f"SYM{i:04d}" for i in range(1, n_symbols - len(real) + 1)]
+    symbols = real + synth
     periods = PERIODS[:n_periods]
     rows: list[dict] = []
     for sym in symbols:
@@ -172,13 +175,13 @@ class DBAdapter:
     def setup(self, fundamentals: list[dict], economic: list[dict]) -> None:
         raise NotImplementedError
 
-    def single_query_fundamentals(self) -> int:
+    def simple_query_fundamentals(self) -> int:
         raise NotImplementedError
 
-    def single_query_economic(self) -> int:
+    def simple_query_economic(self) -> int:
         raise NotImplementedError
 
-    def multi_query_workload(self) -> int:
+    def complex_query_workload(self) -> int:
         raise NotImplementedError
 
     def teardown(self) -> None:
@@ -192,8 +195,11 @@ class DuckDBAdapter(DBAdapter):
 
     def setup(self, fundamentals, economic):
         import duckdb
+        import json
+        import os
+        import tempfile
 
-        self.con = duckdb.connect(":memory:")
+        self.con = duckdb.connect(":memory:", config={"threads": 4})
         self.con.execute("""
             CREATE TABLE fundamentals (
                 symbol VARCHAR, period VARCHAR, revenue DOUBLE,
@@ -214,23 +220,28 @@ class DuckDBAdapter(DBAdapter):
                 PRIMARY KEY (indicator_id, frequency, timestamp, revision_number)
             )
         """)
-        self.con.executemany(
-            "INSERT INTO fundamentals VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            [tuple(r.values()) for r in fundamentals],
-        )
-        self.con.executemany(
-            "INSERT INTO economic_indicators VALUES (?,?,?,?,?)",
-            [tuple(r.values()) for r in economic],
-        )
+        # Use read_json for fast bulk loading
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as fp:
+            json.dump(fundamentals, fp)
+            fund_tmp = fp.name
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as fp:
+            json.dump(economic, fp)
+            econ_tmp = fp.name
+        try:
+            self.con.execute(f"INSERT INTO fundamentals SELECT * FROM read_json('{fund_tmp}')")
+            self.con.execute(f"INSERT INTO economic_indicators SELECT * FROM read_json('{econ_tmp}')")
+        finally:
+            os.unlink(fund_tmp)
+            os.unlink(econ_tmp)
 
-    def single_query_fundamentals(self):
+    def simple_query_fundamentals(self):
         return len(
             self.con.execute(
                 "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals WHERE pe_ratio < 20 AND revenue > 1e10 ORDER BY pe_ratio"
             ).fetchall()
         )
 
-    def single_query_economic(self):
+    def simple_query_economic(self):
         return len(
             self.con.execute("""
                 SELECT indicator_id, timestamp, value FROM (
@@ -241,22 +252,33 @@ class DuckDBAdapter(DBAdapter):
             """).fetchall()
         )
 
-    def multi_query_workload(self):
+    def complex_query_workload(self):
         total = 0
+        # Double groupby: aggregate by symbol and year extracted from period
+        total += len(
+            self.con.execute("""
+                SELECT symbol, SUBSTR(period, 1, 4) AS yr,
+                       AVG(revenue) AS avg_rev, AVG(eps) AS avg_eps, AVG(pe_ratio) AS avg_pe
+                FROM fundamentals
+                GROUP BY symbol, SUBSTR(period, 1, 4)
+                ORDER BY symbol, yr
+            """).fetchall()
+        )
+        # Full table scan: unindexed multi-column filter
         total += len(
             self.con.execute(
-                "SELECT symbol, AVG(eps) AS avg_eps, AVG(pe_ratio) AS avg_pe FROM fundamentals GROUP BY symbol ORDER BY avg_pe"
+                "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals WHERE gross_margin > 0.3 AND roe > 0.05"
             ).fetchall()
         )
+        # Double groupby on economic data
         total += len(
-            self.con.execute(
-                "SELECT symbol, period, revenue, LAG(revenue,4) OVER (PARTITION BY symbol ORDER BY period) AS rev_yoy FROM fundamentals"
-            ).fetchall()
-        )
-        total += len(
-            self.con.execute(
-                "SELECT indicator_id, AVG(value) AS avg_val FROM economic_indicators GROUP BY indicator_id"
-            ).fetchall()
+            self.con.execute("""
+                SELECT indicator_id, frequency,
+                       AVG(value) AS avg_val, COUNT(*) AS cnt,
+                       MIN(value) AS min_val, MAX(value) AS max_val
+                FROM economic_indicators
+                GROUP BY indicator_id, frequency
+            """).fetchall()
         )
         return total
 
@@ -303,14 +325,14 @@ class SQLiteAdapter(DBAdapter):
         )
         self.con.commit()
 
-    def single_query_fundamentals(self):
+    def simple_query_fundamentals(self):
         return len(
             self.con.execute(
                 "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals WHERE pe_ratio < 20 AND revenue > 1e10 ORDER BY pe_ratio"
             ).fetchall()
         )
 
-    def single_query_economic(self):
+    def simple_query_economic(self):
         return len(
             self.con.execute("""
                 SELECT indicator_id, timestamp, value FROM (
@@ -321,22 +343,33 @@ class SQLiteAdapter(DBAdapter):
             """).fetchall()
         )
 
-    def multi_query_workload(self):
+    def complex_query_workload(self):
         total = 0
+        # Double groupby: aggregate by symbol and year extracted from period
+        total += len(
+            self.con.execute("""
+                SELECT symbol, SUBSTR(period, 1, 4) AS yr,
+                       AVG(revenue) AS avg_rev, AVG(eps) AS avg_eps, AVG(pe_ratio) AS avg_pe
+                FROM fundamentals
+                GROUP BY symbol, SUBSTR(period, 1, 4)
+                ORDER BY symbol, yr
+            """).fetchall()
+        )
+        # Full table scan: unindexed multi-column filter
         total += len(
             self.con.execute(
-                "SELECT symbol, AVG(eps) AS avg_eps, AVG(pe_ratio) AS avg_pe FROM fundamentals GROUP BY symbol ORDER BY avg_pe"
+                "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals WHERE gross_margin > 0.3 AND roe > 0.05"
             ).fetchall()
         )
+        # Double groupby on economic data
         total += len(
-            self.con.execute(
-                "SELECT symbol, period, revenue, LAG(revenue,4) OVER (PARTITION BY symbol ORDER BY period) AS rev_yoy FROM fundamentals"
-            ).fetchall()
-        )
-        total += len(
-            self.con.execute(
-                "SELECT indicator_id, AVG(value) AS avg_val FROM economic_indicators GROUP BY indicator_id"
-            ).fetchall()
+            self.con.execute("""
+                SELECT indicator_id, frequency,
+                       AVG(value) AS avg_val, COUNT(*) AS cnt,
+                       MIN(value) AS min_val, MAX(value) AS max_val
+                FROM economic_indicators
+                GROUP BY indicator_id, frequency
+            """).fetchall()
         )
         return total
 
@@ -351,6 +384,7 @@ class PostgreSQLAdapter(DBAdapter):
 
     def setup(self, fundamentals, economic):
         import psycopg2
+        from psycopg2.extras import execute_values
 
         self.con = psycopg2.connect(
             host="localhost", port=5432, user="bench", password="bench", dbname="bench"
@@ -379,25 +413,27 @@ class PostgreSQLAdapter(DBAdapter):
                 PRIMARY KEY (indicator_id, frequency, timestamp, revision_number)
             )
         """)
-        for r in fundamentals:
-            cur.execute(
-                "INSERT INTO fundamentals VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-                tuple(r.values()),
-            )
-        for r in economic:
-            cur.execute(
-                "INSERT INTO economic_indicators VALUES (%s,%s,%s,%s,%s)",
-                tuple(r.values()),
-            )
+        execute_values(
+            cur,
+            "INSERT INTO fundamentals VALUES %s",
+            [tuple(r.values()) for r in fundamentals],
+            page_size=1000,
+        )
+        execute_values(
+            cur,
+            "INSERT INTO economic_indicators VALUES %s",
+            [tuple(r.values()) for r in economic],
+            page_size=1000,
+        )
 
-    def single_query_fundamentals(self):
+    def simple_query_fundamentals(self):
         cur = self.con.cursor()
         cur.execute(
             "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals WHERE pe_ratio < 20 AND revenue > 1e10 ORDER BY pe_ratio"
         )
         return len(cur.fetchall())
 
-    def single_query_economic(self):
+    def simple_query_economic(self):
         cur = self.con.cursor()
         cur.execute("""
             SELECT indicator_id, timestamp, value FROM (
@@ -408,20 +444,31 @@ class PostgreSQLAdapter(DBAdapter):
         """)
         return len(cur.fetchall())
 
-    def multi_query_workload(self):
+    def complex_query_workload(self):
         cur = self.con.cursor()
         total = 0
+        # Double groupby: aggregate by symbol and year extracted from period
+        cur.execute("""
+            SELECT symbol, SUBSTR(period, 1, 4) AS yr,
+                   AVG(revenue) AS avg_rev, AVG(eps) AS avg_eps, AVG(pe_ratio) AS avg_pe
+            FROM fundamentals
+            GROUP BY symbol, SUBSTR(period, 1, 4)
+            ORDER BY symbol, yr
+        """)
+        total += len(cur.fetchall())
+        # Full table scan: unindexed multi-column filter
         cur.execute(
-            "SELECT symbol, AVG(eps) AS avg_eps, AVG(pe_ratio) AS avg_pe FROM fundamentals GROUP BY symbol ORDER BY avg_pe"
+            "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals WHERE gross_margin > 0.3 AND roe > 0.05"
         )
         total += len(cur.fetchall())
-        cur.execute(
-            "SELECT symbol, period, revenue, LAG(revenue,4) OVER (PARTITION BY symbol ORDER BY period) AS rev_yoy FROM fundamentals"
-        )
-        total += len(cur.fetchall())
-        cur.execute(
-            "SELECT indicator_id, AVG(value) AS avg_val FROM economic_indicators GROUP BY indicator_id"
-        )
+        # Double groupby on economic data
+        cur.execute("""
+            SELECT indicator_id, frequency,
+                   AVG(value) AS avg_val, COUNT(*) AS cnt,
+                   MIN(value) AS min_val, MAX(value) AS max_val
+            FROM economic_indicators
+            GROUP BY indicator_id, frequency
+        """)
         total += len(cur.fetchall())
         return total
 
@@ -464,26 +511,24 @@ class MySQLAdapter(DBAdapter):
             )
         """)
         self.con.commit()
-        for r in fundamentals:
-            cur.execute(
-                "INSERT INTO fundamentals VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-                tuple(r.values()),
-            )
-        for r in economic:
-            cur.execute(
-                "INSERT INTO economic_indicators VALUES (%s,%s,%s,%s,%s)",
-                tuple(r.values()),
-            )
+        cur.executemany(
+            "INSERT INTO fundamentals VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            [tuple(r.values()) for r in fundamentals],
+        )
+        cur.executemany(
+            "INSERT INTO economic_indicators VALUES (%s,%s,%s,%s,%s)",
+            [tuple(r.values()) for r in economic],
+        )
         self.con.commit()
 
-    def single_query_fundamentals(self):
+    def simple_query_fundamentals(self):
         cur = self.con.cursor()
         cur.execute(
             "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals WHERE pe_ratio < 20 AND revenue > 1e10 ORDER BY pe_ratio"
         )
         return len(cur.fetchall())
 
-    def single_query_economic(self):
+    def simple_query_economic(self):
         cur = self.con.cursor()
         cur.execute("""
             SELECT indicator_id, timestamp, value FROM (
@@ -494,20 +539,31 @@ class MySQLAdapter(DBAdapter):
         """)
         return len(cur.fetchall())
 
-    def multi_query_workload(self):
+    def complex_query_workload(self):
         cur = self.con.cursor()
         total = 0
+        # Double groupby: aggregate by symbol and year extracted from period
+        cur.execute("""
+            SELECT symbol, SUBSTR(period, 1, 4) AS yr,
+                   AVG(revenue) AS avg_rev, AVG(eps) AS avg_eps, AVG(pe_ratio) AS avg_pe
+            FROM fundamentals
+            GROUP BY symbol, SUBSTR(period, 1, 4)
+            ORDER BY symbol, yr
+        """)
+        total += len(cur.fetchall())
+        # Full table scan: unindexed multi-column filter
         cur.execute(
-            "SELECT symbol, AVG(eps) AS avg_eps, AVG(pe_ratio) AS avg_pe FROM fundamentals GROUP BY symbol ORDER BY avg_pe"
+            "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals WHERE gross_margin > 0.3 AND roe > 0.05"
         )
         total += len(cur.fetchall())
-        cur.execute(
-            "SELECT symbol, period, revenue, LAG(revenue,4) OVER (PARTITION BY symbol ORDER BY period) AS rev_yoy FROM fundamentals"
-        )
-        total += len(cur.fetchall())
-        cur.execute(
-            "SELECT indicator_id, AVG(value) AS avg_val FROM economic_indicators GROUP BY indicator_id"
-        )
+        # Double groupby on economic data
+        cur.execute("""
+            SELECT indicator_id, frequency,
+                   AVG(value) AS avg_val, COUNT(*) AS cnt,
+                   MIN(value) AS min_val, MAX(value) AS max_val
+            FROM economic_indicators
+            GROUP BY indicator_id, frequency
+        """)
         total += len(cur.fetchall())
         return total
 
@@ -550,26 +606,24 @@ class MariaDBAdapter(DBAdapter):
             )
         """)
         self.con.commit()
-        for r in fundamentals:
-            cur.execute(
-                "INSERT INTO fundamentals VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-                tuple(r.values()),
-            )
-        for r in economic:
-            cur.execute(
-                "INSERT INTO economic_indicators VALUES (%s,%s,%s,%s,%s)",
-                tuple(r.values()),
-            )
+        cur.executemany(
+            "INSERT INTO fundamentals VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            [tuple(r.values()) for r in fundamentals],
+        )
+        cur.executemany(
+            "INSERT INTO economic_indicators VALUES (%s,%s,%s,%s,%s)",
+            [tuple(r.values()) for r in economic],
+        )
         self.con.commit()
 
-    def single_query_fundamentals(self):
+    def simple_query_fundamentals(self):
         cur = self.con.cursor()
         cur.execute(
             "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals WHERE pe_ratio < 20 AND revenue > 1e10 ORDER BY pe_ratio"
         )
         return len(cur.fetchall())
 
-    def single_query_economic(self):
+    def simple_query_economic(self):
         cur = self.con.cursor()
         cur.execute("""
             SELECT indicator_id, timestamp, value FROM (
@@ -580,20 +634,31 @@ class MariaDBAdapter(DBAdapter):
         """)
         return len(cur.fetchall())
 
-    def multi_query_workload(self):
+    def complex_query_workload(self):
         cur = self.con.cursor()
         total = 0
+        # Double groupby: aggregate by symbol and year extracted from period
+        cur.execute("""
+            SELECT symbol, SUBSTR(period, 1, 4) AS yr,
+                   AVG(revenue) AS avg_rev, AVG(eps) AS avg_eps, AVG(pe_ratio) AS avg_pe
+            FROM fundamentals
+            GROUP BY symbol, SUBSTR(period, 1, 4)
+            ORDER BY symbol, yr
+        """)
+        total += len(cur.fetchall())
+        # Full table scan: unindexed multi-column filter
         cur.execute(
-            "SELECT symbol, AVG(eps) AS avg_eps, AVG(pe_ratio) AS avg_pe FROM fundamentals GROUP BY symbol ORDER BY avg_pe"
+            "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals WHERE gross_margin > 0.3 AND roe > 0.05"
         )
         total += len(cur.fetchall())
-        cur.execute(
-            "SELECT symbol, period, revenue, LAG(revenue,4) OVER (PARTITION BY symbol ORDER BY period) AS rev_yoy FROM fundamentals"
-        )
-        total += len(cur.fetchall())
-        cur.execute(
-            "SELECT indicator_id, AVG(value) AS avg_val FROM economic_indicators GROUP BY indicator_id"
-        )
+        # Double groupby on economic data
+        cur.execute("""
+            SELECT indicator_id, frequency,
+                   AVG(value) AS avg_val, COUNT(*) AS cnt,
+                   MIN(value) AS min_val, MAX(value) AS max_val
+            FROM economic_indicators
+            GROUP BY indicator_id, frequency
+        """)
         total += len(cur.fetchall())
         return total
 
@@ -620,7 +685,7 @@ class MongoDBAdapter(DBAdapter):
             [("indicator_id", 1), ("timestamp", 1), ("revision_number", -1)]
         )
 
-    def single_query_fundamentals(self):
+    def simple_query_fundamentals(self):
         return len(
             list(
                 self.db["fundamentals"].find(
@@ -630,7 +695,7 @@ class MongoDBAdapter(DBAdapter):
             )
         )
 
-    def single_query_economic(self):
+    def simple_query_economic(self):
         pipeline = [
             {"$sort": {"revision_number": -1}},
             {
@@ -647,106 +712,44 @@ class MongoDBAdapter(DBAdapter):
         ]
         return len(list(self.db["economic_indicators"].aggregate(pipeline)))
 
-    def multi_query_workload(self):
+    def complex_query_workload(self):
         total = 0
-        total += len(
-            list(
-                self.db["fundamentals"].aggregate(
-                    [
-                        {
-                            "$group": {
-                                "_id": "$symbol",
-                                "avg_eps": {"$avg": "$eps"},
-                                "avg_pe": {"$avg": "$pe_ratio"},
-                            }
-                        },
-                        {"$sort": {"avg_pe": 1}},
-                    ]
-                )
-            )
-        )
-        total += len(list(self.db["fundamentals"].find({}, {"symbol": 1, "period": 1, "revenue": 1})))
-        total += len(
-            list(
-                self.db["economic_indicators"].aggregate(
-                    [{"$group": {"_id": "$indicator_id", "avg_val": {"$avg": "$value"}}}]
-                )
-            )
-        )
-        return total
-
-    def teardown(self):
-        self.client.close()
-
-
-# ---- FerretDB (MongoDB-compatible, backed by PostgreSQL) --------------------
-
-class FerretDBAdapter(DBAdapter):
-    name = "FerretDB"
-
-    def setup(self, fundamentals, economic):
-        from pymongo import MongoClient
-
-        self.client = MongoClient("mongodb://ferretdb:ferretdb@localhost:27018", serverSelectionTimeoutMS=5000)
-        self.db = self.client["bench"]
-        self.db.drop_collection("fundamentals")
-        self.db.drop_collection("economic_indicators")
-        self.db["fundamentals"].insert_many([dict(r) for r in fundamentals])
-        self.db["economic_indicators"].insert_many([dict(r) for r in economic])
-
-    def single_query_fundamentals(self):
-        return len(
-            list(
-                self.db["fundamentals"].find(
-                    {"pe_ratio": {"$lt": 20}, "revenue": {"$gt": 1e10}},
-                    {"symbol": 1, "period": 1, "revenue": 1, "eps": 1, "pe_ratio": 1},
-                ).sort("pe_ratio", 1)
-            )
-        )
-
-    def single_query_economic(self):
-        pipeline = [
-            {"$sort": {"revision_number": -1}},
+        # Double groupby: aggregate by symbol and year extracted from period
+        pipeline1 = [
+            {"$addFields": {"yr": {"$substr": ["$period", 0, 4]}}},
             {
                 "$group": {
-                    "_id": {"indicator_id": "$indicator_id", "timestamp": "$timestamp"},
-                    "value": {"$first": "$value"},
-                    "indicator_id": {"$first": "$indicator_id"},
-                    "timestamp": {"$first": "$timestamp"},
+                    "_id": {"symbol": "$symbol", "yr": "$yr"},
+                    "avg_rev": {"$avg": "$revenue"},
+                    "avg_eps": {"$avg": "$eps"},
+                    "avg_pe": {"$avg": "$pe_ratio"},
                 }
             },
-            {"$sort": {"timestamp": -1}},
-            {"$limit": 100},
-            {"$project": {"_id": 0, "indicator_id": 1, "timestamp": 1, "value": 1}},
+            {"$sort": {"_id.symbol": 1, "_id.yr": 1}},
         ]
-        return len(list(self.db["economic_indicators"].aggregate(pipeline)))
-
-    def multi_query_workload(self):
-        total = 0
+        total += len(list(self.db["fundamentals"].aggregate(pipeline1)))
+        # Full table scan: unindexed multi-column filter
         total += len(
             list(
-                self.db["fundamentals"].aggregate(
-                    [
-                        {
-                            "$group": {
-                                "_id": "$symbol",
-                                "avg_eps": {"$avg": "$eps"},
-                                "avg_pe": {"$avg": "$pe_ratio"},
-                            }
-                        },
-                        {"$sort": {"avg_pe": 1}},
-                    ]
+                self.db["fundamentals"].find(
+                    {"gross_margin": {"$gt": 0.3}, "roe": {"$gt": 0.05}},
+                    {"symbol": 1, "period": 1, "revenue": 1, "eps": 1, "pe_ratio": 1},
                 )
             )
         )
-        total += len(list(self.db["fundamentals"].find({}, {"symbol": 1, "period": 1, "revenue": 1})))
-        total += len(
-            list(
-                self.db["economic_indicators"].aggregate(
-                    [{"$group": {"_id": "$indicator_id", "avg_val": {"$avg": "$value"}}}]
-                )
-            )
-        )
+        # Double groupby on economic data
+        pipeline3 = [
+            {
+                "$group": {
+                    "_id": {"indicator_id": "$indicator_id", "frequency": "$frequency"},
+                    "avg_val": {"$avg": "$value"},
+                    "cnt": {"$sum": 1},
+                    "min_val": {"$min": "$value"},
+                    "max_val": {"$max": "$value"},
+                }
+            }
+        ]
+        total += len(list(self.db["economic_indicators"].aggregate(pipeline3)))
         return total
 
     def teardown(self):
@@ -760,6 +763,7 @@ class CassandraAdapter(DBAdapter):
 
     def setup(self, fundamentals, economic):
         from cassandra.cluster import Cluster
+        from cassandra.concurrent import execute_concurrent_with_args
         from datetime import datetime
 
         self.cluster = Cluster(["127.0.0.1"], port=9042)
@@ -801,37 +805,54 @@ class CassandraAdapter(DBAdapter):
             "INSERT INTO economic_indicators (indicator_id,frequency,timestamp,value,revision_number) "
             "VALUES (?,?,?,?,?)"
         )
-        for r in fundamentals:
-            self.session.execute(fund_stmt, list(r.values()))
-        for r in economic:
-            vals = list(r.values())
-            vals[2] = datetime.fromisoformat(vals[2])
-            self.session.execute(econ_stmt, vals)
+        fund_params = [list(r.values()) for r in fundamentals]
+        econ_params = [
+            [r["indicator_id"], r["frequency"], datetime.fromisoformat(r["timestamp"]),
+             r["value"], r["revision_number"]]
+            for r in economic
+        ]
+        execute_concurrent_with_args(self.session, fund_stmt, fund_params, concurrency=200)
+        execute_concurrent_with_args(self.session, econ_stmt, econ_params, concurrency=200)
 
-    def single_query_fundamentals(self):
+    def simple_query_fundamentals(self):
         rows = self.session.execute(
-            "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals"
+            "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals "
+            "WHERE pe_ratio < 20 AND revenue > 1e10 ALLOW FILTERING"
         )
-        return len([r for r in rows if r.pe_ratio < 20 and r.revenue > 1e10])
+        return len(list(rows))
 
-    def single_query_economic(self):
+    def simple_query_economic(self):
         rows = self.session.execute(
             "SELECT indicator_id, timestamp, value, revision_number FROM economic_indicators LIMIT 100"
         )
         return len(list(rows))
 
-    def multi_query_workload(self):
+    def complex_query_workload(self):
         total = 0
-        rows = list(self.session.execute("SELECT symbol, eps, pe_ratio FROM fundamentals"))
-        total += len(rows)
-        rows = list(
-            self.session.execute("SELECT symbol, period, revenue FROM fundamentals")
-        )
-        total += len(rows)
-        rows = list(
-            self.session.execute("SELECT indicator_id, value FROM economic_indicators")
-        )
-        total += len(rows)
+        # Full table scan + Python-side double groupby (symbol, year)
+        rows = list(self.session.execute(
+            "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals"
+        ))
+        groups_sy: dict = {}
+        for r in rows:
+            key = (r.symbol, r.period[:4])
+            groups_sy[key] = groups_sy.get(key, 0) + 1
+        total += len(groups_sy)
+        # Full table scan with server-side ALLOW FILTERING
+        result = list(self.session.execute(
+            "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals "
+            "WHERE gross_margin > 0.3 AND roe > 0.05 ALLOW FILTERING"
+        ))
+        total += len(result)
+        # Full table scan + Python-side double groupby on economic (indicator_id, frequency)
+        econ_rows = list(self.session.execute(
+            "SELECT indicator_id, frequency, value FROM economic_indicators"
+        ))
+        econ_groups: dict = {}
+        for r in econ_rows:
+            key = (r.indicator_id, r.frequency)
+            econ_groups[key] = econ_groups.get(key, 0) + 1
+        total += len(econ_groups)
         return total
 
     def teardown(self):
@@ -845,6 +866,7 @@ class ScyllaDBAdapter(DBAdapter):
 
     def setup(self, fundamentals, economic):
         from cassandra.cluster import Cluster
+        from cassandra.concurrent import execute_concurrent_with_args
         from datetime import datetime
 
         self.cluster = Cluster(["127.0.0.1"], port=9043)
@@ -886,37 +908,54 @@ class ScyllaDBAdapter(DBAdapter):
             "INSERT INTO economic_indicators (indicator_id,frequency,timestamp,value,revision_number) "
             "VALUES (?,?,?,?,?)"
         )
-        for r in fundamentals:
-            self.session.execute(fund_stmt, list(r.values()))
-        for r in economic:
-            vals = list(r.values())
-            vals[2] = datetime.fromisoformat(vals[2])
-            self.session.execute(econ_stmt, vals)
+        fund_params = [list(r.values()) for r in fundamentals]
+        econ_params = [
+            [r["indicator_id"], r["frequency"], datetime.fromisoformat(r["timestamp"]),
+             r["value"], r["revision_number"]]
+            for r in economic
+        ]
+        execute_concurrent_with_args(self.session, fund_stmt, fund_params, concurrency=200)
+        execute_concurrent_with_args(self.session, econ_stmt, econ_params, concurrency=200)
 
-    def single_query_fundamentals(self):
+    def simple_query_fundamentals(self):
         rows = self.session.execute(
-            "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals"
+            "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals "
+            "WHERE pe_ratio < 20 AND revenue > 1e10 ALLOW FILTERING"
         )
-        return len([r for r in rows if r.pe_ratio < 20 and r.revenue > 1e10])
+        return len(list(rows))
 
-    def single_query_economic(self):
+    def simple_query_economic(self):
         rows = self.session.execute(
             "SELECT indicator_id, timestamp, value, revision_number FROM economic_indicators LIMIT 100"
         )
         return len(list(rows))
 
-    def multi_query_workload(self):
+    def complex_query_workload(self):
         total = 0
-        rows = list(self.session.execute("SELECT symbol, eps, pe_ratio FROM fundamentals"))
-        total += len(rows)
-        rows = list(
-            self.session.execute("SELECT symbol, period, revenue FROM fundamentals")
-        )
-        total += len(rows)
-        rows = list(
-            self.session.execute("SELECT indicator_id, value FROM economic_indicators")
-        )
-        total += len(rows)
+        # Full table scan + Python-side double groupby (symbol, year)
+        rows = list(self.session.execute(
+            "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals"
+        ))
+        groups_sy: dict = {}
+        for r in rows:
+            key = (r.symbol, r.period[:4])
+            groups_sy[key] = groups_sy.get(key, 0) + 1
+        total += len(groups_sy)
+        # Full table scan with server-side ALLOW FILTERING
+        result = list(self.session.execute(
+            "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals "
+            "WHERE gross_margin > 0.3 AND roe > 0.05 ALLOW FILTERING"
+        ))
+        total += len(result)
+        # Full table scan + Python-side double groupby on economic (indicator_id, frequency)
+        econ_rows = list(self.session.execute(
+            "SELECT indicator_id, frequency, value FROM economic_indicators"
+        ))
+        econ_groups: dict = {}
+        for r in econ_rows:
+            key = (r.indicator_id, r.frequency)
+            econ_groups[key] = econ_groups.get(key, 0) + 1
+        total += len(econ_groups)
         return total
 
     def teardown(self):
@@ -965,13 +1004,13 @@ class ClickHouseAdapter(DBAdapter):
         ]
         self.client.insert("bench.economic_indicators", data_e, column_names=cols_e)
 
-    def single_query_fundamentals(self):
+    def simple_query_fundamentals(self):
         result = self.client.query(
             "SELECT symbol, period, revenue, eps, pe_ratio FROM bench.fundamentals WHERE pe_ratio < 20 AND revenue > 1e10 ORDER BY pe_ratio"
         )
         return result.row_count
 
-    def single_query_economic(self):
+    def simple_query_economic(self):
         result = self.client.query("""
             SELECT indicator_id, timestamp, value FROM (
                 SELECT *, ROW_NUMBER() OVER (
@@ -981,19 +1020,30 @@ class ClickHouseAdapter(DBAdapter):
         """)
         return result.row_count
 
-    def multi_query_workload(self):
+    def complex_query_workload(self):
         total = 0
+        # Double groupby: aggregate by symbol and year extracted from period
+        r = self.client.query("""
+            SELECT symbol, substring(period, 1, 4) AS yr,
+                   AVG(revenue) AS avg_rev, AVG(eps) AS avg_eps, AVG(pe_ratio) AS avg_pe
+            FROM bench.fundamentals
+            GROUP BY symbol, yr
+            ORDER BY symbol, yr
+        """)
+        total += r.row_count
+        # Full table scan: unindexed multi-column filter
         r = self.client.query(
-            "SELECT symbol, AVG(eps) AS avg_eps, AVG(pe_ratio) AS avg_pe FROM bench.fundamentals GROUP BY symbol ORDER BY avg_pe"
+            "SELECT symbol, period, revenue, eps, pe_ratio FROM bench.fundamentals WHERE gross_margin > 0.3 AND roe > 0.05"
         )
         total += r.row_count
-        r = self.client.query(
-            "SELECT symbol, period, revenue, lagInFrame(revenue, 4) OVER (PARTITION BY symbol ORDER BY period) AS rev_yoy FROM bench.fundamentals"
-        )
-        total += r.row_count
-        r = self.client.query(
-            "SELECT indicator_id, AVG(value) AS avg_val FROM bench.economic_indicators GROUP BY indicator_id"
-        )
+        # Double groupby on economic data
+        r = self.client.query("""
+            SELECT indicator_id, frequency,
+                   AVG(value) AS avg_val, COUNT(*) AS cnt,
+                   MIN(value) AS min_val, MAX(value) AS max_val
+            FROM bench.economic_indicators
+            GROUP BY indicator_id, frequency
+        """)
         total += r.row_count
         return total
 
@@ -1008,6 +1058,7 @@ class TimescaleDBAdapter(DBAdapter):
 
     def setup(self, fundamentals, economic):
         import psycopg2
+        from psycopg2.extras import execute_values
 
         self.con = psycopg2.connect(
             host="localhost", port=5433, user="bench", password="bench", dbname="bench"
@@ -1036,25 +1087,27 @@ class TimescaleDBAdapter(DBAdapter):
                 PRIMARY KEY (indicator_id, frequency, timestamp, revision_number)
             )
         """)
-        for r in fundamentals:
-            cur.execute(
-                "INSERT INTO fundamentals VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-                tuple(r.values()),
-            )
-        for r in economic:
-            cur.execute(
-                "INSERT INTO economic_indicators VALUES (%s,%s,%s,%s,%s)",
-                tuple(r.values()),
-            )
+        execute_values(
+            cur,
+            "INSERT INTO fundamentals VALUES %s",
+            [tuple(r.values()) for r in fundamentals],
+            page_size=1000,
+        )
+        execute_values(
+            cur,
+            "INSERT INTO economic_indicators VALUES %s",
+            [tuple(r.values()) for r in economic],
+            page_size=1000,
+        )
 
-    def single_query_fundamentals(self):
+    def simple_query_fundamentals(self):
         cur = self.con.cursor()
         cur.execute(
             "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals WHERE pe_ratio < 20 AND revenue > 1e10 ORDER BY pe_ratio"
         )
         return len(cur.fetchall())
 
-    def single_query_economic(self):
+    def simple_query_economic(self):
         cur = self.con.cursor()
         cur.execute("""
             SELECT indicator_id, timestamp, value FROM (
@@ -1065,20 +1118,31 @@ class TimescaleDBAdapter(DBAdapter):
         """)
         return len(cur.fetchall())
 
-    def multi_query_workload(self):
+    def complex_query_workload(self):
         cur = self.con.cursor()
         total = 0
+        # Double groupby: aggregate by symbol and year extracted from period
+        cur.execute("""
+            SELECT symbol, SUBSTR(period, 1, 4) AS yr,
+                   AVG(revenue) AS avg_rev, AVG(eps) AS avg_eps, AVG(pe_ratio) AS avg_pe
+            FROM fundamentals
+            GROUP BY symbol, SUBSTR(period, 1, 4)
+            ORDER BY symbol, yr
+        """)
+        total += len(cur.fetchall())
+        # Full table scan: unindexed multi-column filter
         cur.execute(
-            "SELECT symbol, AVG(eps) AS avg_eps, AVG(pe_ratio) AS avg_pe FROM fundamentals GROUP BY symbol ORDER BY avg_pe"
+            "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals WHERE gross_margin > 0.3 AND roe > 0.05"
         )
         total += len(cur.fetchall())
-        cur.execute(
-            "SELECT symbol, period, revenue, LAG(revenue,4) OVER (PARTITION BY symbol ORDER BY period) AS rev_yoy FROM fundamentals"
-        )
-        total += len(cur.fetchall())
-        cur.execute(
-            "SELECT indicator_id, AVG(value) AS avg_val FROM economic_indicators GROUP BY indicator_id"
-        )
+        # Double groupby on economic data
+        cur.execute("""
+            SELECT indicator_id, frequency,
+                   AVG(value) AS avg_val, COUNT(*) AS cnt,
+                   MIN(value) AS min_val, MAX(value) AS max_val
+            FROM economic_indicators
+            GROUP BY indicator_id, frequency
+        """)
         total += len(cur.fetchall())
         return total
 
@@ -1111,7 +1175,7 @@ class RedisAdapter(DBAdapter):
         self._fundamentals = fundamentals
         self._economic = economic
 
-    def single_query_fundamentals(self):
+    def simple_query_fundamentals(self):
         keys = list(self.r.smembers("fund:index"))
         if not keys:
             return 0
@@ -1121,7 +1185,7 @@ class RedisAdapter(DBAdapter):
         all_data = pipe.execute()
         return len([d for d in all_data if float(d.get("pe_ratio", 999)) < 20 and float(d.get("revenue", 0)) > 1e10])
 
-    def single_query_economic(self):
+    def simple_query_economic(self):
         keys = list(self.r.smembers("econ:index"))[:100]
         if not keys:
             return 0
@@ -1130,8 +1194,9 @@ class RedisAdapter(DBAdapter):
             pipe.hgetall(key)
         return len(pipe.execute())
 
-    def multi_query_workload(self):
+    def complex_query_workload(self):
         total = 0
+        # Full table scan of all fundamentals
         fund_keys = list(self.r.smembers("fund:index"))
         all_fund = []
         if fund_keys:
@@ -1139,15 +1204,32 @@ class RedisAdapter(DBAdapter):
             for key in fund_keys:
                 pipe.hgetall(key)
             all_fund = pipe.execute()
-            total += len(all_fund)
+        # Double groupby in Python: (symbol, year)
+        groups_sy: dict = {}
+        for d in all_fund:
+            sym = d.get("symbol", "")
+            period = d.get("period", "")
+            yr = period[:4] if period else ""
+            groups_sy[(sym, yr)] = groups_sy.get((sym, yr), 0) + 1
+        total += len(groups_sy)
+        # Full table scan filter (gross_margin > 0.3 AND roe > 0.05)
+        total += len([
+            d for d in all_fund
+            if float(d.get("gross_margin", 0)) > 0.3 and float(d.get("roe", -999)) > 0.05
+        ])
+        # Full table scan + double groupby on economic (indicator_id, frequency)
         econ_keys = list(self.r.smembers("econ:index"))
+        all_econ = []
         if econ_keys:
             pipe = self.r.pipeline()
             for key in econ_keys:
                 pipe.hgetall(key)
             all_econ = pipe.execute()
-            total += len(all_econ)
-        total += len(all_fund)
+        econ_groups: dict = {}
+        for d in all_econ:
+            key = (d.get("indicator_id", ""), d.get("frequency", ""))
+            econ_groups[key] = econ_groups.get(key, 0) + 1
+        total += len(econ_groups)
         return total
 
     def teardown(self):
@@ -1177,68 +1259,106 @@ class RavenDBAdapter(DBAdapter):
             )
         except Exception:
             pass
-        # Bulk insert fundamentals
-        for r in fundamentals:
-            doc_id = f"fundamentals/{r['symbol']}-{r['period']}"
-            requests.put(
-                f"{self.base_url}/databases/{self.db_name}/docs?id={doc_id}",
-                json=r,
-                headers={"Content-Type": "application/json"},
-                timeout=5,
-            )
-        for r in economic:
-            doc_id = f"economic/{r['indicator_id']}-{r['timestamp']}-{r['revision_number']}"
-            requests.put(
-                f"{self.base_url}/databases/{self.db_name}/docs?id={doc_id}",
-                json=r,
-                headers={"Content-Type": "application/json"},
-                timeout=5,
-            )
+        # Batch insert fundamentals in chunks
+        batch_size = 500
+        for i in range(0, len(fundamentals), batch_size):
+            batch = fundamentals[i:i + batch_size]
+            commands = [
+                {
+                    "Type": "PUT",
+                    "Id": f"fundamentals/{r['symbol']}-{r['period']}",
+                    "Document": r,
+                    "ChangeVector": None,
+                }
+                for r in batch
+            ]
+            try:
+                requests.post(
+                    f"{self.base_url}/databases/{self.db_name}/bulk_docs",
+                    json={"Commands": commands},
+                    headers={"Content-Type": "application/json"},
+                    timeout=30,
+                )
+            except Exception:
+                pass
+        for i in range(0, len(economic), batch_size):
+            batch = economic[i:i + batch_size]
+            commands = [
+                {
+                    "Type": "PUT",
+                    "Id": f"economic/{r['indicator_id']}-{r['timestamp']}-{r['revision_number']}",
+                    "Document": r,
+                    "ChangeVector": None,
+                }
+                for r in batch
+            ]
+            try:
+                requests.post(
+                    f"{self.base_url}/databases/{self.db_name}/bulk_docs",
+                    json={"Commands": commands},
+                    headers={"Content-Type": "application/json"},
+                    timeout=30,
+                )
+            except Exception:
+                pass
 
-    def single_query_fundamentals(self):
+    def simple_query_fundamentals(self):
         import requests
 
         resp = requests.get(
             f"{self.base_url}/databases/{self.db_name}/docs",
-            params={"startsWith": "fundamentals/", "pageSize": 1024},
+            params={"startWith": "fundamentals/", "pageSize": 1024},
             timeout=10,
         )
         results = resp.json().get("Results", [])
         return len([r for r in results if r.get("pe_ratio", 999) < 20 and r.get("revenue", 0) > 1e10])
 
-    def single_query_economic(self):
+    def simple_query_economic(self):
         import requests
 
         resp = requests.get(
             f"{self.base_url}/databases/{self.db_name}/docs",
-            params={"startsWith": "economic/", "pageSize": 100},
+            params={"startWith": "economic/", "pageSize": 100},
             timeout=10,
         )
         return len(resp.json().get("Results", []))
 
-    def multi_query_workload(self):
+    def complex_query_workload(self):
         import requests
 
         total = 0
+        # Fetch fundamentals (double groupby done client-side)
         resp = requests.get(
             f"{self.base_url}/databases/{self.db_name}/docs",
-            params={"startsWith": "fundamentals/", "pageSize": 1024},
+            params={"startWith": "fundamentals/", "pageSize": 1024},
             timeout=10,
         )
-        total += len(resp.json().get("Results", []))
+        fund_docs = resp.json().get("Results", [])
+        # Double groupby: (symbol, year)
+        groups_sy: dict = {}
+        for d in fund_docs:
+            sym = d.get("symbol", "")
+            period = d.get("period", "")
+            yr = period[:4] if period else ""
+            groups_sy[(sym, yr)] = groups_sy.get((sym, yr), 0) + 1
+        total += len(groups_sy)
+        # Full table scan filter
+        total += len([
+            d for d in fund_docs
+            if float(d.get("gross_margin", 0)) > 0.3 and float(d.get("roe", -999)) > 0.05
+        ])
+        # Fetch economic data + double groupby (indicator_id, frequency)
         resp = requests.get(
             f"{self.base_url}/databases/{self.db_name}/docs",
-            params={"startsWith": "economic/", "pageSize": 1024},
+            params={"startWith": "economic/", "pageSize": 1024},
             timeout=10,
         )
-        total += len(resp.json().get("Results", []))
-        # Re-fetch fundamentals for a third read pass (mimics multi-query pattern)
-        resp = requests.get(
-            f"{self.base_url}/databases/{self.db_name}/docs",
-            params={"startsWith": "fundamentals/", "pageSize": 1024},
-            timeout=10,
-        )
-        total += len(resp.json().get("Results", []))
+        econ_docs = resp.json().get("Results", [])
+        econ_groups: dict = {}
+        for d in econ_docs:
+            key = (d.get("indicator_id", ""), d.get("frequency", ""))
+            econ_groups[key] = econ_groups.get(key, 0) + 1
+        total += len(econ_groups)
         return total
 
 
@@ -1253,7 +1373,6 @@ ALL_ADAPTERS: list[type[DBAdapter]] = [
     MySQLAdapter,
     MariaDBAdapter,
     MongoDBAdapter,
-    FerretDBAdapter,
     CassandraAdapter,
     ScyllaDBAdapter,
     ClickHouseAdapter,
@@ -1284,32 +1403,32 @@ def run_benchmark(
         results.append(BenchResult(db, "data_load", 0, error=str(exc)))
         return results
 
-    # Single-query: fundamentals screening
+    # Simple query: fundamentals screening
     for i in range(iterations):
         try:
             with _timer() as t:
-                n = adapter.single_query_fundamentals()
-            results.append(BenchResult(db, "single_query_fundamentals", t[0], n))
+                n = adapter.simple_query_fundamentals()
+            results.append(BenchResult(db, "simple_query_fundamentals", t[0], n))
         except Exception as exc:
-            results.append(BenchResult(db, "single_query_fundamentals", 0, error=str(exc)))
+            results.append(BenchResult(db, "simple_query_fundamentals", 0, error=str(exc)))
 
-    # Single-query: economic latest values
+    # Simple query: economic latest values
     for i in range(iterations):
         try:
             with _timer() as t:
-                n = adapter.single_query_economic()
-            results.append(BenchResult(db, "single_query_economic", t[0], n))
+                n = adapter.simple_query_economic()
+            results.append(BenchResult(db, "simple_query_economic", t[0], n))
         except Exception as exc:
-            results.append(BenchResult(db, "single_query_economic", 0, error=str(exc)))
+            results.append(BenchResult(db, "simple_query_economic", 0, error=str(exc)))
 
-    # Multi-query workload
+    # Complex query workload
     for i in range(iterations):
         try:
             with _timer() as t:
-                n = adapter.multi_query_workload()
-            results.append(BenchResult(db, "multi_query_workload", t[0], n))
+                n = adapter.complex_query_workload()
+            results.append(BenchResult(db, "complex_query_workload", t[0], n))
         except Exception as exc:
-            results.append(BenchResult(db, "multi_query_workload", 0, error=str(exc)))
+            results.append(BenchResult(db, "complex_query_workload", 0, error=str(exc)))
 
     try:
         adapter.teardown()
@@ -1323,12 +1442,12 @@ def generate_summary(all_results: list[BenchResult], output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Group results
-    ops = ["data_load", "single_query_fundamentals", "single_query_economic", "multi_query_workload"]
+    ops = ["data_load", "simple_query_fundamentals", "simple_query_economic", "complex_query_workload"]
     op_labels = {
         "data_load": "Data Load",
-        "single_query_fundamentals": "Single Query: Fundamentals Screening",
-        "single_query_economic": "Single Query: Economic Latest Values",
-        "multi_query_workload": "Multi-Query Workload",
+        "simple_query_fundamentals": "Simple Query: Fundamentals Screening",
+        "simple_query_economic": "Simple Query: Economic Latest Values",
+        "complex_query_workload": "Complex Query Workload",
     }
 
     db_names: list[str] = []
@@ -1343,7 +1462,7 @@ def generate_summary(all_results: list[BenchResult], output_dir: Path) -> None:
     lines.append("## Configuration\n")
     lines.append(f"- **Databases tested**: {len(db_names)}")
     lines.append(f"- **Databases**: {', '.join(db_names)}")
-    lines.append(f"- **Fundamentals records**: 30 symbols × 28 periods = 840 rows")
+    lines.append(f"- **Fundamentals records**: 500 symbols × 200 periods = 100,000 rows")
     lines.append(f"- **Economic records**: ~1,680 rows (10 indicators × 84 months × ~2 revisions)\n")
 
     for op in ops:
