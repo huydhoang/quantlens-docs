@@ -52,11 +52,12 @@ MOCK_PREAMBLE = textwrap.dedent("""\
     class _F:
         def find_spec(self, name, path, target=None):
             if name == "nautilus_trader" or name.startswith("nautilus_trader."):
-                m = _MM(name); m.__path__ = [name]; m.__package__ = name
-                m.__loader__ = self; sys.modules[name] = m
-                return importlib.util.spec_from_loader(name, loader=self, origin="mock")
+                return importlib.util.spec_from_loader(name, loader=self, origin="mock",
+                    is_package=True)
             return None
-        def create_module(self, spec): return sys.modules.get(spec.name)
+        def create_module(self, spec):
+            m = _MM(spec.name); m.__path__ = [spec.name]; m.__package__ = spec.name
+            m.__loader__ = self; return m
         def exec_module(self, module): pass
     sys.meta_path.insert(0, _F())
 """)
