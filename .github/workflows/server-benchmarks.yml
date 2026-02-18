@@ -90,7 +90,7 @@ jobs:
 
       - name: Install Python dependencies
         run: |
-          pip install fastapi uvicorn[standard] granian[rloop] gunicorn uvicorn-worker
+          pip install fastapi uvicorn[standard] granian[uvloop] gunicorn uvicorn-worker
 
       - name: Install hey
         run: |
