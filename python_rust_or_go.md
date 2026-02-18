@@ -22,7 +22,7 @@ NautilusTrader (v1.208+) is a **Rust core with Python bindings**, not a pure Pyt
 
 ```mermaid
 graph TB
-    subgraph "Python Backend (FastAPI/Granian)"
+    subgraph "Python Backend (Gunicorn+Uvicorn ASGI)"
         A[API Layer] --> B[Strategy Service]
         A --> C[Backtest Orchestrator]
         A --> D[Data Service]
@@ -189,8 +189,8 @@ quadrantChart
 
 Performance is achieved through architecture choices, not language replacement:
 
-### Granian over Uvicorn
-Use Granian (Rust-based ASGI server) for HTTP handling. Rust performance at the transport layer, Python business logic above it.
+### Gunicorn+Uvicorn Raw ASGI (over Granian)
+Use Gunicorn+Uvicorn Raw ASGI for HTTP handling. Extended benchmarks show Gunicorn+Uvicorn wins the critical CPU-burst portfolio optimization scenario and requires no non-obvious configuration. See [asgi_web_server.md](asgi_web_server.md) for the benchmark-driven rationale. FastAPI is only added when WebSocket support is explicitly required.
 
 ### Streaming Data via BacktestNode
 Use NautilusTrader's `BacktestNode` with `ParquetDataCatalog` for memory-efficient streaming instead of loading entire datasets into RAM:

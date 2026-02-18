@@ -64,6 +64,6 @@ Cross-referencing [system_design.md](system_design.md), [local_frontend.md](loca
 - [ ] 🟠 **14.2 Strategy dry-run validation** — What does NautilusTrader "dry-run parse" mean? Does it execute user code in FastAPI's process, conflicting with sandboxing (7.1)?
 - [ ] 🔴 **14.3 Strategy code serialization** — Celery uses JSON serialization, but strategies are Python classes. How does code travel from Monaco → PostgreSQL → Celery worker → NautilusTrader?
 - [ ] 🟠 **15.1 Data type conversion stage** — At which pipeline stage are provider responses converted to NautilusTrader `Bar`/`QuoteTick` types (ingestion time vs catalog read time)?
-- [ ] 🟠 **16.1 Granian vs Uvicorn contradiction** — `python_rust_or_go.md` recommends Granian; `asgi_web_server.md` recommends Uvicorn. Which is canonical? Update the outdated doc.
+- [x] 🟠 **16.1 Granian vs Uvicorn contradiction** — `python_rust_or_go.md` recommends Granian; `asgi_web_server.md` recommends Uvicorn. Which is canonical? Update the outdated doc. **RESOLVED: Gunicorn+Uvicorn Raw ASGI is the default** (see asgi_web_server.md extended benchmarks).
 - [ ] 🟠 **17.1 NautilusTrader → skfolio handoff** — No doc defines how NautilusTrader trade results are converted to the asset-return DataFrames that skfolio expects. Who does the conversion, and where?
 - [ ] 🟢 **18.1 Live/paper trading scope** — `core_engine.md` highlights backtest-live parity as the key value prop, but no doc describes the live trading path. Is this MVP or future? Should docs explicitly label it?

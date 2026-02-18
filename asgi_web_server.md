@@ -2,7 +2,9 @@
 
 ## Decision Summary
 
-**FastAPI on Uvicorn** is the default ASGI web server stack for QuantLens. For production systems that combine research dashboards with live trading, use a **hybrid two-tier architecture**: FastAPI on Uvicorn for strategy backtesting and data dashboards, and a **lightweight Uvicorn gateway** (vanilla ASGI or Starlette-thin) for real-time market data ingestion and signal processing.
+**Gunicorn + Uvicorn · Raw ASGI** is the default ASGI web server stack for QuantLens. Extended benchmarks on realistic CPU-bound workloads (skfolio portfolio optimization) show that Gunicorn+Uvicorn Raw ASGI delivers the best combination of throughput, tail-latency, memory efficiency, and code simplicity. **FastAPI on Gunicorn+Uvicorn** is only considered when WebSocket support is explicitly required.
+
+See the [Extended Benchmark Results](#extended-benchmark-results) section below for the data behind this decision.
 
 ---
 
@@ -461,38 +463,26 @@ async def app(scope, receive, send):
 
 ---
 
-## Recommended Architecture: Hybrid Two-Tier
+## Recommended Architecture: Default + WebSocket Upgrade Path
 
-For production systems that combine research and real-time trading, split the workload across two Uvicorn processes:
+For most QuantLens workloads (research, backtesting, portfolio optimization), a single **Gunicorn+Uvicorn Raw ASGI** process is the default. When WebSocket streaming becomes necessary (live trading, real-time market data), upgrade to **FastAPI on Gunicorn+Uvicorn** or extract a dedicated raw ASGI WebSocket gateway.
 
 ```mermaid
 flowchart TD
     subgraph frontend["React Dashboard"]
-        FE["TypeScript · Auto-generated API client\nWebSocket for live data · Recharts/D3"]
+        FE["TypeScript · REST client\nWebSocket for live data · Recharts/D3"]
     end
 
-    frontend -->|HTTP / WebSocket| tier1
-    frontend -->|WebSocket| tier2
+    frontend -->|HTTP| default
 
-    subgraph tier1["Tier 1 — FastAPI · Uvicorn · Port 8000"]
-        T1A["POST /backtest — Run NautilusTrader"]
-        T1B["GET  /backtest/&lbrace;id&rbrace; — Query results"]
-        T1C["WS   /backtest/stream — Real-time progress"]
-        T1D["POST /optimize — skfolio"]
-        T1E["GET  /fundamentals/&lbrace;ticker&rbrace; — DuckDB"]
-        T1F["Pydantic validation · OpenAPI docs · JWT auth"]
+    subgraph default["Default — Gunicorn+Uvicorn · Raw ASGI · Port 8000"]
+        D1A["POST /backtest — Run NautilusTrader"]
+        D1B["GET  /backtest/&lbrace;id&rbrace; — Query results"]
+        D1C["POST /portfolio/optimize — skfolio"]
+        D1D["GET  /fundamentals/&lbrace;ticker&rbrace; — DuckDB"]
     end
 
-    subgraph tier2["Tier 2 — Vanilla ASGI · Uvicorn · Port 8001"]
-        T2A["WS /ws/market-data"]
-        T2B["WS /ws/signals"]
-        T2C["WS /ws/execution"]
-        T2D["Finnhub ingest · Alpaca ingest"]
-        T2E["Signal processing · QuestDB writes"]
-    end
-
-    tier1 --> shared
-    tier2 --> shared
+    default --> shared
 
     subgraph shared["Shared Layer"]
         SH1["Redis — pub/sub · cache"]
@@ -508,15 +498,19 @@ flowchart TD
     end
 ```
 
-### Benefits
+### When to Add FastAPI
 
-- **Both tiers run on Uvicorn**, leveraging its database query and WebSocket streaming advantages across the board.
-- **FastAPI** handles business logic (portfolio optimization, backtesting, reporting) with full developer experience — OpenAPI docs, Pydantic validation, CORS middleware.
-- **Vanilla ASGI** handles the hot path (market data ingestion, order execution, real-time risk) with minimal latency and direct asyncpg/WebSocket control.
-- Both tiers share Pydantic models via a shared library.
-- Isolated failure domains — a crash in the research API does not affect live trading.
-- **Redis pub/sub** decouples the tiers with built-in backpressure handling.
-- A single event loop architecture (uvloop) on both tiers means **no Tokio ↔ asyncio scheduling friction** for database operations.
+Only introduce FastAPI when WebSocket support is explicitly required (live trading, real-time progress streaming). At that point, either:
+- Swap the raw ASGI app for **FastAPI on Gunicorn+Uvicorn** (same server stack, added framework), or
+- Keep the raw ASGI app for HTTP and add a dedicated raw ASGI WebSocket gateway on a second port.
+
+### Benefits of Default Gunicorn+Uvicorn Raw ASGI
+
+- **Best throughput under CPU pressure.** Extended benchmarks show Gunicorn+Uvicorn Raw ASGI leads on the CPU-burst POST `/portfolio/optimize` scenario — the most important workload in QuantLens.
+- **Lowest memory footprint.** ~385 MB idle vs ~448 MB for FastAPI · Granian.
+- **Cleanest code.** Low-level raw ASGI is easy to read and reason about without framework magic.
+- **No configuration complexity.** Gunicorn process management with Uvicorn workers requires no non-obvious tuning (unlike Granian's backlog override).
+- **Uvicorn's database advantages.** Both tiers run on uvloop + httptools, leveraging Uvicorn's benchmark-leading database query and WebSocket streaming performance.
 
 ---
 
@@ -573,6 +567,31 @@ async def get_fundamentals(ticker: str) -> dict:
 
 ---
 
+## Extended Benchmark Results
+
+Internal extended benchmarks on realistic CPU-bound workloads (skfolio MeanRisk optimization, HRP clustering, 2 Gunicorn workers, 30 s/scenario, GitHub Actions `ubuntu-latest`) produced the following findings:
+
+### Key Findings
+
+1. **Gunicorn+Uvicorn Raw ASGI wins the most important scenario.** In the CPU-burst POST `/portfolio/optimize` (100 requests, c=50) test — the primary QuantLens workload — Gunicorn+Uvicorn Raw ASGI achieved **48 req/s** vs Granian Raw ASGI at 25 req/s and FastAPI · Granian at 38 req/s.
+2. **Granian requires non-obvious tuning.** Getting competitive performance from Granian required manually overriding `--backlog 2048` (default 1024), which roughly doubled its throughput. Gunicorn+Uvicorn works well with default settings.
+3. **FastAPI · Uvicorn lags on throughput.** Despite good developer experience, FastAPI adds ~30–50% overhead vs Raw ASGI on every benchmark scenario.
+4. **Gunicorn+Uvicorn Raw ASGI code is clean.** Low-level raw ASGI without a framework is easy to read and reason about.
+
+### Summary Table (selected scenarios)
+
+| Stack | GET /health c=200 (req/s) | POST /optimize c=50 (req/s) | Burst 100×optimize c=50 (req/s) | Idle RSS |
+|-------|:---:|:---:|:---:|---:|
+| Gunicorn+Uvicorn · Raw ASGI | 25,353 | 49 | **48** | 385 MB |
+| Granian · Raw ASGI | 30,618 | 49 | 25 | 423 MB |
+| FastAPI · Gunicorn+Uvicorn | 13,122 | 48 | 48 | 407 MB |
+| FastAPI · Granian | 11,626 | 48 | 38 | 448 MB |
+| FastAPI · Uvicorn | 7,476 | 24 | 24 | 194 MB |
+
+> **Decision: Gunicorn+Uvicorn Raw ASGI is the default. FastAPI is only added when WebSocket support is explicitly required.**
+
+---
+
 ## When to Consider Granian
 
 Granian is not the right default for QuantLens, but there are scenarios where it could be worth evaluating:
@@ -583,7 +602,7 @@ Granian is not the right default for QuantLens, but there are scenarios where it
 | **Pure JSON API with no database** | Granian's RSGI protocol optimization provides an edge for trivial responses |
 | **Static file serving** | Granian's `pathsend` extension is efficient |
 
-If any of these become a priority, benchmark against Uvicorn on QuantLens's actual workload before switching. Synthetic micro-benchmarks (JSON serialization) can be misleading for database-heavy applications.
+If any of these become a priority, benchmark against Gunicorn+Uvicorn on QuantLens's actual workload before switching. Synthetic micro-benchmarks (JSON serialization) can be misleading for database-heavy and CPU-bound applications.
 
 ---
 
@@ -591,20 +610,21 @@ If any of these become a priority, benchmark against Uvicorn on QuantLens's actu
 
 | Use Case | Recommendation |
 |----------|----------------|
-| **Research / backtesting platform** | FastAPI on Uvicorn |
-| **Data dashboards (React frontend)** | FastAPI on Uvicorn |
-| **Live trading with low latency** | Vanilla ASGI on Uvicorn |
-| **Mixed system (research + production)** | Hybrid — FastAPI on Uvicorn for Tier 1, vanilla ASGI on Uvicorn for Tier 2 |
-| **Small team, rapid development** | FastAPI on Uvicorn (single tier, add Tier 2 when needed) |
-| **Multiple real-time data sources** | Build the vanilla ASGI gateway on Uvicorn from day one |
+| **Research / backtesting platform** | Gunicorn+Uvicorn · Raw ASGI |
+| **Data dashboards (React frontend)** | Gunicorn+Uvicorn · Raw ASGI |
+| **Live trading with low latency** | Gunicorn+Uvicorn · Raw ASGI |
+| **Mixed system (research + production)** | Gunicorn+Uvicorn · Raw ASGI (upgrade to FastAPI when WebSocket required) |
+| **Small team, rapid development** | Gunicorn+Uvicorn · Raw ASGI |
+| **WebSocket streaming required** | FastAPI on Gunicorn+Uvicorn |
 
-For QuantLens specifically — backtesting NautilusTrader strategies, running skfolio optimization, and serving dashboards to a React frontend — start with **FastAPI on Uvicorn**. Uvicorn's Cython/C architecture (uvloop + httptools + asyncpg) delivers benchmark-leading database query performance, and FastAPI's developer experience (OpenAPI docs, Pydantic validation, CORS middleware) eliminates boilerplate. When live trading is added, extract real-time endpoints to a vanilla ASGI service on a second Uvicorn process using the hybrid architecture above.
+For QuantLens specifically — backtesting NautilusTrader strategies, running skfolio optimization, and serving dashboards to a React frontend — start with **Gunicorn+Uvicorn Raw ASGI**. Extended benchmarks on QuantLens's actual CPU-bound workload show it wins the critical CPU-burst scenario, has a low memory footprint, requires no non-obvious tuning, and produces cleaner code than FastAPI alternatives. When live trading with WebSocket streaming is added, introduce FastAPI at that point.
 
 | Component | Technology | Reason |
 |-----------|-----------|--------|
-| Research / backtest API | FastAPI on Uvicorn | Developer experience, docs, validation, DB query performance |
-| Real-time market data gateway | Vanilla ASGI on Uvicorn | Low-latency WebSocket streaming, native asyncpg, single event loop |
-| Signal processing | Vanilla ASGI + NautilusTrader | Direct kernel integration, no FFI overhead |
+| Research / backtest API | Gunicorn+Uvicorn · Raw ASGI | Best CPU-burst performance, lowest overhead, clean code |
+| WebSocket (when required) | FastAPI on Gunicorn+Uvicorn | Only when WebSocket is explicitly needed |
+| Real-time market data gateway | Gunicorn+Uvicorn · Raw ASGI | Low-latency, native asyncpg, single event loop |
+| Signal processing | Raw ASGI + NautilusTrader | Direct kernel integration, no FFI overhead |
 | Data persistence | QuestDB primary | Time-series optimized, 11M+ rows/sec ingestion, native OHLCV features |
 | Cross-service communication | Redis pub/sub | Decoupling, backpressure handling |
 | Frontend | React + WebSocket (msgpack) | Binary framing for efficiency |
@@ -612,11 +632,23 @@ For QuantLens specifically — backtesting NautilusTrader strategies, running sk
 ### Production Configuration
 
 ```bash
-# Tier 1 — FastAPI (backtesting, dashboards)
-uvicorn main:app --loop uvloop --http httptools --workers 4 --limit-concurrency 1000
+# Default — Gunicorn+Uvicorn Raw ASGI (backtesting, dashboards, optimization)
+gunicorn asgi_app:app \
+  -k uvicorn_worker.UvicornWorker \
+  --workers 4 \
+  --bind 0.0.0.0:8000 \
+  --keep-alive 5 \
+  --worker-tmp-dir /dev/shm \
+  --log-level warning
 
-# Tier 2 — Vanilla ASGI (real-time trading)
-uvicorn realtime_gateway:app --loop uvloop --http httptools --workers 2 --port 8001
+# Optional upgrade — FastAPI on Gunicorn+Uvicorn (when WebSocket required)
+gunicorn fastapi_app:app \
+  -k uvicorn_worker.UvicornWorker \
+  --workers 4 \
+  --bind 0.0.0.0:8000 \
+  --keep-alive 5 \
+  --worker-tmp-dir /dev/shm \
+  --log-level warning
 ```
 
 See also: [asgi_rsgi_wsgi.md](asgi_rsgi_wsgi.md) for the ASGI vs WSGI vs RSGI interface decision.
