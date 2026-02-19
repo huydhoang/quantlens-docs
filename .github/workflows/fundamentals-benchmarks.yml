@@ -139,7 +139,7 @@ jobs:
             -e ACCEPT_EULA=Y \
             -e MSSQL_SA_PASSWORD=Bench\!1234 \
             -e MSSQL_PID=Express \
-            mcr.microsoft.com/mssql/server:2022-latest
+            mcr.microsoft.com/mssql/server:2025-latest
           echo "Waiting for SQL Server to be ready…"
           for i in $(seq 1 30); do
             if docker exec bench-mssql /opt/mssql-tools18/bin/sqlcmd \
@@ -150,12 +150,12 @@ jobs:
             sleep 5
           done
 
-          # Install v3 cert into SQL Server container (run as root for /etc/ssl permissions)
-          docker cp /tmp/mssql.pem bench-mssql:/etc/ssl/certs/mssql.pem
-          docker cp /tmp/mssql.key bench-mssql:/etc/ssl/private/mssql.key
-          docker exec -u 0 bench-mssql bash -c "chmod 440 /etc/ssl/private/mssql.key && chown mssql:mssql /etc/ssl/private/mssql.key /etc/ssl/certs/mssql.pem"
-          docker exec -u 0 bench-mssql /opt/mssql/bin/mssql-conf set network.tlscert /etc/ssl/certs/mssql.pem
-          docker exec -u 0 bench-mssql /opt/mssql/bin/mssql-conf set network.tlskey /etc/ssl/private/mssql.key
+          # Install v3 cert into SQL Server container (use /var/opt/mssql which is owned by mssql)
+          docker cp /tmp/mssql.pem bench-mssql:/var/opt/mssql/mssql.pem
+          docker cp /tmp/mssql.key bench-mssql:/var/opt/mssql/mssql.key
+          docker exec -u 0 bench-mssql bash -c "chmod 600 /var/opt/mssql/mssql.key && chmod 644 /var/opt/mssql/mssql.pem && chown mssql:mssql /var/opt/mssql/mssql.key /var/opt/mssql/mssql.pem"
+          docker exec -u 0 bench-mssql /opt/mssql/bin/mssql-conf set network.tlscert /var/opt/mssql/mssql.pem
+          docker exec -u 0 bench-mssql /opt/mssql/bin/mssql-conf set network.tlskey /var/opt/mssql/mssql.key
           docker exec -u 0 bench-mssql /opt/mssql/bin/mssql-conf set network.tlsprotocols 1.2
           docker restart bench-mssql
 
