@@ -656,12 +656,12 @@ class FastMSSQLAdapter(DBAdapter):
     def setup(self, fundamentals, economic):
         import asyncio
         from datetime import datetime
-        from fastmssql import Connection, PoolConfig
+        from fastmssql import Connection, PoolConfig, SslConfig
 
-        self._conn_str = "Server=127.0.0.1;Database=bench;User Id=sa;Password=Bench!1234;Encrypt=false"
+        self._conn_str = "Server=127.0.0.1;Database=bench;User Id=sa;Password=Bench!1234"
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
-        self._conn = Connection(self._conn_str, pool_config=PoolConfig.one())
+        self._conn = Connection(self._conn_str, pool_config=PoolConfig.one(), ssl_config=SslConfig.disabled())
 
         # Pre-convert timestamp strings to datetime objects for DATETIME2 columns
         cols_e = list(economic[0].keys())
