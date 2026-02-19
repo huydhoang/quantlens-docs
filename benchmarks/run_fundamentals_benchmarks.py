@@ -25,6 +25,7 @@ import os
 import random
 import statistics
 import time
+import traceback
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1710,6 +1711,8 @@ def run_benchmark(
             adapter.setup(fundamentals, economic)
         results.append(BenchResult(db, "data_load", t[0], len(fundamentals) + len(economic)))
     except Exception as exc:
+        print(f"\n[BENCHMARK ERROR] {db} – data_load: {exc}", flush=True)
+        traceback.print_exc()
         results.append(BenchResult(db, "data_load", 0, error=str(exc)))
         return results
 
@@ -1720,6 +1723,8 @@ def run_benchmark(
                 n = adapter.simple_query_fundamentals()
             results.append(BenchResult(db, "simple_query_fundamentals", t[0], n))
         except Exception as exc:
+            print(f"\n[BENCHMARK ERROR] {db} – simple_query_fundamentals: {exc}", flush=True)
+            traceback.print_exc()
             results.append(BenchResult(db, "simple_query_fundamentals", 0, error=str(exc)))
 
     # Simple query: economic latest values
@@ -1729,6 +1734,8 @@ def run_benchmark(
                 n = adapter.simple_query_economic()
             results.append(BenchResult(db, "simple_query_economic", t[0], n))
         except Exception as exc:
+            print(f"\n[BENCHMARK ERROR] {db} – simple_query_economic: {exc}", flush=True)
+            traceback.print_exc()
             results.append(BenchResult(db, "simple_query_economic", 0, error=str(exc)))
 
     # Complex query workload
@@ -1738,6 +1745,8 @@ def run_benchmark(
                 n = adapter.complex_query_workload()
             results.append(BenchResult(db, "complex_query_workload", t[0], n))
         except Exception as exc:
+            print(f"\n[BENCHMARK ERROR] {db} – complex_query_workload: {exc}", flush=True)
+            traceback.print_exc()
             results.append(BenchResult(db, "complex_query_workload", 0, error=str(exc)))
 
     try:
@@ -1787,7 +1796,7 @@ def generate_summary(all_results: list[BenchResult], output_dir: Path) -> None:
                 continue
             errors = [r for r in op_results if r.error]
             if errors:
-                lines.append(f"| {db} | — | — | — | — | {errors[0].error[:80]} |")
+                lines.append(f"| {db} | — | — | — | — | {errors[0].error[:200]} |")
                 continue
             times = [r.elapsed_ms for r in op_results]
             avg = statistics.mean(times)
@@ -1797,6 +1806,14 @@ def generate_summary(all_results: list[BenchResult], output_dir: Path) -> None:
             lines.append(f"| {db} | {avg:.2f} | {mn:.2f} | {mx:.2f} | {row_count} | — |")
 
         lines.append("")
+
+    # Full error log section (shows complete error messages, not truncated)
+    all_errors = [r for r in all_results if r.error]
+    if all_errors:
+        lines.append("## Full Error Log\n")
+        for r in all_errors:
+            lines.append(f"### {r.db_name} – {r.operation}\n")
+            lines.append(f"```\n{r.error}\n```\n")
 
     summary = "\n".join(lines)
     summary_path = output_dir / "summary.md"
