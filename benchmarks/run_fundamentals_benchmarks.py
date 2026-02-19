@@ -3,7 +3,7 @@ Fundamentals Database Benchmark Suite
 
 Benchmarks 12 databases for stock fundamentals and economic data workloads:
   - DuckDB, SQLite (embedded)
-  - PostgreSQL, MariaDB, MySQL, TimescaleDB (relational / Docker)
+  - PostgreSQL, SQL Server, MySQL, TimescaleDB (relational / Docker)
   - MongoDB (document / Docker)
   - Cassandra, ScyllaDB (wide-column / Docker)
   - Redis (key-value / Docker)
@@ -590,37 +590,37 @@ class MySQLAdapter(DBAdapter):
         self.con.close()
 
 
-# ---- MariaDB ----------------------------------------------------------------
+# ---- SQL Server -------------------------------------------------------------
 
-class MariaDBAdapter(DBAdapter):
-    name = "MariaDB"
+class MSSQLAdapter(DBAdapter):
+    name = "SQL Server"
 
     def setup(self, fundamentals, economic):
-        import mysql.connector
+        import pymssql
 
-        self.con = mysql.connector.connect(
-            host="127.0.0.1", port=3307, user="bench", password="bench", database="bench"
+        self.con = pymssql.connect(
+            server="127.0.0.1", port="1433", user="sa", password="Bench!1234", database="bench"
         )
-        self.con.autocommit = False
         cur = self.con.cursor()
+        cur.execute("SET NOCOUNT ON")
         cur.execute("DROP TABLE IF EXISTS fundamentals")
         cur.execute("DROP TABLE IF EXISTS economic_indicators")
         cur.execute("""
             CREATE TABLE fundamentals (
-                symbol VARCHAR(20), period VARCHAR(20), revenue DOUBLE,
-                net_income DOUBLE, eps DOUBLE, pe_ratio DOUBLE,
-                book_value DOUBLE, dividend_yield DOUBLE,
-                debt_to_equity DOUBLE, roe DOUBLE, roa DOUBLE,
-                current_ratio DOUBLE, gross_margin DOUBLE,
-                operating_margin DOUBLE, free_cash_flow DOUBLE,
-                market_cap DOUBLE, balance_sheet TEXT, cash_flow TEXT,
+                symbol VARCHAR(20), period VARCHAR(20), revenue FLOAT,
+                net_income FLOAT, eps FLOAT, pe_ratio FLOAT,
+                book_value FLOAT, dividend_yield FLOAT,
+                debt_to_equity FLOAT, roe FLOAT, roa FLOAT,
+                current_ratio FLOAT, gross_margin FLOAT,
+                operating_margin FLOAT, free_cash_flow FLOAT,
+                market_cap FLOAT, balance_sheet VARCHAR(MAX), cash_flow VARCHAR(MAX),
                 PRIMARY KEY (symbol, period)
             )
         """)
         cur.execute("""
             CREATE TABLE economic_indicators (
                 indicator_id VARCHAR(30), frequency VARCHAR(20),
-                timestamp DATETIME, value DOUBLE,
+                timestamp DATETIME2, value FLOAT,
                 revision_number INTEGER,
                 PRIMARY KEY (indicator_id, frequency, timestamp, revision_number)
             )
@@ -638,6 +638,8 @@ class MariaDBAdapter(DBAdapter):
         cur.execute("CREATE INDEX idx_fund_pe_rev ON fundamentals (pe_ratio, revenue)")
         cur.execute("CREATE INDEX idx_fund_gm_roe ON fundamentals (gross_margin, roe)")
         cur.execute("CREATE INDEX idx_econ_rev ON economic_indicators (indicator_id, timestamp, revision_number DESC)")
+        cur.execute("UPDATE STATISTICS fundamentals")
+        cur.execute("UPDATE STATISTICS economic_indicators")
         self.con.commit()
 
     def simple_query_fundamentals(self):
@@ -650,11 +652,11 @@ class MariaDBAdapter(DBAdapter):
     def simple_query_economic(self):
         cur = self.con.cursor()
         cur.execute("""
-            SELECT indicator_id, timestamp, value FROM (
+            SELECT TOP 100 indicator_id, timestamp, value FROM (
                 SELECT *, ROW_NUMBER() OVER (
                     PARTITION BY indicator_id, timestamp ORDER BY revision_number DESC
                 ) AS rn FROM economic_indicators
-            ) sub WHERE rn = 1 ORDER BY timestamp DESC LIMIT 100
+            ) sub WHERE rn = 1 ORDER BY timestamp DESC
         """)
         return len(cur.fetchall())
 
@@ -663,10 +665,10 @@ class MariaDBAdapter(DBAdapter):
         total = 0
         # Double groupby: aggregate by symbol and year extracted from period
         cur.execute("""
-            SELECT symbol, SUBSTR(period, 1, 4) AS yr,
+            SELECT symbol, SUBSTRING(period, 1, 4) AS yr,
                    AVG(revenue) AS avg_rev, AVG(eps) AS avg_eps, AVG(pe_ratio) AS avg_pe
             FROM fundamentals
-            GROUP BY symbol, SUBSTR(period, 1, 4)
+            GROUP BY symbol, SUBSTRING(period, 1, 4)
             ORDER BY symbol, yr
         """)
         total += len(cur.fetchall())
@@ -1403,7 +1405,7 @@ ALL_ADAPTERS: list[type[DBAdapter]] = [
     SQLiteAdapter,
     PostgreSQLAdapter,
     MySQLAdapter,
-    MariaDBAdapter,
+    MSSQLAdapter,
     MongoDBAdapter,
     CassandraAdapter,
     ScyllaDBAdapter,
