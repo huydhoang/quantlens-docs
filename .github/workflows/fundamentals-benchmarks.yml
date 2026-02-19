@@ -122,6 +122,7 @@ jobs:
             duckdb \
             psycopg2-binary \
             mysql-connector-python \
+            mariadb \
             pymongo \
             cassandra-driver \
             clickhouse-connect \
