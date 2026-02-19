@@ -661,7 +661,7 @@ class FastMSSQLAdapter(DBAdapter):
         self._conn_str = "Server=127.0.0.1;Database=bench;User Id=sa;Password=Bench!1234"
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
-        self._conn = Connection(self._conn_str, pool_config=PoolConfig.one(), ssl_config=SslConfig.disabled())
+        self._conn = Connection(self._conn_str, pool_config=PoolConfig.one(), ssl_config=SslConfig.development())
 
         # Pre-convert timestamp strings to datetime objects for DATETIME2 columns
         cols_e = list(economic[0].keys())
@@ -1605,38 +1605,45 @@ class RavenDBAdapter(DBAdapter):
             for f in futures:
                 f.result()
 
-    def simple_query_fundamentals(self):
+    def _fetch_all_docs(self, prefix: str, page_size: int = 1024) -> list:
+        """Paginate through all documents matching a prefix."""
         import requests
 
-        resp = requests.get(
-            f"{self.base_url}/databases/{self.db_name}/docs",
-            params={"startsWith": "fundamentals/", "pageSize": 1024},
-            timeout=10,
-        )
-        results = resp.json().get("Results", [])
+        all_docs: list = []
+        start = 0
+        while True:
+            resp = requests.get(
+                f"{self.base_url}/databases/{self.db_name}/docs",
+                params={"startsWith": prefix, "start": start, "pageSize": page_size},
+                timeout=30,
+            )
+            batch = resp.json().get("Results", [])
+            all_docs.extend(batch)
+            if len(batch) < page_size:
+                break
+            start += page_size
+        return all_docs
+
+    def simple_query_fundamentals(self):
+        results = self._fetch_all_docs("fundamentals/")
         return len([r for r in results if r.get("pe_ratio", 999) < 20 and r.get("revenue", 0) > 1e10])
 
     def simple_query_economic(self):
-        import requests
-
-        resp = requests.get(
-            f"{self.base_url}/databases/{self.db_name}/docs",
-            params={"startsWith": "economic/", "pageSize": 100},
-            timeout=10,
-        )
-        return len(resp.json().get("Results", []))
+        results = self._fetch_all_docs("economic/")
+        # Get latest revision per (indicator_id, timestamp), sort by timestamp desc, limit 100
+        latest: dict = {}
+        for r in results:
+            key = (r.get("indicator_id", ""), r.get("timestamp", ""))
+            rev = r.get("revision_number", 0)
+            if key not in latest or rev > latest[key]["revision_number"]:
+                latest[key] = r
+        sorted_vals = sorted(latest.values(), key=lambda x: x.get("timestamp", ""), reverse=True)
+        return len(sorted_vals[:100])
 
     def complex_query_workload(self):
-        import requests
-
         total = 0
-        # Fetch fundamentals (double groupby done client-side)
-        resp = requests.get(
-            f"{self.base_url}/databases/{self.db_name}/docs",
-            params={"startsWith": "fundamentals/", "pageSize": 1024},
-            timeout=10,
-        )
-        fund_docs = resp.json().get("Results", [])
+        # Fetch all fundamentals (double groupby done client-side)
+        fund_docs = self._fetch_all_docs("fundamentals/")
         # Double groupby: (symbol, year)
         groups_sy: dict = {}
         for d in fund_docs:
@@ -1650,13 +1657,8 @@ class RavenDBAdapter(DBAdapter):
             d for d in fund_docs
             if float(d.get("gross_margin", 0)) > 0.3 and float(d.get("roe", -999)) > 0.05
         ])
-        # Fetch economic data + double groupby (indicator_id, frequency)
-        resp = requests.get(
-            f"{self.base_url}/databases/{self.db_name}/docs",
-            params={"startsWith": "economic/", "pageSize": 1024},
-            timeout=10,
-        )
-        econ_docs = resp.json().get("Results", [])
+        # Fetch all economic data + double groupby (indicator_id, frequency)
+        econ_docs = self._fetch_all_docs("economic/")
         econ_groups: dict = {}
         for d in econ_docs:
             key = (d.get("indicator_id", ""), d.get("frequency", ""))
