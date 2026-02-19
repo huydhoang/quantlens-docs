@@ -11,7 +11,7 @@ Benchmarks 12 databases for stock fundamentals and economic data workloads:
   - RavenDB (document / Docker)
 
 Generates synthetic stock fundamentals (~100 K rows) and economic indicator
-data, then runs:
+data (~100 K rows), then runs:
   1. Simple Query workload  (targeted single-table queries)
   2. Complex Query workload (double groupby + full table scan)
 """
@@ -106,10 +106,12 @@ def generate_fundamentals(n_symbols: int = 500, n_periods: int = 200) -> list[di
     return rows
 
 
-def generate_economic_data(n_indicators: int = 10, n_months: int = 84) -> list[dict]:
+def generate_economic_data(n_indicators: int = 250, n_months: int = 200) -> list[dict]:
     """Return a list of economic indicator records."""
     random.seed(43)
-    indicators = ECON_INDICATORS[:n_indicators]
+    real = ECON_INDICATORS[:min(n_indicators, len(ECON_INDICATORS))]
+    synth = [f"ECON{i:04d}" for i in range(1, n_indicators - len(real) + 1)]
+    indicators = real + synth
     rows: list[dict] = []
     for ind in indicators:
         freq = random.choice(ECON_FREQUENCIES)
@@ -295,6 +297,10 @@ class SQLiteAdapter(DBAdapter):
         import sqlite3
 
         self.con = sqlite3.connect(":memory:")
+        self.con.execute("PRAGMA journal_mode=OFF")
+        self.con.execute("PRAGMA synchronous=OFF")
+        self.con.execute("PRAGMA cache_size=-128000")
+        self.con.execute("PRAGMA temp_store=MEMORY")
         self.con.execute("""
             CREATE TABLE fundamentals (
                 symbol TEXT, period TEXT, revenue REAL,
@@ -324,6 +330,9 @@ class SQLiteAdapter(DBAdapter):
             [tuple(r.values()) for r in economic],
         )
         self.con.commit()
+        self.con.execute("CREATE INDEX idx_fund_pe_rev ON fundamentals (pe_ratio, revenue)")
+        self.con.execute("CREATE INDEX idx_fund_gm_roe ON fundamentals (gross_margin, roe)")
+        self.con.execute("CREATE INDEX idx_econ_rev ON economic_indicators (indicator_id, timestamp, revision_number DESC)")
 
     def simple_query_fundamentals(self):
         return len(
@@ -391,6 +400,7 @@ class PostgreSQLAdapter(DBAdapter):
         )
         self.con.autocommit = True
         cur = self.con.cursor()
+        cur.execute("SET work_mem = '256MB'")
         cur.execute("DROP TABLE IF EXISTS fundamentals")
         cur.execute("DROP TABLE IF EXISTS economic_indicators")
         cur.execute("""
@@ -425,6 +435,11 @@ class PostgreSQLAdapter(DBAdapter):
             [tuple(r.values()) for r in economic],
             page_size=1000,
         )
+        cur.execute("CREATE INDEX idx_fund_pe_rev ON fundamentals (pe_ratio, revenue)")
+        cur.execute("CREATE INDEX idx_fund_gm_roe ON fundamentals (gross_margin, roe)")
+        cur.execute("CREATE INDEX idx_econ_rev ON economic_indicators (indicator_id, timestamp, revision_number DESC)")
+        cur.execute("ANALYZE fundamentals")
+        cur.execute("ANALYZE economic_indicators")
 
     def simple_query_fundamentals(self):
         cur = self.con.cursor()
@@ -520,6 +535,10 @@ class MySQLAdapter(DBAdapter):
             [tuple(r.values()) for r in economic],
         )
         self.con.commit()
+        cur.execute("CREATE INDEX idx_fund_pe_rev ON fundamentals (pe_ratio, revenue)")
+        cur.execute("CREATE INDEX idx_fund_gm_roe ON fundamentals (gross_margin, roe)")
+        cur.execute("CREATE INDEX idx_econ_rev ON economic_indicators (indicator_id, timestamp, revision_number DESC)")
+        self.con.commit()
 
     def simple_query_fundamentals(self):
         cur = self.con.cursor()
@@ -577,11 +596,12 @@ class MariaDBAdapter(DBAdapter):
     name = "MariaDB"
 
     def setup(self, fundamentals, economic):
-        import mysql.connector
+        import mariadb
 
-        self.con = mysql.connector.connect(
+        self.con = mariadb.connect(
             host="127.0.0.1", port=3307, user="bench", password="bench", database="bench"
         )
+        self.con.autocommit = False
         cur = self.con.cursor()
         cur.execute("DROP TABLE IF EXISTS fundamentals")
         cur.execute("DROP TABLE IF EXISTS economic_indicators")
@@ -607,13 +627,17 @@ class MariaDBAdapter(DBAdapter):
         """)
         self.con.commit()
         cur.executemany(
-            "INSERT INTO fundamentals VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            "INSERT INTO fundamentals VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             [tuple(r.values()) for r in fundamentals],
         )
         cur.executemany(
-            "INSERT INTO economic_indicators VALUES (%s,%s,%s,%s,%s)",
+            "INSERT INTO economic_indicators VALUES (?,?,?,?,?)",
             [tuple(r.values()) for r in economic],
         )
+        self.con.commit()
+        cur.execute("CREATE INDEX idx_fund_pe_rev ON fundamentals (pe_ratio, revenue)")
+        cur.execute("CREATE INDEX idx_fund_gm_roe ON fundamentals (gross_margin, roe)")
+        cur.execute("CREATE INDEX idx_econ_rev ON economic_indicators (indicator_id, timestamp, revision_number DESC)")
         self.con.commit()
 
     def simple_query_fundamentals(self):
@@ -681,6 +705,8 @@ class MongoDBAdapter(DBAdapter):
         self.db["fundamentals"].insert_many([dict(r) for r in fundamentals])
         self.db["economic_indicators"].insert_many([dict(r) for r in economic])
         self.db["fundamentals"].create_index([("symbol", 1), ("period", 1)], unique=True)
+        self.db["fundamentals"].create_index([("pe_ratio", 1), ("revenue", 1)])
+        self.db["fundamentals"].create_index([("gross_margin", 1), ("roe", 1)])
         self.db["economic_indicators"].create_index(
             [("indicator_id", 1), ("timestamp", 1), ("revision_number", -1)]
         )
@@ -1065,6 +1091,7 @@ class TimescaleDBAdapter(DBAdapter):
         )
         self.con.autocommit = True
         cur = self.con.cursor()
+        cur.execute("SET work_mem = '256MB'")
         cur.execute("DROP TABLE IF EXISTS fundamentals")
         cur.execute("DROP TABLE IF EXISTS economic_indicators")
         cur.execute("""
@@ -1099,6 +1126,11 @@ class TimescaleDBAdapter(DBAdapter):
             [tuple(r.values()) for r in economic],
             page_size=1000,
         )
+        cur.execute("CREATE INDEX idx_fund_pe_rev ON fundamentals (pe_ratio, revenue)")
+        cur.execute("CREATE INDEX idx_fund_gm_roe ON fundamentals (gross_margin, roe)")
+        cur.execute("CREATE INDEX idx_econ_rev ON economic_indicators (indicator_id, timestamp, revision_number DESC)")
+        cur.execute("ANALYZE fundamentals")
+        cur.execute("ANALYZE economic_indicators")
 
     def simple_query_fundamentals(self):
         cur = self.con.cursor()
@@ -1463,7 +1495,7 @@ def generate_summary(all_results: list[BenchResult], output_dir: Path) -> None:
     lines.append(f"- **Databases tested**: {len(db_names)}")
     lines.append(f"- **Databases**: {', '.join(db_names)}")
     lines.append(f"- **Fundamentals records**: 500 symbols × 200 periods = 100,000 rows")
-    lines.append(f"- **Economic records**: ~1,680 rows (10 indicators × 84 months × ~2 revisions)\n")
+    lines.append(f"- **Economic records**: 250 indicators × 200 months (~100,000 rows)\n")
 
     for op in ops:
         lines.append(f"## {op_labels[op]}\n")
