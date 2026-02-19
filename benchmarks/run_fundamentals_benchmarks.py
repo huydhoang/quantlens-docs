@@ -19,6 +19,7 @@ data (~100 K rows), then runs:
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import os
 import random
@@ -201,7 +202,7 @@ class DuckDBAdapter(DBAdapter):
         import os
         import tempfile
 
-        self.con = duckdb.connect(":memory:", config={"threads": 4})
+        self.con = duckdb.connect(":memory:", config={"threads": 2})
         self.con.execute("""
             CREATE TABLE fundamentals (
                 symbol VARCHAR, period VARCHAR, revenue DOUBLE,
@@ -423,18 +424,41 @@ class PostgreSQLAdapter(DBAdapter):
                 PRIMARY KEY (indicator_id, frequency, timestamp, revision_number)
             )
         """)
-        execute_values(
-            cur,
-            "INSERT INTO fundamentals VALUES %s",
-            [tuple(r.values()) for r in fundamentals],
-            page_size=1000,
-        )
-        execute_values(
-            cur,
-            "INSERT INTO economic_indicators VALUES %s",
-            [tuple(r.values()) for r in economic],
-            page_size=1000,
-        )
+        # Use 2 threads for parallel bulk inserts (psycopg2 connections are thread-safe
+        # when each thread owns its own connection)
+        _pg_params = dict(host="localhost", port=5432, user="bench", password="bench", dbname="bench")
+
+        def _ins_fund(rows):
+            import psycopg2
+            from psycopg2.extras import execute_values
+            c = psycopg2.connect(**_pg_params)
+            c.autocommit = True
+            execute_values(c.cursor(), "INSERT INTO fundamentals VALUES %s",
+                           [tuple(r.values()) for r in rows], page_size=1000)
+            c.close()
+
+        def _ins_econ(rows):
+            import psycopg2
+            from psycopg2.extras import execute_values
+            c = psycopg2.connect(**_pg_params)
+            c.autocommit = True
+            execute_values(c.cursor(), "INSERT INTO economic_indicators VALUES %s",
+                           [tuple(r.values()) for r in rows], page_size=1000)
+            c.close()
+
+        mid_f = len(fundamentals) // 2
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            fs = [ex.submit(_ins_fund, fundamentals[:mid_f]), ex.submit(_ins_fund, fundamentals[mid_f:])]
+            for f in fs:
+                f.result()
+
+        mid_e = len(economic) // 2
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            fs = [ex.submit(_ins_econ, economic[:mid_e]), ex.submit(_ins_econ, economic[mid_e:])]
+            for f in fs:
+                f.result()
+
+        cur = self.con.cursor()
         cur.execute("CREATE INDEX idx_fund_pe_rev ON fundamentals (pe_ratio, revenue)")
         cur.execute("CREATE INDEX idx_fund_gm_roe ON fundamentals (gross_margin, roe)")
         cur.execute("CREATE INDEX idx_econ_rev ON economic_indicators (indicator_id, timestamp, revision_number DESC)")
@@ -526,15 +550,46 @@ class MySQLAdapter(DBAdapter):
             )
         """)
         self.con.commit()
-        cur.executemany(
-            "INSERT INTO fundamentals VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-            [tuple(r.values()) for r in fundamentals],
-        )
-        cur.executemany(
-            "INSERT INTO economic_indicators VALUES (%s,%s,%s,%s,%s)",
-            [tuple(r.values()) for r in economic],
-        )
-        self.con.commit()
+
+        # Use 2 threads for parallel bulk inserts (mysql-connector connections are not
+        # thread-safe; each thread must own its own connection)
+        _mysql_params = dict(host="127.0.0.1", port=3306, user="bench", password="bench", database="bench")
+
+        def _ins_fund(rows):
+            import mysql.connector
+            c = mysql.connector.connect(**_mysql_params)
+            cur = c.cursor()
+            cur.executemany(
+                "INSERT INTO fundamentals VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                [tuple(r.values()) for r in rows],
+            )
+            c.commit()
+            c.close()
+
+        def _ins_econ(rows):
+            import mysql.connector
+            c = mysql.connector.connect(**_mysql_params)
+            cur = c.cursor()
+            cur.executemany(
+                "INSERT INTO economic_indicators VALUES (%s,%s,%s,%s,%s)",
+                [tuple(r.values()) for r in rows],
+            )
+            c.commit()
+            c.close()
+
+        mid_f = len(fundamentals) // 2
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            fs = [ex.submit(_ins_fund, fundamentals[:mid_f]), ex.submit(_ins_fund, fundamentals[mid_f:])]
+            for f in fs:
+                f.result()
+
+        mid_e = len(economic) // 2
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            fs = [ex.submit(_ins_econ, economic[:mid_e]), ex.submit(_ins_econ, economic[mid_e:])]
+            for f in fs:
+                f.result()
+
+        cur = self.con.cursor()
         cur.execute("CREATE INDEX idx_fund_pe_rev ON fundamentals (pe_ratio, revenue)")
         cur.execute("CREATE INDEX idx_fund_gm_roe ON fundamentals (gross_margin, roe)")
         cur.execute("CREATE INDEX idx_econ_rev ON economic_indicators (indicator_id, timestamp, revision_number DESC)")
@@ -626,15 +681,49 @@ class MSSQLAdapter(DBAdapter):
             )
         """)
         self.con.commit()
-        cur.executemany(
-            "INSERT INTO fundamentals VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-            [tuple(r.values()) for r in fundamentals],
-        )
-        cur.executemany(
-            "INSERT INTO economic_indicators VALUES (%s,%s,%s,%s,%s)",
-            [tuple(r.values()) for r in economic],
-        )
-        self.con.commit()
+
+        # Use 2 threads for parallel bulk inserts — pymssql is thread-safe when
+        # each thread owns its own connection; this is the primary optimisation for
+        # SQL Server's slow row-by-row executemany.
+        _mssql_params = dict(server="127.0.0.1", port="1433", user="sa", password="Bench!1234", database="bench")
+
+        def _ins_fund(rows):
+            import pymssql
+            c = pymssql.connect(**_mssql_params)
+            cur = c.cursor()
+            cur.execute("SET NOCOUNT ON")
+            cur.executemany(
+                "INSERT INTO fundamentals VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                [tuple(r.values()) for r in rows],
+            )
+            c.commit()
+            c.close()
+
+        def _ins_econ(rows):
+            import pymssql
+            c = pymssql.connect(**_mssql_params)
+            cur = c.cursor()
+            cur.execute("SET NOCOUNT ON")
+            cur.executemany(
+                "INSERT INTO economic_indicators VALUES (%s,%s,%s,%s,%s)",
+                [tuple(r.values()) for r in rows],
+            )
+            c.commit()
+            c.close()
+
+        mid_f = len(fundamentals) // 2
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            fs = [ex.submit(_ins_fund, fundamentals[:mid_f]), ex.submit(_ins_fund, fundamentals[mid_f:])]
+            for f in fs:
+                f.result()
+
+        mid_e = len(economic) // 2
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            fs = [ex.submit(_ins_econ, economic[:mid_e]), ex.submit(_ins_econ, economic[mid_e:])]
+            for f in fs:
+                f.result()
+
+        cur = self.con.cursor()
         cur.execute("CREATE INDEX idx_fund_pe_rev ON fundamentals (pe_ratio, revenue)")
         cur.execute("CREATE INDEX idx_fund_gm_roe ON fundamentals (gross_margin, roe)")
         cur.execute("CREATE INDEX idx_econ_rev ON economic_indicators (indicator_id, timestamp, revision_number DESC)")
@@ -704,8 +793,26 @@ class MongoDBAdapter(DBAdapter):
         self.db = self.client["bench"]
         self.db.drop_collection("fundamentals")
         self.db.drop_collection("economic_indicators")
-        self.db["fundamentals"].insert_many([dict(r) for r in fundamentals])
-        self.db["economic_indicators"].insert_many([dict(r) for r in economic])
+
+        # MongoClient is thread-safe; use 2 threads for parallel bulk inserts
+        def _ins_fund(rows):
+            self.db["fundamentals"].insert_many([dict(r) for r in rows])
+
+        def _ins_econ(rows):
+            self.db["economic_indicators"].insert_many([dict(r) for r in rows])
+
+        mid_f = len(fundamentals) // 2
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            fs = [ex.submit(_ins_fund, fundamentals[:mid_f]), ex.submit(_ins_fund, fundamentals[mid_f:])]
+            for f in fs:
+                f.result()
+
+        mid_e = len(economic) // 2
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            fs = [ex.submit(_ins_econ, economic[:mid_e]), ex.submit(_ins_econ, economic[mid_e:])]
+            for f in fs:
+                f.result()
+
         self.db["fundamentals"].create_index([("symbol", 1), ("period", 1)], unique=True)
         self.db["fundamentals"].create_index([("pe_ratio", 1), ("revenue", 1)])
         self.db["fundamentals"].create_index([("gross_margin", 1), ("roe", 1)])
@@ -999,7 +1106,10 @@ class ClickHouseAdapter(DBAdapter):
         import clickhouse_connect
         from datetime import datetime
 
-        self.client = clickhouse_connect.get_client(host="localhost", port=8123, username="default", password="bench")
+        self.client = clickhouse_connect.get_client(
+            host="localhost", port=8123, username="default", password="bench",
+            settings={"max_threads": 2},
+        )
         self.client.command("DROP TABLE IF EXISTS bench.fundamentals")
         self.client.command("DROP TABLE IF EXISTS bench.economic_indicators")
         self.client.command("CREATE DATABASE IF NOT EXISTS bench")
@@ -1116,18 +1226,41 @@ class TimescaleDBAdapter(DBAdapter):
                 PRIMARY KEY (indicator_id, frequency, timestamp, revision_number)
             )
         """)
-        execute_values(
-            cur,
-            "INSERT INTO fundamentals VALUES %s",
-            [tuple(r.values()) for r in fundamentals],
-            page_size=1000,
-        )
-        execute_values(
-            cur,
-            "INSERT INTO economic_indicators VALUES %s",
-            [tuple(r.values()) for r in economic],
-            page_size=1000,
-        )
+        # Use 2 threads for parallel bulk inserts (psycopg2 connections are thread-safe
+        # when each thread owns its own connection)
+        _ts_params = dict(host="localhost", port=5433, user="bench", password="bench", dbname="bench")
+
+        def _ins_fund(rows):
+            import psycopg2
+            from psycopg2.extras import execute_values
+            c = psycopg2.connect(**_ts_params)
+            c.autocommit = True
+            execute_values(c.cursor(), "INSERT INTO fundamentals VALUES %s",
+                           [tuple(r.values()) for r in rows], page_size=1000)
+            c.close()
+
+        def _ins_econ(rows):
+            import psycopg2
+            from psycopg2.extras import execute_values
+            c = psycopg2.connect(**_ts_params)
+            c.autocommit = True
+            execute_values(c.cursor(), "INSERT INTO economic_indicators VALUES %s",
+                           [tuple(r.values()) for r in rows], page_size=1000)
+            c.close()
+
+        mid_f = len(fundamentals) // 2
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            fs = [ex.submit(_ins_fund, fundamentals[:mid_f]), ex.submit(_ins_fund, fundamentals[mid_f:])]
+            for f in fs:
+                f.result()
+
+        mid_e = len(economic) // 2
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            fs = [ex.submit(_ins_econ, economic[:mid_e]), ex.submit(_ins_econ, economic[mid_e:])]
+            for f in fs:
+                f.result()
+
+        cur = self.con.cursor()
         cur.execute("CREATE INDEX idx_fund_pe_rev ON fundamentals (pe_ratio, revenue)")
         cur.execute("CREATE INDEX idx_fund_gm_roe ON fundamentals (gross_margin, roe)")
         cur.execute("CREATE INDEX idx_econ_rev ON economic_indicators (indicator_id, timestamp, revision_number DESC)")
@@ -1293,39 +1426,35 @@ class RavenDBAdapter(DBAdapter):
             )
         except Exception:
             pass
-        # Batch insert fundamentals in chunks
+        # Batch insert fundamentals in chunks using 2 threads (HTTP requests are I/O-bound
+        # and benefit from concurrent execution; each thread uses its own requests session)
         batch_size = 500
-        for i in range(0, len(fundamentals), batch_size):
-            batch = fundamentals[i:i + batch_size]
-            commands = [
+        fund_batches = [
+            [
                 {
                     "Type": "PUT",
                     "Id": f"fundamentals/{r['symbol']}-{r['period']}",
                     "Document": r,
                     "ChangeVector": None,
                 }
-                for r in batch
+                for r in fundamentals[i:i + batch_size]
             ]
-            try:
-                requests.post(
-                    f"{self.base_url}/databases/{self.db_name}/bulk_docs",
-                    json={"Commands": commands},
-                    headers={"Content-Type": "application/json"},
-                    timeout=30,
-                )
-            except Exception:
-                pass
-        for i in range(0, len(economic), batch_size):
-            batch = economic[i:i + batch_size]
-            commands = [
+            for i in range(0, len(fundamentals), batch_size)
+        ]
+        econ_batches = [
+            [
                 {
                     "Type": "PUT",
                     "Id": f"economic/{r['indicator_id']}-{r['timestamp']}-{r['revision_number']}",
                     "Document": r,
                     "ChangeVector": None,
                 }
-                for r in batch
+                for r in economic[i:i + batch_size]
             ]
+            for i in range(0, len(economic), batch_size)
+        ]
+
+        def _send_batch(commands):
             try:
                 requests.post(
                     f"{self.base_url}/databases/{self.db_name}/bulk_docs",
@@ -1335,6 +1464,11 @@ class RavenDBAdapter(DBAdapter):
                 )
             except Exception:
                 pass
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            futures = [ex.submit(_send_batch, b) for b in fund_batches + econ_batches]
+            for f in futures:
+                f.result()
 
     def simple_query_fundamentals(self):
         import requests
