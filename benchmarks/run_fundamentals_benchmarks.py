@@ -1094,22 +1094,24 @@ class CassandraAdapter(DBAdapter):
         return len(list(rows))
 
     def complex_query_workload(self):
+        from cassandra.concurrent import execute_concurrent
+        from cassandra.query import SimpleStatement
+
         total = 0
-        # Execute all 3 queries concurrently using execute_async()
-        future1 = self.session.execute_async(
-            "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals"
-        )
-        future2 = self.session.execute_async(
-            "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals "
-            "WHERE gross_margin > 0.3 AND roe > 0.05 ALLOW FILTERING"
-        )
-        future3 = self.session.execute_async(
-            "SELECT indicator_id, frequency, value FROM economic_indicators"
-        )
+        # Execute all 3 queries concurrently using execute_concurrent()
+        statements = [
+            (SimpleStatement("SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals"), ()),
+            (SimpleStatement(
+                "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals "
+                "WHERE gross_margin > 0.3 AND roe > 0.05 ALLOW FILTERING"
+            ), ()),
+            (SimpleStatement("SELECT indicator_id, frequency, value FROM economic_indicators"), ()),
+        ]
+        results = execute_concurrent(self.session, statements, concurrency=3, raise_on_first_error=True)
         # Collect results
-        rows = list(future1.result())
-        result = list(future2.result())
-        econ_rows = list(future3.result())
+        rows = list(results[0][1])
+        result = list(results[1][1])
+        econ_rows = list(results[2][1])
         # Full table scan + Python-side double groupby (symbol, year)
         groups_sy: dict = {}
         for r in rows:
@@ -1201,22 +1203,24 @@ class ScyllaDBAdapter(DBAdapter):
         return len(list(rows))
 
     def complex_query_workload(self):
+        from cassandra.concurrent import execute_concurrent
+        from cassandra.query import SimpleStatement
+
         total = 0
-        # Execute all 3 queries concurrently using execute_async()
-        future1 = self.session.execute_async(
-            "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals"
-        )
-        future2 = self.session.execute_async(
-            "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals "
-            "WHERE gross_margin > 0.3 AND roe > 0.05 ALLOW FILTERING"
-        )
-        future3 = self.session.execute_async(
-            "SELECT indicator_id, frequency, value FROM economic_indicators"
-        )
+        # Execute all 3 queries concurrently using execute_concurrent()
+        statements = [
+            (SimpleStatement("SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals"), ()),
+            (SimpleStatement(
+                "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals "
+                "WHERE gross_margin > 0.3 AND roe > 0.05 ALLOW FILTERING"
+            ), ()),
+            (SimpleStatement("SELECT indicator_id, frequency, value FROM economic_indicators"), ()),
+        ]
+        results = execute_concurrent(self.session, statements, concurrency=3, raise_on_first_error=True)
         # Collect results
-        rows = list(future1.result())
-        result = list(future2.result())
-        econ_rows = list(future3.result())
+        rows = list(results[0][1])
+        result = list(results[1][1])
+        econ_rows = list(results[2][1])
         # Full table scan + Python-side double groupby (symbol, year)
         groups_sy: dict = {}
         for r in rows:
