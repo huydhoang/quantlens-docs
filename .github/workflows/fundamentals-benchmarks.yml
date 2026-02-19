@@ -112,7 +112,7 @@ jobs:
             pymongo \
             cassandra-driver \
             clickhouse-connect \
-            redis \
+            redis[hiredis] \
             requests
 
       - name: Install MSSQL ODBC driver
