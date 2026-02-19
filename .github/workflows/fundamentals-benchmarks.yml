@@ -127,12 +127,20 @@ jobs:
 
       - name: Start SQL Server
         run: |
-          # Generate X.509 v3 self-signed cert (rustls/fastmssql requires v3;
-          # SQL Server 2022 defaults to v1 which rustls rejects)
+          # Generate X.509 v3 end-entity cert for SQL Server TLS.
+          # rustls (fastmssql's TLS backend) requires:
+          #   1. X.509 v3 (provided by -addext flags)
+          #   2. basicConstraints=CA:FALSE — rustls rejects CA:TRUE certs as leaf
+          #      certs with CaUsedAsEndEntity even when trust_server_certificate=True
+          #   3. extendedKeyUsage=serverAuth — marks as a server authentication cert
+          #   4. subjectAltName — required for hostname validation
           openssl req -x509 -newkey rsa:2048 -nodes \
             -keyout /tmp/mssql.key -out /tmp/mssql.pem \
             -days 365 -subj "/CN=localhost" \
-            -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
+            -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" \
+            -addext "basicConstraints=CA:FALSE" \
+            -addext "extendedKeyUsage=serverAuth" \
+            -addext "keyUsage=digitalSignature,keyEncipherment"
 
           docker run -d --name bench-mssql \
             -p 1433:1433 \
