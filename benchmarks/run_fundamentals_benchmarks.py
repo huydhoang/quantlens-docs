@@ -713,7 +713,7 @@ class FastMSSQLAdapter(DBAdapter):
                 "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals"
                 " WHERE pe_ratio < 20 AND revenue > 1e10 ORDER BY pe_ratio"
             )
-            return len(result.rows())
+            return sum(1 for _ in result)
         return self._loop.run_until_complete(_q())
 
     def simple_query_economic(self):
@@ -725,7 +725,7 @@ class FastMSSQLAdapter(DBAdapter):
                     ) AS rn FROM economic_indicators
                 ) sub WHERE rn = 1 ORDER BY timestamp DESC
             """)
-            return len(result.rows())
+            return sum(1 for _ in result)
         return self._loop.run_until_complete(_q())
 
     def complex_query_workload(self):
@@ -738,12 +738,12 @@ class FastMSSQLAdapter(DBAdapter):
                 GROUP BY symbol, SUBSTRING(period, 1, 4)
                 ORDER BY symbol, yr
             """)
-            total += len(r.rows())
+            total += sum(1 for _ in r)
             r = await self._conn.query(
                 "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals"
                 " WHERE gross_margin > 0.3 AND roe > 0.05"
             )
-            total += len(r.rows())
+            total += sum(1 for _ in r)
             r = await self._conn.query("""
                 SELECT indicator_id, frequency,
                        AVG(value) AS avg_val, COUNT(*) AS cnt,
@@ -751,7 +751,7 @@ class FastMSSQLAdapter(DBAdapter):
                 FROM economic_indicators
                 GROUP BY indicator_id, frequency
             """)
-            total += len(r.rows())
+            total += sum(1 for _ in r)
             return total
         return self._loop.run_until_complete(_q())
 
