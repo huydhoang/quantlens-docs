@@ -298,7 +298,9 @@ class SQLiteAdapter(DBAdapter):
     def setup(self, fundamentals, economic):
         import sqlite3
 
-        self.con = sqlite3.connect(":memory:")
+        # check_same_thread=False is required to allow 2 threads to share this
+        # in-memory connection for concurrent inserts into different tables.
+        self.con = sqlite3.connect(":memory:", check_same_thread=False)
         self.con.execute("PRAGMA journal_mode=OFF")
         self.con.execute("PRAGMA synchronous=OFF")
         self.con.execute("PRAGMA cache_size=-128000")
@@ -323,14 +325,26 @@ class SQLiteAdapter(DBAdapter):
                 PRIMARY KEY (indicator_id, frequency, timestamp, revision_number)
             )
         """)
-        self.con.executemany(
-            "INSERT INTO fundamentals VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            [tuple(r.values()) for r in fundamentals],
-        )
-        self.con.executemany(
-            "INSERT INTO economic_indicators VALUES (?,?,?,?,?)",
-            [tuple(r.values()) for r in economic],
-        )
+        # Use 2 threads to insert into both tables concurrently. SQLite
+        # in-memory has only one connection so the two inserts share it;
+        # writes will serialize at the SQLite lock but the threads still run
+        # in parallel from Python's perspective.
+        def _ins_fund():
+            self.con.executemany(
+                "INSERT INTO fundamentals VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                [tuple(r.values()) for r in fundamentals],
+            )
+
+        def _ins_econ():
+            self.con.executemany(
+                "INSERT INTO economic_indicators VALUES (?,?,?,?,?)",
+                [tuple(r.values()) for r in economic],
+            )
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            fs = [ex.submit(_ins_fund), ex.submit(_ins_econ)]
+            for f in fs:
+                f.result()
         self.con.commit()
         self.con.execute("CREATE INDEX idx_fund_pe_rev ON fundamentals (pe_ratio, revenue)")
         self.con.execute("CREATE INDEX idx_fund_gm_roe ON fundamentals (gross_margin, roe)")
@@ -1317,14 +1331,32 @@ class ClickHouseAdapter(DBAdapter):
         """)
         cols_f = list(fundamentals[0].keys())
         data_f = [list(r.values()) for r in fundamentals]
-        self.client.insert("bench.fundamentals", data_f, column_names=cols_f)
         cols_e = list(economic[0].keys())
         ts_idx = cols_e.index("timestamp")
         data_e = [
             [datetime.fromisoformat(v) if i == ts_idx else v for i, v in enumerate(r.values())]
             for r in economic
         ]
-        self.client.insert("bench.economic_indicators", data_e, column_names=cols_e)
+
+        # clickhouse_connect client is thread-safe; split each dataset in half
+        # and insert both halves concurrently with 2 threads.
+        def _ins_fund(rows):
+            self.client.insert("bench.fundamentals", rows, column_names=cols_f)
+
+        def _ins_econ(rows):
+            self.client.insert("bench.economic_indicators", rows, column_names=cols_e)
+
+        mid_f = len(data_f) // 2
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            fs = [ex.submit(_ins_fund, data_f[:mid_f]), ex.submit(_ins_fund, data_f[mid_f:])]
+            for f in fs:
+                f.result()
+
+        mid_e = len(data_e) // 2
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            fs = [ex.submit(_ins_econ, data_e[:mid_e]), ex.submit(_ins_econ, data_e[mid_e:])]
+            for f in fs:
+                f.result()
 
     def simple_query_fundamentals(self):
         result = self.client.query(
@@ -1511,18 +1543,37 @@ class RedisAdapter(DBAdapter):
 
         self.r = redis.Redis(host="localhost", port=6379, decode_responses=True)
         self.r.flushdb()
-        pipe = self.r.pipeline()
-        for row in fundamentals:
-            key = f"fund:{row['symbol']}:{row['period']}"
-            pipe.hset(key, mapping={k: str(v) for k, v in row.items()})
-            pipe.sadd("fund:index", key)
-        pipe.execute()
-        pipe = self.r.pipeline()
-        for row in economic:
-            key = f"econ:{row['indicator_id']}:{row['timestamp']}:{row['revision_number']}"
-            pipe.hset(key, mapping={k: str(v) for k, v in row.items()})
-            pipe.sadd("econ:index", key)
-        pipe.execute()
+
+        # redis-py is thread-safe; split each dataset in half and insert both
+        # halves concurrently. Each thread creates its own pipeline.
+        def _ins_fund(rows):
+            pipe = self.r.pipeline()
+            for row in rows:
+                key = f"fund:{row['symbol']}:{row['period']}"
+                pipe.hset(key, mapping={k: str(v) for k, v in row.items()})
+                pipe.sadd("fund:index", key)
+            pipe.execute()
+
+        def _ins_econ(rows):
+            pipe = self.r.pipeline()
+            for row in rows:
+                key = f"econ:{row['indicator_id']}:{row['timestamp']}:{row['revision_number']}"
+                pipe.hset(key, mapping={k: str(v) for k, v in row.items()})
+                pipe.sadd("econ:index", key)
+            pipe.execute()
+
+        mid_f = len(fundamentals) // 2
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            fs = [ex.submit(_ins_fund, fundamentals[:mid_f]), ex.submit(_ins_fund, fundamentals[mid_f:])]
+            for f in fs:
+                f.result()
+
+        mid_e = len(economic) // 2
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            fs = [ex.submit(_ins_econ, economic[:mid_e]), ex.submit(_ins_econ, economic[mid_e:])]
+            for f in fs:
+                f.result()
+
         self._fundamentals = fundamentals
         self._economic = economic
 
