@@ -1,7 +1,7 @@
 name: Fundamentals Database Benchmarks
 
 on:
-  workflow_dispatch:
+  push:
 
 concurrency:
   group: fundamentals-benchmarks-${{ github.ref }}
@@ -40,21 +40,6 @@ jobs:
           MYSQL_DATABASE: bench
         options: >-
           --health-cmd="mysqladmin ping -h 127.0.0.1 -ubench -pbench"
-          --health-interval=10s
-          --health-timeout=5s
-          --health-retries=5
-
-      mariadb:
-        image: mariadb:11
-        ports:
-          - 3307:3306
-        env:
-          MARIADB_ROOT_PASSWORD: bench
-          MARIADB_USER: bench
-          MARIADB_PASSWORD: bench
-          MARIADB_DATABASE: bench
-        options: >-
-          --health-cmd="healthcheck.sh --connect --innodb_initialized"
           --health-interval=10s
           --health-timeout=5s
           --health-retries=5
@@ -122,12 +107,33 @@ jobs:
             duckdb \
             psycopg2-binary \
             mysql-connector-python \
-            mariadb \
+            pymssql \
             pymongo \
             cassandra-driver \
             clickhouse-connect \
             redis \
             requests
+
+      - name: Start SQL Server
+        run: |
+          docker run -d --name bench-mssql \
+            -p 1433:1433 \
+            -e ACCEPT_EULA=Y \
+            -e MSSQL_SA_PASSWORD=Bench\!1234 \
+            -e MSSQL_PID=Express \
+            mcr.microsoft.com/mssql/server:2022-latest
+          echo "Waiting for SQL Server to be ready…"
+          for i in $(seq 1 30); do
+            if docker exec bench-mssql /opt/mssql-tools18/bin/sqlcmd \
+                 -S localhost -U sa -P 'Bench!1234' -No -Q 'SELECT 1' >/dev/null 2>&1; then
+              echo "SQL Server ready (attempt $i)"
+              break
+            fi
+            sleep 5
+          done
+          docker exec bench-mssql /opt/mssql-tools18/bin/sqlcmd \
+            -S localhost -U sa -P 'Bench!1234' -No \
+            -Q "CREATE DATABASE bench"
 
       - name: Start Cassandra
         run: |
@@ -201,4 +207,4 @@ jobs:
       - name: Cleanup containers
         if: always()
         run: |
-          docker rm -f bench-cassandra bench-scylla bench-ravendb 2>/dev/null || true
+          docker rm -f bench-cassandra bench-scylla bench-ravendb bench-mssql 2>/dev/null || true
