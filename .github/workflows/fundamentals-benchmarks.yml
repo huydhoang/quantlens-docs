@@ -107,16 +107,21 @@ jobs:
             duckdb \
             psycopg2-binary \
             mysql-connector-python \
-            fastmssql \
+            mssql-python \
             pyodbc \
             pymongo \
-            cassandra-driver \
+            scylla-driver \
             clickhouse-connect \
-            redis \
+            redis[hiredis] \
             requests
 
-      - name: Install MSSQL ODBC driver
+      - name: Install system dependencies for mssql-python and ODBC driver
         run: |
+          # mssql-python (Microsoft's native TDS driver) requires these on Debian/Ubuntu.
+          # No external ODBC driver manager needed — the wheel bundles its own.
+          sudo apt-get update -q
+          sudo apt-get install -y libltdl7 libkrb5-3 libgssapi-krb5-2
+          # pyodbc still requires msodbcsql18
           curl -sSL https://packages.microsoft.com/keys/microsoft.asc \
             | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/microsoft.gpg
           . /etc/os-release
@@ -127,13 +132,7 @@ jobs:
 
       - name: Start SQL Server
         run: |
-          # Generate X.509 v3 self-signed cert (rustls/fastmssql requires v3;
-          # SQL Server 2022 defaults to v1 which rustls rejects)
-          openssl req -x509 -newkey rsa:2048 -nodes \
-            -keyout /tmp/mssql.key -out /tmp/mssql.pem \
-            -days 365 -subj "/CN=localhost" \
-            -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
-
+          # mssql-python uses TrustServerCertificate=yes so no custom cert needed.
           docker run -d --name bench-mssql \
             -p 1433:1433 \
             -e ACCEPT_EULA=Y \
@@ -145,25 +144,6 @@ jobs:
             if docker exec bench-mssql /opt/mssql-tools18/bin/sqlcmd \
                  -S localhost -U sa -P 'Bench!1234' -No -Q 'SELECT 1' >/dev/null 2>&1; then
               echo "SQL Server ready (attempt $i)"
-              break
-            fi
-            sleep 5
-          done
-
-          # Install v3 cert into SQL Server container (use /var/opt/mssql which is owned by mssql)
-          docker cp /tmp/mssql.pem bench-mssql:/var/opt/mssql/mssql.pem
-          docker cp /tmp/mssql.key bench-mssql:/var/opt/mssql/mssql.key
-          docker exec -u 0 bench-mssql bash -c "chmod 600 /var/opt/mssql/mssql.key && chmod 644 /var/opt/mssql/mssql.pem && chown mssql:mssql /var/opt/mssql/mssql.key /var/opt/mssql/mssql.pem"
-          docker exec -u 0 bench-mssql /opt/mssql/bin/mssql-conf set network.tlscert /var/opt/mssql/mssql.pem
-          docker exec -u 0 bench-mssql /opt/mssql/bin/mssql-conf set network.tlskey /var/opt/mssql/mssql.key
-          docker exec -u 0 bench-mssql /opt/mssql/bin/mssql-conf set network.tlsprotocols 1.2
-          docker restart bench-mssql
-
-          echo "Waiting for SQL Server restart with v3 cert…"
-          for i in $(seq 1 30); do
-            if docker exec bench-mssql /opt/mssql-tools18/bin/sqlcmd \
-                 -S localhost -U sa -P 'Bench!1234' -No -Q 'SELECT 1' >/dev/null 2>&1; then
-              echo "SQL Server ready after cert install (attempt $i)"
               break
             fi
             sleep 5
@@ -192,7 +172,9 @@ jobs:
           docker run -d --name bench-scylla \
             -p 9043:9042 \
             scylladb/scylla:latest \
-            --smp 1 --developer-mode 1
+            --smp 1 --developer-mode 1 \
+            --broadcast-rpc-address 127.0.0.1 \
+            --listen-address 0.0.0.0
           echo "Waiting for ScyllaDB to be ready …"
           for i in $(seq 1 60); do
             if docker exec bench-scylla cqlsh -e "SELECT now() FROM system.local" >/dev/null 2>&1; then
