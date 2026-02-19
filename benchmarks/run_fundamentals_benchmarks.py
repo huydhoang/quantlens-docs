@@ -1175,16 +1175,13 @@ class ScyllaDBAdapter(DBAdapter):
         # Scylla-specific shard awareness: TokenAwarePolicy routes each query
         # directly to the shard owning the partition, reducing cross-node hops.
         #
-        # In Docker/CI, ScyllaDB advertises its internal bridge IP (e.g.
-        # 172.17.0.4) to the driver via the shard-aware port discovery protocol.
-        # The driver then tries to connect to that IP directly, which fails from
-        # the host. disable_shardaware_port=True keeps TokenAwarePolicy routing
-        # but skips the internal-IP probe, so connections go via 127.0.0.1.
+        # ScyllaDB is started with --broadcast-rpc-address 127.0.0.1 so it
+        # advertises the host-reachable address to the driver, enabling full
+        # shard-aware port connections even inside Docker.
         self.cluster = Cluster(
             ["127.0.0.1"],
             port=9043,
             load_balancing_policy=TokenAwarePolicy(RoundRobinPolicy()),
-            shard_aware_options=dict(disable_shardaware_port=True),
         )
         self.session = self.cluster.connect()
         self.session.execute("""
