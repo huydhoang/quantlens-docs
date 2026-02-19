@@ -596,9 +596,9 @@ class MariaDBAdapter(DBAdapter):
     name = "MariaDB"
 
     def setup(self, fundamentals, economic):
-        import mariadb
+        import mysql.connector
 
-        self.con = mariadb.connect(
+        self.con = mysql.connector.connect(
             host="127.0.0.1", port=3307, user="bench", password="bench", database="bench"
         )
         self.con.autocommit = False
@@ -627,11 +627,11 @@ class MariaDBAdapter(DBAdapter):
         """)
         self.con.commit()
         cur.executemany(
-            "INSERT INTO fundamentals VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO fundamentals VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
             [tuple(r.values()) for r in fundamentals],
         )
         cur.executemany(
-            "INSERT INTO economic_indicators VALUES (?,?,?,?,?)",
+            "INSERT INTO economic_indicators VALUES (%s,%s,%s,%s,%s)",
             [tuple(r.values()) for r in economic],
         )
         self.con.commit()

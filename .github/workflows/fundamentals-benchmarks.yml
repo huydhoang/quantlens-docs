@@ -1,7 +1,7 @@
 name: Fundamentals Database Benchmarks
 
 on:
-  workflow_dispatch:
+  push:
 
 concurrency:
   group: fundamentals-benchmarks-${{ github.ref }}
@@ -122,7 +122,6 @@ jobs:
             duckdb \
             psycopg2-binary \
             mysql-connector-python \
-            mariadb \
             pymongo \
             cassandra-driver \
             clickhouse-connect \
