@@ -713,7 +713,7 @@ class FastMSSQLAdapter(DBAdapter):
                 "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals"
                 " WHERE pe_ratio < 20 AND revenue > 1e10 ORDER BY pe_ratio"
             )
-            return sum(1 for _ in result)
+            return sum(1 async for _ in result)
         return self._loop.run_until_complete(_q())
 
     def simple_query_economic(self):
@@ -725,7 +725,7 @@ class FastMSSQLAdapter(DBAdapter):
                     ) AS rn FROM economic_indicators
                 ) sub WHERE rn = 1 ORDER BY timestamp DESC
             """)
-            return sum(1 for _ in result)
+            return sum(1 async for _ in result)
         return self._loop.run_until_complete(_q())
 
     def complex_query_workload(self):
@@ -738,12 +738,12 @@ class FastMSSQLAdapter(DBAdapter):
                 GROUP BY symbol, SUBSTRING(period, 1, 4)
                 ORDER BY symbol, yr
             """)
-            total += sum(1 for _ in r)
+            total += sum(1 async for _ in r)
             r = await self._conn.query(
                 "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals"
                 " WHERE gross_margin > 0.3 AND roe > 0.05"
             )
-            total += sum(1 for _ in r)
+            total += sum(1 async for _ in r)
             r = await self._conn.query("""
                 SELECT indicator_id, frequency,
                        AVG(value) AS avg_val, COUNT(*) AS cnt,
@@ -751,7 +751,7 @@ class FastMSSQLAdapter(DBAdapter):
                 FROM economic_indicators
                 GROUP BY indicator_id, frequency
             """)
-            total += sum(1 for _ in r)
+            total += sum(1 async for _ in r)
             return total
         return self._loop.run_until_complete(_q())
 
@@ -1553,18 +1553,16 @@ class RavenDBAdapter(DBAdapter):
         self.base_url = "http://localhost:8080"
         self.db_name = "bench"
         # Create database
-        try:
-            requests.put(
-                f"{self.base_url}/admin/databases",
-                json={
-                    "DatabaseRecord": {"DatabaseName": self.db_name},
-                    "ReplicationFactor": 1,
-                },
-                headers={"Content-Type": "application/json"},
-                timeout=10,
-            )
-        except Exception:
-            pass
+        resp = requests.put(
+            f"{self.base_url}/admin/databases",
+            json={
+                "DatabaseName": self.db_name,
+                "ReplicationFactor": 1,
+            },
+            headers={"Content-Type": "application/json"},
+            timeout=10,
+        )
+        resp.raise_for_status()
         # Batch insert fundamentals in chunks using 2 threads (HTTP requests are I/O-bound
         # and benefit from concurrent execution; each thread uses its own requests session)
         batch_size = 500
@@ -1594,15 +1592,13 @@ class RavenDBAdapter(DBAdapter):
         ]
 
         def _send_batch(commands):
-            try:
-                requests.post(
-                    f"{self.base_url}/databases/{self.db_name}/bulk_docs",
-                    json={"Commands": commands},
-                    headers={"Content-Type": "application/json"},
-                    timeout=30,
-                )
-            except Exception:
-                pass
+            resp = requests.post(
+                f"{self.base_url}/databases/{self.db_name}/bulk_docs",
+                json={"Commands": commands},
+                headers={"Content-Type": "application/json"},
+                timeout=30,
+            )
+            resp.raise_for_status()
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
             futures = [ex.submit(_send_batch, b) for b in fund_batches + econ_batches]
