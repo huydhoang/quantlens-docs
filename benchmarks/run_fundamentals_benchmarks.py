@@ -1,9 +1,9 @@
 """
 Fundamentals Database Benchmark Suite
 
-Benchmarks 12 databases for stock fundamentals and economic data workloads:
+Benchmarks 13 databases for stock fundamentals and economic data workloads:
   - DuckDB, SQLite (embedded)
-  - PostgreSQL, SQL Server, MySQL, TimescaleDB (relational / Docker)
+  - PostgreSQL, SQL Server (fastmssql), SQL Server (pyodbc), MySQL, TimescaleDB (relational / Docker)
   - MongoDB (document / Docker)
   - Cassandra, ScyllaDB (wide-column / Docker)
   - Redis (key-value / Docker)
@@ -645,17 +645,144 @@ class MySQLAdapter(DBAdapter):
         self.con.close()
 
 
-# ---- SQL Server -------------------------------------------------------------
+# ---- SQL Server (fastmssql) -------------------------------------------------
 
-class MSSQLAdapter(DBAdapter):
-    name = "SQL Server"
+class FastMSSQLAdapter(DBAdapter):
+    name = "SQL Server (fastmssql)"
+
+    # fastmssql is fully async; all operations are driven through a persistent
+    # Connection object on a dedicated event loop stored on the instance.
 
     def setup(self, fundamentals, economic):
-        import pymssql
+        import asyncio
+        from datetime import datetime
+        from fastmssql import Connection, SslConfig
 
-        self.con = pymssql.connect(
-            server="127.0.0.1", port="1433", user="sa", password="Bench!1234", database="bench"
+        self._conn_str = "Server=127.0.0.1;Database=bench;User Id=sa;Password=Bench!1234"
+        self._ssl = SslConfig.development()
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+        self._conn = Connection(self._conn_str, ssl_config=self._ssl)
+
+        # Pre-convert timestamp strings to datetime objects for DATETIME2 columns
+        cols_e = list(economic[0].keys())
+        ts_idx = cols_e.index("timestamp")
+        econ_rows = [
+            [datetime.fromisoformat(v) if i == ts_idx else v for i, v in enumerate(r.values())]
+            for r in economic
+        ]
+
+        async def _setup():
+            await self._conn.connect()
+            await self._conn.execute("DROP TABLE IF EXISTS fundamentals")
+            await self._conn.execute("DROP TABLE IF EXISTS economic_indicators")
+            await self._conn.execute("""
+                CREATE TABLE fundamentals (
+                    symbol VARCHAR(20), period VARCHAR(20), revenue FLOAT,
+                    net_income FLOAT, eps FLOAT, pe_ratio FLOAT,
+                    book_value FLOAT, dividend_yield FLOAT,
+                    debt_to_equity FLOAT, roe FLOAT, roa FLOAT,
+                    current_ratio FLOAT, gross_margin FLOAT,
+                    operating_margin FLOAT, free_cash_flow FLOAT,
+                    market_cap FLOAT, balance_sheet VARCHAR(MAX), cash_flow VARCHAR(MAX),
+                    PRIMARY KEY (symbol, period)
+                )
+            """)
+            await self._conn.execute("""
+                CREATE TABLE economic_indicators (
+                    indicator_id VARCHAR(30), frequency VARCHAR(20),
+                    timestamp DATETIME2, value FLOAT,
+                    revision_number INTEGER,
+                    PRIMARY KEY (indicator_id, frequency, timestamp, revision_number)
+                )
+            """)
+            cols_f = list(fundamentals[0].keys())
+            data_f = [list(r.values()) for r in fundamentals]
+            await self._conn.bulk_insert("fundamentals", cols_f, data_f)
+            await self._conn.bulk_insert("economic_indicators", cols_e, econ_rows)
+            await self._conn.execute("CREATE INDEX idx_fund_pe_rev ON fundamentals (pe_ratio, revenue)")
+            await self._conn.execute("CREATE INDEX idx_fund_gm_roe ON fundamentals (gross_margin, roe)")
+            await self._conn.execute("CREATE INDEX idx_econ_rev ON economic_indicators (indicator_id, timestamp, revision_number DESC)")
+            await self._conn.execute("UPDATE STATISTICS fundamentals")
+            await self._conn.execute("UPDATE STATISTICS economic_indicators")
+
+        self._loop.run_until_complete(_setup())
+
+    def simple_query_fundamentals(self):
+        async def _q():
+            result = await self._conn.query(
+                "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals"
+                " WHERE pe_ratio < 20 AND revenue > 1e10 ORDER BY pe_ratio"
+            )
+            return len(result.rows())
+        return self._loop.run_until_complete(_q())
+
+    def simple_query_economic(self):
+        async def _q():
+            result = await self._conn.query("""
+                SELECT TOP 100 indicator_id, timestamp, value FROM (
+                    SELECT *, ROW_NUMBER() OVER (
+                        PARTITION BY indicator_id, timestamp ORDER BY revision_number DESC
+                    ) AS rn FROM economic_indicators
+                ) sub WHERE rn = 1 ORDER BY timestamp DESC
+            """)
+            return len(result.rows())
+        return self._loop.run_until_complete(_q())
+
+    def complex_query_workload(self):
+        async def _q():
+            total = 0
+            r = await self._conn.query("""
+                SELECT symbol, SUBSTRING(period, 1, 4) AS yr,
+                       AVG(revenue) AS avg_rev, AVG(eps) AS avg_eps, AVG(pe_ratio) AS avg_pe
+                FROM fundamentals
+                GROUP BY symbol, SUBSTRING(period, 1, 4)
+                ORDER BY symbol, yr
+            """)
+            total += len(r.rows())
+            r = await self._conn.query(
+                "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals"
+                " WHERE gross_margin > 0.3 AND roe > 0.05"
+            )
+            total += len(r.rows())
+            r = await self._conn.query("""
+                SELECT indicator_id, frequency,
+                       AVG(value) AS avg_val, COUNT(*) AS cnt,
+                       MIN(value) AS min_val, MAX(value) AS max_val
+                FROM economic_indicators
+                GROUP BY indicator_id, frequency
+            """)
+            total += len(r.rows())
+            return total
+        return self._loop.run_until_complete(_q())
+
+    def teardown(self):
+        async def _close():
+            await self._conn.disconnect()
+        self._loop.run_until_complete(_close())
+        self._loop.run_until_complete(self._loop.shutdown_asyncgens())
+        self._loop.close()
+
+
+# ---- SQL Server (pyodbc) ----------------------------------------------------
+
+class PyODBCMSSQLAdapter(DBAdapter):
+    name = "SQL Server (pyodbc)"
+
+    def setup(self, fundamentals, economic):
+        import pyodbc
+        from datetime import datetime
+
+        conn_str = (
+            "DRIVER={ODBC Driver 18 for SQL Server};"
+            "SERVER=127.0.0.1,1433;"
+            "DATABASE=bench;"
+            "UID=sa;"
+            "PWD=Bench!1234;"
+            "TrustServerCertificate=yes;"
         )
+        self._conn_str = conn_str
+        self.con = pyodbc.connect(conn_str)
         cur = self.con.cursor()
         cur.execute("SET NOCOUNT ON")
         cur.execute("DROP TABLE IF EXISTS fundamentals")
@@ -682,31 +809,34 @@ class MSSQLAdapter(DBAdapter):
         """)
         self.con.commit()
 
-        # Use 2 threads for parallel bulk inserts — pymssql is thread-safe when
-        # each thread owns its own connection; this is the primary optimisation for
-        # SQL Server's slow row-by-row executemany.
-        _mssql_params = dict(server="127.0.0.1", port="1433", user="sa", password="Bench!1234", database="bench")
-
+        # Use 2 threads with fast_executemany=True for parallel bulk inserts;
+        # pyodbc connections must not be shared across threads.
         def _ins_fund(rows):
-            import pymssql
-            c = pymssql.connect(**_mssql_params)
+            import pyodbc
+            c = pyodbc.connect(conn_str)
             cur = c.cursor()
-            cur.execute("SET NOCOUNT ON")
+            cur.fast_executemany = True
             cur.executemany(
-                "INSERT INTO fundamentals VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                "INSERT INTO fundamentals VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 [tuple(r.values()) for r in rows],
             )
             c.commit()
             c.close()
 
         def _ins_econ(rows):
-            import pymssql
-            c = pymssql.connect(**_mssql_params)
+            import pyodbc
+            from datetime import datetime
+            c = pyodbc.connect(conn_str)
             cur = c.cursor()
-            cur.execute("SET NOCOUNT ON")
+            cur.fast_executemany = True
             cur.executemany(
-                "INSERT INTO economic_indicators VALUES (%s,%s,%s,%s,%s)",
-                [tuple(r.values()) for r in rows],
+                "INSERT INTO economic_indicators VALUES (?,?,?,?,?)",
+                [
+                    (r["indicator_id"], r["frequency"],
+                     datetime.fromisoformat(r["timestamp"]),
+                     r["value"], r["revision_number"])
+                    for r in rows
+                ],
             )
             c.commit()
             c.close()
@@ -734,7 +864,8 @@ class MSSQLAdapter(DBAdapter):
     def simple_query_fundamentals(self):
         cur = self.con.cursor()
         cur.execute(
-            "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals WHERE pe_ratio < 20 AND revenue > 1e10 ORDER BY pe_ratio"
+            "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals"
+            " WHERE pe_ratio < 20 AND revenue > 1e10 ORDER BY pe_ratio"
         )
         return len(cur.fetchall())
 
@@ -763,7 +894,8 @@ class MSSQLAdapter(DBAdapter):
         total += len(cur.fetchall())
         # Full table scan: unindexed multi-column filter
         cur.execute(
-            "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals WHERE gross_margin > 0.3 AND roe > 0.05"
+            "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals"
+            " WHERE gross_margin > 0.3 AND roe > 0.05"
         )
         total += len(cur.fetchall())
         # Double groupby on economic data
@@ -1539,7 +1671,8 @@ ALL_ADAPTERS: list[type[DBAdapter]] = [
     SQLiteAdapter,
     PostgreSQLAdapter,
     MySQLAdapter,
-    MSSQLAdapter,
+    FastMSSQLAdapter,
+    PyODBCMSSQLAdapter,
     MongoDBAdapter,
     CassandraAdapter,
     ScyllaDBAdapter,

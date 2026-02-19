@@ -107,12 +107,23 @@ jobs:
             duckdb \
             psycopg2-binary \
             mysql-connector-python \
-            pymssql \
+            fastmssql \
+            pyodbc \
             pymongo \
             cassandra-driver \
             clickhouse-connect \
             redis \
             requests
+
+      - name: Install MSSQL ODBC driver
+        run: |
+          curl -sSL https://packages.microsoft.com/keys/microsoft.asc \
+            | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/microsoft.gpg
+          . /etc/os-release
+          curl -sSL "https://packages.microsoft.com/config/${ID}/${VERSION_ID}/prod.list" \
+            | sudo tee /etc/apt/sources.list.d/mssql-release.list
+          sudo apt-get update -q
+          sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18
 
       - name: Start SQL Server
         run: |
