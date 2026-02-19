@@ -139,7 +139,7 @@ jobs:
             -e ACCEPT_EULA=Y \
             -e MSSQL_SA_PASSWORD=Bench\!1234 \
             -e MSSQL_PID=Express \
-            mcr.microsoft.com/mssql/server:2022-latest
+            mcr.microsoft.com/mssql/server:2025-latest
           echo "Waiting for SQL Server to be ready…"
           for i in $(seq 1 30); do
             if docker exec bench-mssql /opt/mssql-tools18/bin/sqlcmd \
