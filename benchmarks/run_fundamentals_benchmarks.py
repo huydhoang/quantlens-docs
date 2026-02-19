@@ -3,7 +3,7 @@ Fundamentals Database Benchmark Suite
 
 Benchmarks 13 databases for stock fundamentals and economic data workloads:
   - DuckDB, SQLite (embedded)
-  - PostgreSQL, SQL Server (fastmssql), SQL Server (pyodbc), MySQL, TimescaleDB (relational / Docker)
+  - PostgreSQL, SQL Server (mssql-python), SQL Server (pyodbc), MySQL, TimescaleDB (relational / Docker)
   - MongoDB (document / Docker)
   - Cassandra, ScyllaDB (wide-column / Docker)
   - Redis (key-value / Docker)
@@ -25,6 +25,7 @@ import os
 import random
 import statistics
 import time
+import traceback
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -645,123 +646,150 @@ class MySQLAdapter(DBAdapter):
         self.con.close()
 
 
-# ---- SQL Server (fastmssql) -------------------------------------------------
+# ---- SQL Server (mssql-python) ----------------------------------------------
 
-class FastMSSQLAdapter(DBAdapter):
-    name = "SQL Server (fastmssql)"
-
-    # fastmssql is fully async; all operations are driven through a persistent
-    # Connection object on a dedicated event loop stored on the instance.
+class MSSQLPythonAdapter(DBAdapter):
+    name = "SQL Server (mssql-python)"
 
     def setup(self, fundamentals, economic):
-        import asyncio
+        import mssql_python
         from datetime import datetime
-        from fastmssql import Connection, SslConfig
 
-        self._conn_str = "Server=127.0.0.1;Database=bench;User Id=sa;Password=Bench!1234"
-        self._ssl = SslConfig.development()
-        self._loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self._loop)
-        self._conn = Connection(self._conn_str, ssl_config=self._ssl)
+        conn_str = (
+            "SERVER=127.0.0.1,1433;"
+            "DATABASE=bench;"
+            "UID=sa;"
+            "PWD=Bench!1234;"
+            "TrustServerCertificate=yes;"
+            "Encrypt=no;"
+        )
+        self.con = mssql_python.connect(conn_str)
+        cur = self.con.cursor()
+        cur.execute("DROP TABLE IF EXISTS fundamentals")
+        cur.execute("DROP TABLE IF EXISTS economic_indicators")
+        cur.execute("""
+            CREATE TABLE fundamentals (
+                symbol VARCHAR(20), period VARCHAR(20), revenue FLOAT,
+                net_income FLOAT, eps FLOAT, pe_ratio FLOAT,
+                book_value FLOAT, dividend_yield FLOAT,
+                debt_to_equity FLOAT, roe FLOAT, roa FLOAT,
+                current_ratio FLOAT, gross_margin FLOAT,
+                operating_margin FLOAT, free_cash_flow FLOAT,
+                market_cap FLOAT, balance_sheet VARCHAR(MAX), cash_flow VARCHAR(MAX),
+                PRIMARY KEY (symbol, period)
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE economic_indicators (
+                indicator_id VARCHAR(30), frequency VARCHAR(20),
+                timestamp DATETIME2, value FLOAT,
+                revision_number INTEGER,
+                PRIMARY KEY (indicator_id, frequency, timestamp, revision_number)
+            )
+        """)
+        self.con.commit()
+        cur.close()
 
-        # Pre-convert timestamp strings to datetime objects for DATETIME2 columns
-        cols_e = list(economic[0].keys())
-        ts_idx = cols_e.index("timestamp")
-        econ_rows = [
-            [datetime.fromisoformat(v) if i == ts_idx else v for i, v in enumerate(r.values())]
-            for r in economic
-        ]
+        # Use 2 threads for parallel bulk inserts. mssql_python connections are
+        # not safe to share across threads; each thread owns its own connection.
+        def _ins_fund(rows):
+            c = mssql_python.connect(conn_str)
+            cur = c.cursor()
+            cur.executemany(
+                "INSERT INTO fundamentals VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                [tuple(r.values()) for r in rows],
+            )
+            c.commit()
+            c.close()
 
-        async def _setup():
-            await self._conn.connect()
-            await self._conn.execute("DROP TABLE IF EXISTS fundamentals")
-            await self._conn.execute("DROP TABLE IF EXISTS economic_indicators")
-            await self._conn.execute("""
-                CREATE TABLE fundamentals (
-                    symbol VARCHAR(20), period VARCHAR(20), revenue FLOAT,
-                    net_income FLOAT, eps FLOAT, pe_ratio FLOAT,
-                    book_value FLOAT, dividend_yield FLOAT,
-                    debt_to_equity FLOAT, roe FLOAT, roa FLOAT,
-                    current_ratio FLOAT, gross_margin FLOAT,
-                    operating_margin FLOAT, free_cash_flow FLOAT,
-                    market_cap FLOAT, balance_sheet VARCHAR(MAX), cash_flow VARCHAR(MAX),
-                    PRIMARY KEY (symbol, period)
-                )
-            """)
-            await self._conn.execute("""
-                CREATE TABLE economic_indicators (
-                    indicator_id VARCHAR(30), frequency VARCHAR(20),
-                    timestamp DATETIME2, value FLOAT,
-                    revision_number INTEGER,
-                    PRIMARY KEY (indicator_id, frequency, timestamp, revision_number)
-                )
-            """)
-            cols_f = list(fundamentals[0].keys())
-            data_f = [list(r.values()) for r in fundamentals]
-            await self._conn.bulk_insert("fundamentals", cols_f, data_f)
-            await self._conn.bulk_insert("economic_indicators", cols_e, econ_rows)
-            await self._conn.execute("CREATE INDEX idx_fund_pe_rev ON fundamentals (pe_ratio, revenue)")
-            await self._conn.execute("CREATE INDEX idx_fund_gm_roe ON fundamentals (gross_margin, roe)")
-            await self._conn.execute("CREATE INDEX idx_econ_rev ON economic_indicators (indicator_id, timestamp, revision_number DESC)")
-            await self._conn.execute("UPDATE STATISTICS fundamentals")
-            await self._conn.execute("UPDATE STATISTICS economic_indicators")
+        def _ins_econ(rows):
+            c = mssql_python.connect(conn_str)
+            cur = c.cursor()
+            cur.executemany(
+                "INSERT INTO economic_indicators VALUES (?,?,?,?,?)",
+                [
+                    (r["indicator_id"], r["frequency"],
+                     datetime.fromisoformat(r["timestamp"]),
+                     r["value"], r["revision_number"])
+                    for r in rows
+                ],
+            )
+            c.commit()
+            c.close()
 
-        self._loop.run_until_complete(_setup())
+        mid_f = len(fundamentals) // 2
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            fs = [ex.submit(_ins_fund, fundamentals[:mid_f]), ex.submit(_ins_fund, fundamentals[mid_f:])]
+            for f in fs:
+                f.result()
+
+        mid_e = len(economic) // 2
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            fs = [ex.submit(_ins_econ, economic[:mid_e]), ex.submit(_ins_econ, economic[mid_e:])]
+            for f in fs:
+                f.result()
+
+        cur = self.con.cursor()
+        cur.execute("CREATE INDEX idx_fund_pe_rev ON fundamentals (pe_ratio, revenue)")
+        cur.execute("CREATE INDEX idx_fund_gm_roe ON fundamentals (gross_margin, roe)")
+        cur.execute("CREATE INDEX idx_econ_rev ON economic_indicators (indicator_id, timestamp, revision_number DESC)")
+        cur.execute("UPDATE STATISTICS fundamentals")
+        cur.execute("UPDATE STATISTICS economic_indicators")
+        self.con.commit()
+        cur.close()
 
     def simple_query_fundamentals(self):
-        async def _q():
-            result = await self._conn.query(
-                "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals"
-                " WHERE pe_ratio < 20 AND revenue > 1e10 ORDER BY pe_ratio"
-            )
-            return len(result.rows())
-        return self._loop.run_until_complete(_q())
+        cur = self.con.cursor()
+        cur.execute(
+            "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals"
+            " WHERE pe_ratio < 20 AND revenue > 1e10 ORDER BY pe_ratio"
+        )
+        n = len(cur.fetchall())
+        cur.close()
+        return n
 
     def simple_query_economic(self):
-        async def _q():
-            result = await self._conn.query("""
-                SELECT TOP 100 indicator_id, timestamp, value FROM (
-                    SELECT *, ROW_NUMBER() OVER (
-                        PARTITION BY indicator_id, timestamp ORDER BY revision_number DESC
-                    ) AS rn FROM economic_indicators
-                ) sub WHERE rn = 1 ORDER BY timestamp DESC
-            """)
-            return len(result.rows())
-        return self._loop.run_until_complete(_q())
+        cur = self.con.cursor()
+        cur.execute("""
+            SELECT TOP 100 indicator_id, timestamp, value FROM (
+                SELECT *, ROW_NUMBER() OVER (
+                    PARTITION BY indicator_id, timestamp ORDER BY revision_number DESC
+                ) AS rn FROM economic_indicators
+            ) sub WHERE rn = 1 ORDER BY timestamp DESC
+        """)
+        n = len(cur.fetchall())
+        cur.close()
+        return n
 
     def complex_query_workload(self):
-        async def _q():
-            total = 0
-            r = await self._conn.query("""
-                SELECT symbol, SUBSTRING(period, 1, 4) AS yr,
-                       AVG(revenue) AS avg_rev, AVG(eps) AS avg_eps, AVG(pe_ratio) AS avg_pe
-                FROM fundamentals
-                GROUP BY symbol, SUBSTRING(period, 1, 4)
-                ORDER BY symbol, yr
-            """)
-            total += len(r.rows())
-            r = await self._conn.query(
-                "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals"
-                " WHERE gross_margin > 0.3 AND roe > 0.05"
-            )
-            total += len(r.rows())
-            r = await self._conn.query("""
-                SELECT indicator_id, frequency,
-                       AVG(value) AS avg_val, COUNT(*) AS cnt,
-                       MIN(value) AS min_val, MAX(value) AS max_val
-                FROM economic_indicators
-                GROUP BY indicator_id, frequency
-            """)
-            total += len(r.rows())
-            return total
-        return self._loop.run_until_complete(_q())
+        total = 0
+        cur = self.con.cursor()
+        cur.execute("""
+            SELECT symbol, SUBSTRING(period, 1, 4) AS yr,
+                   AVG(revenue) AS avg_rev, AVG(eps) AS avg_eps, AVG(pe_ratio) AS avg_pe
+            FROM fundamentals
+            GROUP BY symbol, SUBSTRING(period, 1, 4)
+            ORDER BY symbol, yr
+        """)
+        total += len(cur.fetchall())
+        cur.execute(
+            "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals"
+            " WHERE gross_margin > 0.3 AND roe > 0.05"
+        )
+        total += len(cur.fetchall())
+        cur.execute("""
+            SELECT indicator_id, frequency,
+                   AVG(value) AS avg_val, COUNT(*) AS cnt,
+                   MIN(value) AS min_val, MAX(value) AS max_val
+            FROM economic_indicators
+            GROUP BY indicator_id, frequency
+        """)
+        total += len(cur.fetchall())
+        cur.close()
+        return total
 
     def teardown(self):
-        async def _close():
-            await self._conn.disconnect()
-        self._loop.run_until_complete(_close())
-        self._loop.run_until_complete(self._loop.shutdown_asyncgens())
-        self._loop.close()
+        self.con.close()
 
 
 # ---- SQL Server (pyodbc) ----------------------------------------------------
@@ -1095,26 +1123,32 @@ class CassandraAdapter(DBAdapter):
         return len(list(rows))
 
     def complex_query_workload(self):
+        from cassandra.concurrent import execute_concurrent
+        from cassandra.query import SimpleStatement
+
         total = 0
+        # Execute all 3 queries concurrently using execute_concurrent()
+        statements = [
+            (SimpleStatement("SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals"), ()),
+            (SimpleStatement(
+                "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals "
+                "WHERE gross_margin > 0.3 AND roe > 0.05 ALLOW FILTERING"
+            ), ()),
+            (SimpleStatement("SELECT indicator_id, frequency, value FROM economic_indicators"), ()),
+        ]
+        results = execute_concurrent(self.session, statements, concurrency=3, raise_on_first_error=True)
+        # Collect results
+        rows = list(results[0][1])
+        result = list(results[1][1])
+        econ_rows = list(results[2][1])
         # Full table scan + Python-side double groupby (symbol, year)
-        rows = list(self.session.execute(
-            "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals"
-        ))
         groups_sy: dict = {}
         for r in rows:
             key = (r.symbol, r.period[:4])
             groups_sy[key] = groups_sy.get(key, 0) + 1
         total += len(groups_sy)
-        # Full table scan with server-side ALLOW FILTERING
-        result = list(self.session.execute(
-            "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals "
-            "WHERE gross_margin > 0.3 AND roe > 0.05 ALLOW FILTERING"
-        ))
         total += len(result)
         # Full table scan + Python-side double groupby on economic (indicator_id, frequency)
-        econ_rows = list(self.session.execute(
-            "SELECT indicator_id, frequency, value FROM economic_indicators"
-        ))
         econ_groups: dict = {}
         for r in econ_rows:
             key = (r.indicator_id, r.frequency)
@@ -1126,7 +1160,7 @@ class CassandraAdapter(DBAdapter):
         self.cluster.shutdown()
 
 
-# ---- ScyllaDB (Cassandra-compatible) ----------------------------------------
+# ---- ScyllaDB (scylla-driver with shard awareness) --------------------------
 
 class ScyllaDBAdapter(DBAdapter):
     name = "ScyllaDB"
@@ -1134,9 +1168,21 @@ class ScyllaDBAdapter(DBAdapter):
     def setup(self, fundamentals, economic):
         from cassandra.cluster import Cluster
         from cassandra.concurrent import execute_concurrent_with_args
+        from cassandra.policies import TokenAwarePolicy, RoundRobinPolicy
         from datetime import datetime
 
-        self.cluster = Cluster(["127.0.0.1"], port=9043)
+        # scylla-driver is a drop-in replacement for cassandra-driver with
+        # Scylla-specific shard awareness: TokenAwarePolicy routes each query
+        # directly to the shard owning the partition, reducing cross-node hops.
+        #
+        # ScyllaDB is started with --broadcast-rpc-address 127.0.0.1 so it
+        # advertises the host-reachable address to the driver, enabling full
+        # shard-aware port connections even inside Docker.
+        self.cluster = Cluster(
+            ["127.0.0.1"],
+            port=9043,
+            load_balancing_policy=TokenAwarePolicy(RoundRobinPolicy()),
+        )
         self.session = self.cluster.connect()
         self.session.execute("""
             CREATE KEYSPACE IF NOT EXISTS bench
@@ -1198,26 +1244,32 @@ class ScyllaDBAdapter(DBAdapter):
         return len(list(rows))
 
     def complex_query_workload(self):
+        from cassandra.concurrent import execute_concurrent
+        from cassandra.query import SimpleStatement
+
         total = 0
+        # Execute all 3 queries concurrently using execute_concurrent()
+        statements = [
+            (SimpleStatement("SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals"), ()),
+            (SimpleStatement(
+                "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals "
+                "WHERE gross_margin > 0.3 AND roe > 0.05 ALLOW FILTERING"
+            ), ()),
+            (SimpleStatement("SELECT indicator_id, frequency, value FROM economic_indicators"), ()),
+        ]
+        results = execute_concurrent(self.session, statements, concurrency=3, raise_on_first_error=True)
+        # Collect results
+        rows = list(results[0][1])
+        result = list(results[1][1])
+        econ_rows = list(results[2][1])
         # Full table scan + Python-side double groupby (symbol, year)
-        rows = list(self.session.execute(
-            "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals"
-        ))
         groups_sy: dict = {}
         for r in rows:
             key = (r.symbol, r.period[:4])
             groups_sy[key] = groups_sy.get(key, 0) + 1
         total += len(groups_sy)
-        # Full table scan with server-side ALLOW FILTERING
-        result = list(self.session.execute(
-            "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals "
-            "WHERE gross_margin > 0.3 AND roe > 0.05 ALLOW FILTERING"
-        ))
         total += len(result)
         # Full table scan + Python-side double groupby on economic (indicator_id, frequency)
-        econ_rows = list(self.session.execute(
-            "SELECT indicator_id, frequency, value FROM economic_indicators"
-        ))
         econ_groups: dict = {}
         for r in econ_rows:
             key = (r.indicator_id, r.frequency)
@@ -1546,18 +1598,16 @@ class RavenDBAdapter(DBAdapter):
         self.base_url = "http://localhost:8080"
         self.db_name = "bench"
         # Create database
-        try:
-            requests.put(
-                f"{self.base_url}/admin/databases",
-                json={
-                    "DatabaseRecord": {"DatabaseName": self.db_name},
-                    "DatabaseTopology": {"Members": ["A"]},
-                },
-                headers={"Content-Type": "application/json"},
-                timeout=10,
-            )
-        except Exception:
-            pass
+        resp = requests.put(
+            f"{self.base_url}/admin/databases",
+            json={
+                "DatabaseName": self.db_name,
+                "ReplicationFactor": 1,
+            },
+            headers={"Content-Type": "application/json"},
+            timeout=10,
+        )
+        resp.raise_for_status()
         # Batch insert fundamentals in chunks using 2 threads (HTTP requests are I/O-bound
         # and benefit from concurrent execution; each thread uses its own requests session)
         batch_size = 500
@@ -1587,53 +1637,58 @@ class RavenDBAdapter(DBAdapter):
         ]
 
         def _send_batch(commands):
-            try:
-                requests.post(
-                    f"{self.base_url}/databases/{self.db_name}/bulk_docs",
-                    json={"Commands": commands},
-                    headers={"Content-Type": "application/json"},
-                    timeout=30,
-                )
-            except Exception:
-                pass
+            resp = requests.post(
+                f"{self.base_url}/databases/{self.db_name}/bulk_docs",
+                json={"Commands": commands},
+                headers={"Content-Type": "application/json"},
+                timeout=30,
+            )
+            resp.raise_for_status()
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
             futures = [ex.submit(_send_batch, b) for b in fund_batches + econ_batches]
             for f in futures:
                 f.result()
 
-    def simple_query_fundamentals(self):
+    def _fetch_all_docs(self, prefix: str, page_size: int = 1024) -> list:
+        """Paginate through all documents matching a prefix."""
         import requests
 
-        resp = requests.get(
-            f"{self.base_url}/databases/{self.db_name}/docs",
-            params={"startWith": "fundamentals/", "pageSize": 1024},
-            timeout=10,
-        )
-        results = resp.json().get("Results", [])
+        all_docs: list = []
+        start = 0
+        while True:
+            resp = requests.get(
+                f"{self.base_url}/databases/{self.db_name}/docs",
+                params={"startsWith": prefix, "start": start, "pageSize": page_size},
+                timeout=30,
+            )
+            batch = resp.json().get("Results", [])
+            all_docs.extend(batch)
+            if len(batch) < page_size:
+                break
+            start += page_size
+        return all_docs
+
+    def simple_query_fundamentals(self):
+        results = self._fetch_all_docs("fundamentals/")
         return len([r for r in results if r.get("pe_ratio", 999) < 20 and r.get("revenue", 0) > 1e10])
 
     def simple_query_economic(self):
-        import requests
-
-        resp = requests.get(
-            f"{self.base_url}/databases/{self.db_name}/docs",
-            params={"startWith": "economic/", "pageSize": 100},
-            timeout=10,
-        )
-        return len(resp.json().get("Results", []))
+        results = self._fetch_all_docs("economic/")
+        # Get latest revision per (indicator_id, timestamp), sort by timestamp desc, limit 100
+        latest: dict = {}
+        for r in results:
+            key = (r.get("indicator_id", ""), r.get("timestamp", ""))
+            rev = r.get("revision_number", 0)
+            if key not in latest or rev > latest[key]["revision_number"]:
+                latest[key] = r
+        sorted_vals = sorted(latest.values(), key=lambda x: x.get("timestamp", ""), reverse=True)
+        return len(sorted_vals[:100])
 
     def complex_query_workload(self):
-        import requests
-
         total = 0
-        # Fetch fundamentals (double groupby done client-side)
-        resp = requests.get(
-            f"{self.base_url}/databases/{self.db_name}/docs",
-            params={"startWith": "fundamentals/", "pageSize": 1024},
-            timeout=10,
-        )
-        fund_docs = resp.json().get("Results", [])
+        # Fetch all fundamentals (double groupby done client-side)
+        fund_docs = self._fetch_all_docs("fundamentals/")
         # Double groupby: (symbol, year)
         groups_sy: dict = {}
         for d in fund_docs:
@@ -1647,13 +1702,8 @@ class RavenDBAdapter(DBAdapter):
             d for d in fund_docs
             if float(d.get("gross_margin", 0)) > 0.3 and float(d.get("roe", -999)) > 0.05
         ])
-        # Fetch economic data + double groupby (indicator_id, frequency)
-        resp = requests.get(
-            f"{self.base_url}/databases/{self.db_name}/docs",
-            params={"startWith": "economic/", "pageSize": 1024},
-            timeout=10,
-        )
-        econ_docs = resp.json().get("Results", [])
+        # Fetch all economic data + double groupby (indicator_id, frequency)
+        econ_docs = self._fetch_all_docs("economic/")
         econ_groups: dict = {}
         for d in econ_docs:
             key = (d.get("indicator_id", ""), d.get("frequency", ""))
@@ -1671,7 +1721,7 @@ ALL_ADAPTERS: list[type[DBAdapter]] = [
     SQLiteAdapter,
     PostgreSQLAdapter,
     MySQLAdapter,
-    FastMSSQLAdapter,
+    MSSQLPythonAdapter,
     PyODBCMSSQLAdapter,
     MongoDBAdapter,
     CassandraAdapter,
@@ -1701,6 +1751,8 @@ def run_benchmark(
             adapter.setup(fundamentals, economic)
         results.append(BenchResult(db, "data_load", t[0], len(fundamentals) + len(economic)))
     except Exception as exc:
+        print(f"\n[BENCHMARK ERROR] {db} – data_load: {exc}", flush=True)
+        traceback.print_exc()
         results.append(BenchResult(db, "data_load", 0, error=str(exc)))
         return results
 
@@ -1711,6 +1763,8 @@ def run_benchmark(
                 n = adapter.simple_query_fundamentals()
             results.append(BenchResult(db, "simple_query_fundamentals", t[0], n))
         except Exception as exc:
+            print(f"\n[BENCHMARK ERROR] {db} – simple_query_fundamentals: {exc}", flush=True)
+            traceback.print_exc()
             results.append(BenchResult(db, "simple_query_fundamentals", 0, error=str(exc)))
 
     # Simple query: economic latest values
@@ -1720,6 +1774,8 @@ def run_benchmark(
                 n = adapter.simple_query_economic()
             results.append(BenchResult(db, "simple_query_economic", t[0], n))
         except Exception as exc:
+            print(f"\n[BENCHMARK ERROR] {db} – simple_query_economic: {exc}", flush=True)
+            traceback.print_exc()
             results.append(BenchResult(db, "simple_query_economic", 0, error=str(exc)))
 
     # Complex query workload
@@ -1729,6 +1785,8 @@ def run_benchmark(
                 n = adapter.complex_query_workload()
             results.append(BenchResult(db, "complex_query_workload", t[0], n))
         except Exception as exc:
+            print(f"\n[BENCHMARK ERROR] {db} – complex_query_workload: {exc}", flush=True)
+            traceback.print_exc()
             results.append(BenchResult(db, "complex_query_workload", 0, error=str(exc)))
 
     try:
@@ -1778,7 +1836,10 @@ def generate_summary(all_results: list[BenchResult], output_dir: Path) -> None:
                 continue
             errors = [r for r in op_results if r.error]
             if errors:
-                lines.append(f"| {db} | — | — | — | — | {errors[0].error[:80]} |")
+                # Escape pipe characters and collapse newlines so the error
+                # message doesn't break Markdown table cell rendering.
+                err_cell = errors[0].error[:200].replace("\n", " ").replace("|", "&#124;")
+                lines.append(f"| {db} | — | — | — | — | {err_cell} |")
                 continue
             times = [r.elapsed_ms for r in op_results]
             avg = statistics.mean(times)
@@ -1788,6 +1849,16 @@ def generate_summary(all_results: list[BenchResult], output_dir: Path) -> None:
             lines.append(f"| {db} | {avg:.2f} | {mn:.2f} | {mx:.2f} | {row_count} | — |")
 
         lines.append("")
+
+    # Full error log section — use HTML <pre><code> blocks to avoid premature
+    # fence termination when error messages contain backtick sequences.
+    all_errors = [r for r in all_results if r.error]
+    if all_errors:
+        lines.append("## Full Error Log\n")
+        for r in all_errors:
+            lines.append(f"### {r.db_name} – {r.operation}\n")
+            escaped = r.error.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            lines.append(f"<pre><code>{escaped}</code></pre>\n")
 
     summary = "\n".join(lines)
     summary_path = output_dir / "summary.md"

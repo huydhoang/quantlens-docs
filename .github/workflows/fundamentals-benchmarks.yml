@@ -107,16 +107,21 @@ jobs:
             duckdb \
             psycopg2-binary \
             mysql-connector-python \
-            fastmssql \
+            mssql-python \
             pyodbc \
             pymongo \
-            cassandra-driver \
+            scylla-driver \
             clickhouse-connect \
-            redis \
+            redis[hiredis] \
             requests
 
-      - name: Install MSSQL ODBC driver
+      - name: Install system dependencies for mssql-python and ODBC driver
         run: |
+          # mssql-python (Microsoft's native TDS driver) requires these on Debian/Ubuntu.
+          # No external ODBC driver manager needed — the wheel bundles its own.
+          sudo apt-get update -q
+          sudo apt-get install -y libltdl7 libkrb5-3 libgssapi-krb5-2
+          # pyodbc still requires msodbcsql18
           curl -sSL https://packages.microsoft.com/keys/microsoft.asc \
             | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/microsoft.gpg
           . /etc/os-release
@@ -127,12 +132,13 @@ jobs:
 
       - name: Start SQL Server
         run: |
+          # mssql-python uses TrustServerCertificate=yes so no custom cert needed.
           docker run -d --name bench-mssql \
             -p 1433:1433 \
             -e ACCEPT_EULA=Y \
             -e MSSQL_SA_PASSWORD=Bench\!1234 \
             -e MSSQL_PID=Express \
-            mcr.microsoft.com/mssql/server:2022-latest
+            mcr.microsoft.com/mssql/server:2025-latest
           echo "Waiting for SQL Server to be ready…"
           for i in $(seq 1 30); do
             if docker exec bench-mssql /opt/mssql-tools18/bin/sqlcmd \
@@ -166,7 +172,9 @@ jobs:
           docker run -d --name bench-scylla \
             -p 9043:9042 \
             scylladb/scylla:latest \
-            --smp 1 --developer-mode 1
+            --smp 1 --developer-mode 1 \
+            --broadcast-rpc-address 127.0.0.1 \
+            --listen-address 0.0.0.0
           echo "Waiting for ScyllaDB to be ready …"
           for i in $(seq 1 60); do
             if docker exec bench-scylla cqlsh -e "SELECT now() FROM system.local" >/dev/null 2>&1; then
