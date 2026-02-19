@@ -468,17 +468,15 @@ This approach:
 
 ## 16. Granian vs Uvicorn
 
-### 16.1 Contradiction resolution — 🟠
+### 16.1 Contradiction resolution — ✅ Resolved
 
-**Recommendation: Uvicorn is the canonical ASGI server. Update `python_rust_or_go.md` to remove the Granian recommendation.**
+**Decision: Gunicorn+Uvicorn Raw ASGI is the canonical default. `python_rust_or_go.md` updated to remove the Granian recommendation.**
 
-`asgi_web_server.md` provides a thorough benchmark-driven analysis concluding that Uvicorn wins for QuantLens's database-heavy workload. The Granian recommendation in `python_rust_or_go.md` was written before this analysis. Update the "Performance Optimization Strategy" section in `python_rust_or_go.md`:
+Extended benchmarks on QuantLens's actual CPU-bound workload (skfolio portfolio optimization) show that Gunicorn+Uvicorn Raw ASGI wins the critical CPU-burst scenario, has a lower memory footprint, requires no non-obvious tuning, and produces cleaner code than FastAPI or Granian alternatives. The Granian recommendation in `python_rust_or_go.md` has been updated to reflect this. The "Performance Optimization Strategy" section now reads:
 
-Change:
-> Use Granian (Rust-based ASGI server) for HTTP handling.
+> Use Gunicorn+Uvicorn Raw ASGI for HTTP handling. See [asgi_web_server.md](asgi_web_server.md) for the benchmark-driven rationale.
 
-To:
-> Use Uvicorn with uvloop + httptools for HTTP handling. See [asgi_web_server.md](asgi_web_server.md) for the benchmark-driven rationale — Uvicorn outperforms Granian on database-heavy workloads.
+FastAPI is only introduced when WebSocket support is explicitly required.
 
 ---
 

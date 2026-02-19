@@ -17,7 +17,7 @@ Tauri Desktop App (Vite + React SPA)
         │
    API Layer (REST / WebSocket)
         │
-   Python Backend (FastAPI / Uvicorn)
+   Python Backend (Gunicorn+Uvicorn · Raw ASGI)
         │
         ├── NautilusTrader ──── Rust core via PyO3
         ├── Celery Workers ──── Distributed backtest execution
@@ -76,7 +76,7 @@ TanStack Start + React (Frontend + API)
 | [nosql_database.md](nosql_database.md) | Fundamentals database evaluation — DuckDB as embedded columnar database for stock fundamentals and economic indicators, replacing MongoDB to eliminate Docker networking complexity for local desktop deployment |
 | [task_queue.md](task_queue.md) | Task queue decision analysis — why Celery over Dramatiq, RQ, and Taskiq, with configuration for NautilusTrader backtest workers |
 | [asgi_rsgi_wsgi.md](asgi_rsgi_wsgi.md) | Web interface decision analysis — why ASGI over WSGI/RSGI for NautilusTrader real-time streaming + skfolio optimization workloads |
-| [asgi_web_server.md](asgi_web_server.md) | ASGI web server architecture decision — FastAPI on Uvicorn by default, with a hybrid two-tier Uvicorn setup for research and real-time trading |
+| [asgi_web_server.md](asgi_web_server.md) | ASGI web server architecture decision — Gunicorn+Uvicorn Raw ASGI by default, with FastAPI on Gunicorn+Uvicorn only when WebSocket support is required; extended benchmark results comparing all six stacks |
 | [vector_database.md](vector_database.md) | Vector database evaluation — LanceDB vs Qdrant vs Weaviate vs Milvus vs ChromaDB for local LLM chat, semantic search, expert analyses, and RAG pipelines, with hybrid DuckDB + LanceDB architecture for LLM-powered financial analysis |
 
 ## Tech Stack
@@ -85,7 +85,7 @@ TanStack Start + React (Frontend + API)
 
 **Frontend (Platform App):** TanStack Start, React, TanStack Query
 
-**Backend:** Python, FastAPI, Uvicorn (uvloop), Celery
+**Backend:** Python, Gunicorn+Uvicorn (uvloop), Celery
 
 **Engine:** NautilusTrader (Rust core + Python bindings via PyO3)
 

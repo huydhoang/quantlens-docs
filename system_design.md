@@ -14,7 +14,7 @@ flowchart TD
         E["Portfolio Analytics<br/>Sharpe · Drawdown · Stats"]
     end
 
-    subgraph API["API Layer · FastAPI REST + WebSocket"]
+    subgraph API["API Layer · Gunicorn+Uvicorn · Raw ASGI"]
         direction LR
         G[Strategy Endpoints]
         H[Backtest Engine Proxy]

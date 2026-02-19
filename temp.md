@@ -296,12 +296,13 @@ granian granian_asgi:app \
 
 | Variant | Relative Performance* | Best Use Case |
 |---------|----------------------|---------------|
-| FastAPI + Uvicorn | Baseline | General production, compatibility |
-| FastAPI + Granian | Faster | High-throughput APIs |
-| Vanilla ASGI + Uvicorn | Faster | Custom protocols, minimal overhead |
-| Vanilla ASGI + Granian | Fastest | Microservices, edge computing |
+| Gunicorn+Uvicorn · Raw ASGI | **Best for CPU-burst** | **QuantLens default — backtesting, optimization** |
+| FastAPI + Gunicorn+Uvicorn | Good | WebSocket required |
+| FastAPI + Uvicorn | Baseline | Single-worker development |
+| FastAPI + Granian | Mixed | HTTP/2 or Prometheus metrics needed |
+| Vanilla ASGI + Granian | Mixed | HTTP/2 or Prometheus metrics needed |
 
-*Absolute RPS depends heavily on hardware, payload, and application logic. See [Granian benchmarks](https://github.com/emmett-framework/granian/blob/master/benchmarks/vs.md) for comparative data. Always profile your own workload.
+*Absolute RPS depends heavily on hardware, payload, and application logic. See [asgi_web_server.md](asgi_web_server.md) for QuantLens extended benchmark results. Always profile your own workload.
 
 ---
 
@@ -358,4 +359,4 @@ services:
       --host 0.0.0.0 --port 8000 --no-log
 ```
 
-**Recommendation**: Start with **FastAPI + Granian** for new projects—it offers the best balance of developer experience and performance. Use **Vanilla ASGI + Granian** only when you've proven FastAPI is the bottleneck through profiling.
+**Recommendation**: Start with **Gunicorn+Uvicorn Raw ASGI** for QuantLens — it delivers the best CPU-burst performance for portfolio optimization workloads. Add **FastAPI on Gunicorn+Uvicorn** only when WebSocket support is explicitly required. See [asgi_web_server.md](asgi_web_server.md) for extended benchmark results.

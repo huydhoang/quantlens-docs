@@ -326,15 +326,15 @@ pip install granian
 granian --interface asgi --host 0.0.0.0 --port 8000 --workers 4 app.main:app
 ```
 
-Best for: maximum throughput. Granian is a Rust-based HTTP server supporting ASGI/WSGI/RSGI, HTTP/1 and HTTP/2, with built-in Prometheus metrics (`--metrics`). It replaces the Gunicorn+Uvicorn stack with a single dependency. Configurable backpressure, runtime threading modes (`st`/`mt`/`auto`), and optional event loops (`uvloop`, `rloop`, `winloop`).
+Best for: cases requiring HTTP/2 or native Prometheus metrics. Granian is a Rust-based HTTP server supporting ASGI/WSGI/RSGI, HTTP/1 and HTTP/2, with built-in Prometheus metrics (`--metrics`). It replaces the Gunicorn+Uvicorn stack with a single dependency but requires manual tuning (e.g. `--backlog 2048`) and underperforms Gunicorn+Uvicorn on CPU-burst workloads. **Not the recommended default — use Gunicorn+Uvicorn instead.** See [asgi_web_server.md](asgi_web_server.md) for benchmark details.
 
 ### Server Comparison for CI
 
 | Server | CI Start Command | Notes |
 |--------|-----------------|-------|
-| Uvicorn | `uvicorn app.main:app --host 0.0.0.0 --port 8000 &` | Simplest |
-| Gunicorn | `gunicorn app.main:app -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000 &` | Linux only |
-| Granian | `granian --interface asgi --host 0.0.0.0 --port 8000 app.main:app &` | Fastest |
+| Gunicorn+Uvicorn | `gunicorn app.main:app -k uvicorn_worker.UvicornWorker --bind 0.0.0.0:8000 &` | **Recommended default** |
+| Uvicorn | `uvicorn app.main:app --host 0.0.0.0 --port 8000 &` | Simplest, single worker |
+| Granian | `granian --interface asgi --host 0.0.0.0 --port 8000 app.main:app &` | HTTP/2 / Prometheus metrics |
 
 ---
 
