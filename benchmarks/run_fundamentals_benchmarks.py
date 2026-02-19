@@ -688,24 +688,48 @@ class MSSQLPythonAdapter(DBAdapter):
             )
         """)
         self.con.commit()
+        cur.close()
 
-        cur.executemany(
-            "INSERT INTO fundamentals VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            [tuple(r.values()) for r in fundamentals],
-        )
-        self.con.commit()
+        # Use 2 threads for parallel bulk inserts. mssql_python connections are
+        # not safe to share across threads; each thread owns its own connection.
+        def _ins_fund(rows):
+            c = mssql_python.connect(conn_str)
+            cur = c.cursor()
+            cur.executemany(
+                "INSERT INTO fundamentals VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                [tuple(r.values()) for r in rows],
+            )
+            c.commit()
+            c.close()
 
-        cur.executemany(
-            "INSERT INTO economic_indicators VALUES (?,?,?,?,?)",
-            [
-                (r["indicator_id"], r["frequency"],
-                 datetime.fromisoformat(r["timestamp"]),
-                 r["value"], r["revision_number"])
-                for r in economic
-            ],
-        )
-        self.con.commit()
+        def _ins_econ(rows):
+            c = mssql_python.connect(conn_str)
+            cur = c.cursor()
+            cur.executemany(
+                "INSERT INTO economic_indicators VALUES (?,?,?,?,?)",
+                [
+                    (r["indicator_id"], r["frequency"],
+                     datetime.fromisoformat(r["timestamp"]),
+                     r["value"], r["revision_number"])
+                    for r in rows
+                ],
+            )
+            c.commit()
+            c.close()
 
+        mid_f = len(fundamentals) // 2
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            fs = [ex.submit(_ins_fund, fundamentals[:mid_f]), ex.submit(_ins_fund, fundamentals[mid_f:])]
+            for f in fs:
+                f.result()
+
+        mid_e = len(economic) // 2
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            fs = [ex.submit(_ins_econ, economic[:mid_e]), ex.submit(_ins_econ, economic[mid_e:])]
+            for f in fs:
+                f.result()
+
+        cur = self.con.cursor()
         cur.execute("CREATE INDEX idx_fund_pe_rev ON fundamentals (pe_ratio, revenue)")
         cur.execute("CREATE INDEX idx_fund_gm_roe ON fundamentals (gross_margin, roe)")
         cur.execute("CREATE INDEX idx_econ_rev ON economic_indicators (indicator_id, timestamp, revision_number DESC)")
@@ -1150,10 +1174,17 @@ class ScyllaDBAdapter(DBAdapter):
         # scylla-driver is a drop-in replacement for cassandra-driver with
         # Scylla-specific shard awareness: TokenAwarePolicy routes each query
         # directly to the shard owning the partition, reducing cross-node hops.
+        #
+        # In Docker/CI, ScyllaDB advertises its internal bridge IP (e.g.
+        # 172.17.0.4) to the driver via the shard-aware port discovery protocol.
+        # The driver then tries to connect to that IP directly, which fails from
+        # the host. disable_shardaware_port=True keeps TokenAwarePolicy routing
+        # but skips the internal-IP probe, so connections go via 127.0.0.1.
         self.cluster = Cluster(
             ["127.0.0.1"],
             port=9043,
             load_balancing_policy=TokenAwarePolicy(RoundRobinPolicy()),
+            shard_aware_options=dict(disable_shardaware_port=True),
         )
         self.session = self.cluster.connect()
         self.session.execute("""
