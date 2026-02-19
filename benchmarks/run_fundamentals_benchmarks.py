@@ -656,13 +656,12 @@ class FastMSSQLAdapter(DBAdapter):
     def setup(self, fundamentals, economic):
         import asyncio
         from datetime import datetime
-        from fastmssql import Connection, SslConfig
+        from fastmssql import Connection, PoolConfig
 
-        self._conn_str = "Server=127.0.0.1;Database=bench;User Id=sa;Password=Bench!1234"
-        self._ssl = SslConfig.development()
+        self._conn_str = "Server=127.0.0.1;Database=bench;User Id=sa;Password=Bench!1234;Encrypt=false"
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
-        self._conn = Connection(self._conn_str, ssl_config=self._ssl)
+        self._conn = Connection(self._conn_str, pool_config=PoolConfig.one())
 
         # Pre-convert timestamp strings to datetime objects for DATETIME2 columns
         cols_e = list(economic[0].keys())
@@ -1096,25 +1095,29 @@ class CassandraAdapter(DBAdapter):
 
     def complex_query_workload(self):
         total = 0
-        # Full table scan + Python-side double groupby (symbol, year)
-        rows = list(self.session.execute(
+        # Execute all 3 queries concurrently using execute_async()
+        future1 = self.session.execute_async(
             "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals"
-        ))
+        )
+        future2 = self.session.execute_async(
+            "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals "
+            "WHERE gross_margin > 0.3 AND roe > 0.05 ALLOW FILTERING"
+        )
+        future3 = self.session.execute_async(
+            "SELECT indicator_id, frequency, value FROM economic_indicators"
+        )
+        # Collect results
+        rows = list(future1.result())
+        result = list(future2.result())
+        econ_rows = list(future3.result())
+        # Full table scan + Python-side double groupby (symbol, year)
         groups_sy: dict = {}
         for r in rows:
             key = (r.symbol, r.period[:4])
             groups_sy[key] = groups_sy.get(key, 0) + 1
         total += len(groups_sy)
-        # Full table scan with server-side ALLOW FILTERING
-        result = list(self.session.execute(
-            "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals "
-            "WHERE gross_margin > 0.3 AND roe > 0.05 ALLOW FILTERING"
-        ))
         total += len(result)
         # Full table scan + Python-side double groupby on economic (indicator_id, frequency)
-        econ_rows = list(self.session.execute(
-            "SELECT indicator_id, frequency, value FROM economic_indicators"
-        ))
         econ_groups: dict = {}
         for r in econ_rows:
             key = (r.indicator_id, r.frequency)
@@ -1199,25 +1202,29 @@ class ScyllaDBAdapter(DBAdapter):
 
     def complex_query_workload(self):
         total = 0
-        # Full table scan + Python-side double groupby (symbol, year)
-        rows = list(self.session.execute(
+        # Execute all 3 queries concurrently using execute_async()
+        future1 = self.session.execute_async(
             "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals"
-        ))
+        )
+        future2 = self.session.execute_async(
+            "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals "
+            "WHERE gross_margin > 0.3 AND roe > 0.05 ALLOW FILTERING"
+        )
+        future3 = self.session.execute_async(
+            "SELECT indicator_id, frequency, value FROM economic_indicators"
+        )
+        # Collect results
+        rows = list(future1.result())
+        result = list(future2.result())
+        econ_rows = list(future3.result())
+        # Full table scan + Python-side double groupby (symbol, year)
         groups_sy: dict = {}
         for r in rows:
             key = (r.symbol, r.period[:4])
             groups_sy[key] = groups_sy.get(key, 0) + 1
         total += len(groups_sy)
-        # Full table scan with server-side ALLOW FILTERING
-        result = list(self.session.execute(
-            "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals "
-            "WHERE gross_margin > 0.3 AND roe > 0.05 ALLOW FILTERING"
-        ))
         total += len(result)
         # Full table scan + Python-side double groupby on economic (indicator_id, frequency)
-        econ_rows = list(self.session.execute(
-            "SELECT indicator_id, frequency, value FROM economic_indicators"
-        ))
         econ_groups: dict = {}
         for r in econ_rows:
             key = (r.indicator_id, r.frequency)
@@ -1551,7 +1558,7 @@ class RavenDBAdapter(DBAdapter):
                 f"{self.base_url}/admin/databases",
                 json={
                     "DatabaseRecord": {"DatabaseName": self.db_name},
-                    "DatabaseTopology": {"Members": ["A"]},
+                    "ReplicationFactor": 1,
                 },
                 headers={"Content-Type": "application/json"},
                 timeout=10,
@@ -1607,7 +1614,7 @@ class RavenDBAdapter(DBAdapter):
 
         resp = requests.get(
             f"{self.base_url}/databases/{self.db_name}/docs",
-            params={"startWith": "fundamentals/", "pageSize": 1024},
+            params={"startsWith": "fundamentals/", "pageSize": 1024},
             timeout=10,
         )
         results = resp.json().get("Results", [])
@@ -1618,7 +1625,7 @@ class RavenDBAdapter(DBAdapter):
 
         resp = requests.get(
             f"{self.base_url}/databases/{self.db_name}/docs",
-            params={"startWith": "economic/", "pageSize": 100},
+            params={"startsWith": "economic/", "pageSize": 100},
             timeout=10,
         )
         return len(resp.json().get("Results", []))
@@ -1630,7 +1637,7 @@ class RavenDBAdapter(DBAdapter):
         # Fetch fundamentals (double groupby done client-side)
         resp = requests.get(
             f"{self.base_url}/databases/{self.db_name}/docs",
-            params={"startWith": "fundamentals/", "pageSize": 1024},
+            params={"startsWith": "fundamentals/", "pageSize": 1024},
             timeout=10,
         )
         fund_docs = resp.json().get("Results", [])
@@ -1650,7 +1657,7 @@ class RavenDBAdapter(DBAdapter):
         # Fetch economic data + double groupby (indicator_id, frequency)
         resp = requests.get(
             f"{self.base_url}/databases/{self.db_name}/docs",
-            params={"startWith": "economic/", "pageSize": 1024},
+            params={"startsWith": "economic/", "pageSize": 1024},
             timeout=10,
         )
         econ_docs = resp.json().get("Results", [])
