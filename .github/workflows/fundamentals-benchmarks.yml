@@ -150,13 +150,13 @@ jobs:
             sleep 5
           done
 
-          # Install v3 cert into SQL Server container
+          # Install v3 cert into SQL Server container (run as root for /etc/ssl permissions)
           docker cp /tmp/mssql.pem bench-mssql:/etc/ssl/certs/mssql.pem
           docker cp /tmp/mssql.key bench-mssql:/etc/ssl/private/mssql.key
-          docker exec bench-mssql bash -c "chmod 440 /etc/ssl/private/mssql.key && chown mssql:mssql /etc/ssl/private/mssql.key /etc/ssl/certs/mssql.pem"
-          docker exec bench-mssql /opt/mssql/bin/mssql-conf set network.tlscert /etc/ssl/certs/mssql.pem
-          docker exec bench-mssql /opt/mssql/bin/mssql-conf set network.tlskey /etc/ssl/private/mssql.key
-          docker exec bench-mssql /opt/mssql/bin/mssql-conf set network.tlsprotocols 1.2
+          docker exec -u 0 bench-mssql bash -c "chmod 440 /etc/ssl/private/mssql.key && chown mssql:mssql /etc/ssl/private/mssql.key /etc/ssl/certs/mssql.pem"
+          docker exec -u 0 bench-mssql /opt/mssql/bin/mssql-conf set network.tlscert /etc/ssl/certs/mssql.pem
+          docker exec -u 0 bench-mssql /opt/mssql/bin/mssql-conf set network.tlskey /etc/ssl/private/mssql.key
+          docker exec -u 0 bench-mssql /opt/mssql/bin/mssql-conf set network.tlsprotocols 1.2
           docker restart bench-mssql
 
           echo "Waiting for SQL Server restart with v3 cert…"
