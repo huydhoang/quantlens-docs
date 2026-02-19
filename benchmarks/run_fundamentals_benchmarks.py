@@ -298,9 +298,7 @@ class SQLiteAdapter(DBAdapter):
     def setup(self, fundamentals, economic):
         import sqlite3
 
-        # check_same_thread=False is required to allow 2 threads to share this
-        # in-memory connection for concurrent inserts into different tables.
-        self.con = sqlite3.connect(":memory:", check_same_thread=False)
+        self.con = sqlite3.connect(":memory:")
         self.con.execute("PRAGMA journal_mode=OFF")
         self.con.execute("PRAGMA synchronous=OFF")
         self.con.execute("PRAGMA cache_size=-128000")
@@ -325,26 +323,14 @@ class SQLiteAdapter(DBAdapter):
                 PRIMARY KEY (indicator_id, frequency, timestamp, revision_number)
             )
         """)
-        # Use 2 threads to insert into both tables concurrently. SQLite
-        # in-memory has only one connection so the two inserts share it;
-        # writes will serialize at the SQLite lock but the threads still run
-        # in parallel from Python's perspective.
-        def _ins_fund():
-            self.con.executemany(
-                "INSERT INTO fundamentals VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                [tuple(r.values()) for r in fundamentals],
-            )
-
-        def _ins_econ():
-            self.con.executemany(
-                "INSERT INTO economic_indicators VALUES (?,?,?,?,?)",
-                [tuple(r.values()) for r in economic],
-            )
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-            fs = [ex.submit(_ins_fund), ex.submit(_ins_econ)]
-            for f in fs:
-                f.result()
+        self.con.executemany(
+            "INSERT INTO fundamentals VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            [tuple(r.values()) for r in fundamentals],
+        )
+        self.con.executemany(
+            "INSERT INTO economic_indicators VALUES (?,?,?,?,?)",
+            [tuple(r.values()) for r in economic],
+        )
         self.con.commit()
         self.con.execute("CREATE INDEX idx_fund_pe_rev ON fundamentals (pe_ratio, revenue)")
         self.con.execute("CREATE INDEX idx_fund_gm_roe ON fundamentals (gross_margin, roe)")
@@ -1072,6 +1058,7 @@ class CassandraAdapter(DBAdapter):
 
     def setup(self, fundamentals, economic):
         from cassandra.cluster import Cluster
+        from cassandra.concurrent import execute_concurrent_with_args
         from datetime import datetime
 
         self.cluster = Cluster(["127.0.0.1"], port=9042)
@@ -1119,28 +1106,8 @@ class CassandraAdapter(DBAdapter):
              r["value"], r["revision_number"]]
             for r in economic
         ]
-
-        # Use 2 threads for parallel bulk inserts. cassandra-driver sessions
-        # are thread-safe; each thread calls session.execute() in a loop.
-        def _ins_fund(rows):
-            for params in rows:
-                self.session.execute(fund_stmt, params)
-
-        def _ins_econ(rows):
-            for params in rows:
-                self.session.execute(econ_stmt, params)
-
-        mid_f = len(fund_params) // 2
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-            fs = [ex.submit(_ins_fund, fund_params[:mid_f]), ex.submit(_ins_fund, fund_params[mid_f:])]
-            for f in fs:
-                f.result()
-
-        mid_e = len(econ_params) // 2
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-            fs = [ex.submit(_ins_econ, econ_params[:mid_e]), ex.submit(_ins_econ, econ_params[mid_e:])]
-            for f in fs:
-                f.result()
+        execute_concurrent_with_args(self.session, fund_stmt, fund_params, concurrency=200)
+        execute_concurrent_with_args(self.session, econ_stmt, econ_params, concurrency=200)
 
     def simple_query_fundamentals(self):
         rows = self.session.execute(
@@ -1156,30 +1123,24 @@ class CassandraAdapter(DBAdapter):
         return len(list(rows))
 
     def complex_query_workload(self):
-        total = 0
-        # Submit all 3 queries to a 2-thread pool; each thread calls session.execute().
-        def _q1():
-            return list(self.session.execute(
-                "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals"
-            ))
+        from cassandra.concurrent import execute_concurrent
+        from cassandra.query import SimpleStatement
 
-        def _q2():
-            return list(self.session.execute(
+        total = 0
+        # Execute all 3 queries concurrently using execute_concurrent()
+        statements = [
+            (SimpleStatement("SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals"), ()),
+            (SimpleStatement(
                 "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals "
                 "WHERE gross_margin > 0.3 AND roe > 0.05 ALLOW FILTERING"
-            ))
-
-        def _q3():
-            return list(self.session.execute(
-                "SELECT indicator_id, frequency, value FROM economic_indicators"
-            ))
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-            f1, f2, f3 = ex.submit(_q1), ex.submit(_q2), ex.submit(_q3)
-            rows = f1.result()
-            result = f2.result()
-            econ_rows = f3.result()
-
+            ), ()),
+            (SimpleStatement("SELECT indicator_id, frequency, value FROM economic_indicators"), ()),
+        ]
+        results = execute_concurrent(self.session, statements, concurrency=3, raise_on_first_error=True)
+        # Collect results
+        rows = list(results[0][1])
+        result = list(results[1][1])
+        econ_rows = list(results[2][1])
         # Full table scan + Python-side double groupby (symbol, year)
         groups_sy: dict = {}
         for r in rows:
@@ -1195,7 +1156,6 @@ class CassandraAdapter(DBAdapter):
         total += len(econ_groups)
         return total
 
-
     def teardown(self):
         self.cluster.shutdown()
 
@@ -1207,6 +1167,7 @@ class ScyllaDBAdapter(DBAdapter):
 
     def setup(self, fundamentals, economic):
         from cassandra.cluster import Cluster
+        from cassandra.concurrent import execute_concurrent_with_args
         from cassandra.policies import TokenAwarePolicy, RoundRobinPolicy
         from datetime import datetime
 
@@ -1266,28 +1227,8 @@ class ScyllaDBAdapter(DBAdapter):
              r["value"], r["revision_number"]]
             for r in economic
         ]
-
-        # Use 2 threads for parallel bulk inserts. scylla-driver sessions are
-        # thread-safe; each thread calls session.execute() in a loop.
-        def _ins_fund(rows):
-            for params in rows:
-                self.session.execute(fund_stmt, params)
-
-        def _ins_econ(rows):
-            for params in rows:
-                self.session.execute(econ_stmt, params)
-
-        mid_f = len(fund_params) // 2
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-            fs = [ex.submit(_ins_fund, fund_params[:mid_f]), ex.submit(_ins_fund, fund_params[mid_f:])]
-            for f in fs:
-                f.result()
-
-        mid_e = len(econ_params) // 2
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-            fs = [ex.submit(_ins_econ, econ_params[:mid_e]), ex.submit(_ins_econ, econ_params[mid_e:])]
-            for f in fs:
-                f.result()
+        execute_concurrent_with_args(self.session, fund_stmt, fund_params, concurrency=200)
+        execute_concurrent_with_args(self.session, econ_stmt, econ_params, concurrency=200)
 
     def simple_query_fundamentals(self):
         rows = self.session.execute(
@@ -1303,30 +1244,24 @@ class ScyllaDBAdapter(DBAdapter):
         return len(list(rows))
 
     def complex_query_workload(self):
-        total = 0
-        # Submit all 3 queries to a 2-thread pool; each thread calls session.execute().
-        def _q1():
-            return list(self.session.execute(
-                "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals"
-            ))
+        from cassandra.concurrent import execute_concurrent
+        from cassandra.query import SimpleStatement
 
-        def _q2():
-            return list(self.session.execute(
+        total = 0
+        # Execute all 3 queries concurrently using execute_concurrent()
+        statements = [
+            (SimpleStatement("SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals"), ()),
+            (SimpleStatement(
                 "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals "
                 "WHERE gross_margin > 0.3 AND roe > 0.05 ALLOW FILTERING"
-            ))
-
-        def _q3():
-            return list(self.session.execute(
-                "SELECT indicator_id, frequency, value FROM economic_indicators"
-            ))
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-            f1, f2, f3 = ex.submit(_q1), ex.submit(_q2), ex.submit(_q3)
-            rows = f1.result()
-            result = f2.result()
-            econ_rows = f3.result()
-
+            ), ()),
+            (SimpleStatement("SELECT indicator_id, frequency, value FROM economic_indicators"), ()),
+        ]
+        results = execute_concurrent(self.session, statements, concurrency=3, raise_on_first_error=True)
+        # Collect results
+        rows = list(results[0][1])
+        result = list(results[1][1])
+        econ_rows = list(results[2][1])
         # Full table scan + Python-side double groupby (symbol, year)
         groups_sy: dict = {}
         for r in rows:
@@ -1341,7 +1276,6 @@ class ScyllaDBAdapter(DBAdapter):
             econ_groups[key] = econ_groups.get(key, 0) + 1
         total += len(econ_groups)
         return total
-
 
     def teardown(self):
         self.cluster.shutdown()
@@ -1383,32 +1317,14 @@ class ClickHouseAdapter(DBAdapter):
         """)
         cols_f = list(fundamentals[0].keys())
         data_f = [list(r.values()) for r in fundamentals]
+        self.client.insert("bench.fundamentals", data_f, column_names=cols_f)
         cols_e = list(economic[0].keys())
         ts_idx = cols_e.index("timestamp")
         data_e = [
             [datetime.fromisoformat(v) if i == ts_idx else v for i, v in enumerate(r.values())]
             for r in economic
         ]
-
-        # clickhouse_connect client is thread-safe; split each dataset in half
-        # and insert both halves concurrently with 2 threads.
-        def _ins_fund(rows):
-            self.client.insert("bench.fundamentals", rows, column_names=cols_f)
-
-        def _ins_econ(rows):
-            self.client.insert("bench.economic_indicators", rows, column_names=cols_e)
-
-        mid_f = len(data_f) // 2
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-            fs = [ex.submit(_ins_fund, data_f[:mid_f]), ex.submit(_ins_fund, data_f[mid_f:])]
-            for f in fs:
-                f.result()
-
-        mid_e = len(data_e) // 2
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-            fs = [ex.submit(_ins_econ, data_e[:mid_e]), ex.submit(_ins_econ, data_e[mid_e:])]
-            for f in fs:
-                f.result()
+        self.client.insert("bench.economic_indicators", data_e, column_names=cols_e)
 
     def simple_query_fundamentals(self):
         result = self.client.query(
@@ -1595,37 +1511,18 @@ class RedisAdapter(DBAdapter):
 
         self.r = redis.Redis(host="localhost", port=6379, decode_responses=True)
         self.r.flushdb()
-
-        # redis-py is thread-safe; split each dataset in half and insert both
-        # halves concurrently. Each thread creates its own pipeline.
-        def _ins_fund(rows):
-            pipe = self.r.pipeline()
-            for row in rows:
-                key = f"fund:{row['symbol']}:{row['period']}"
-                pipe.hset(key, mapping={k: str(v) for k, v in row.items()})
-                pipe.sadd("fund:index", key)
-            pipe.execute()
-
-        def _ins_econ(rows):
-            pipe = self.r.pipeline()
-            for row in rows:
-                key = f"econ:{row['indicator_id']}:{row['timestamp']}:{row['revision_number']}"
-                pipe.hset(key, mapping={k: str(v) for k, v in row.items()})
-                pipe.sadd("econ:index", key)
-            pipe.execute()
-
-        mid_f = len(fundamentals) // 2
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-            fs = [ex.submit(_ins_fund, fundamentals[:mid_f]), ex.submit(_ins_fund, fundamentals[mid_f:])]
-            for f in fs:
-                f.result()
-
-        mid_e = len(economic) // 2
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-            fs = [ex.submit(_ins_econ, economic[:mid_e]), ex.submit(_ins_econ, economic[mid_e:])]
-            for f in fs:
-                f.result()
-
+        pipe = self.r.pipeline()
+        for row in fundamentals:
+            key = f"fund:{row['symbol']}:{row['period']}"
+            pipe.hset(key, mapping={k: str(v) for k, v in row.items()})
+            pipe.sadd("fund:index", key)
+        pipe.execute()
+        pipe = self.r.pipeline()
+        for row in economic:
+            key = f"econ:{row['indicator_id']}:{row['timestamp']}:{row['revision_number']}"
+            pipe.hset(key, mapping={k: str(v) for k, v in row.items()})
+            pipe.sadd("econ:index", key)
+        pipe.execute()
         self._fundamentals = fundamentals
         self._economic = economic
 
