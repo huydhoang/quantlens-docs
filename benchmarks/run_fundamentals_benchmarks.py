@@ -1072,7 +1072,6 @@ class CassandraAdapter(DBAdapter):
 
     def setup(self, fundamentals, economic):
         from cassandra.cluster import Cluster
-        from cassandra.concurrent import execute_concurrent_with_args
         from datetime import datetime
 
         self.cluster = Cluster(["127.0.0.1"], port=9042)
@@ -1120,8 +1119,28 @@ class CassandraAdapter(DBAdapter):
              r["value"], r["revision_number"]]
             for r in economic
         ]
-        execute_concurrent_with_args(self.session, fund_stmt, fund_params, concurrency=200)
-        execute_concurrent_with_args(self.session, econ_stmt, econ_params, concurrency=200)
+
+        # Use 2 threads for parallel bulk inserts. cassandra-driver sessions
+        # are thread-safe; each thread calls session.execute() in a loop.
+        def _ins_fund(rows):
+            for params in rows:
+                self.session.execute(fund_stmt, params)
+
+        def _ins_econ(rows):
+            for params in rows:
+                self.session.execute(econ_stmt, params)
+
+        mid_f = len(fund_params) // 2
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            fs = [ex.submit(_ins_fund, fund_params[:mid_f]), ex.submit(_ins_fund, fund_params[mid_f:])]
+            for f in fs:
+                f.result()
+
+        mid_e = len(econ_params) // 2
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            fs = [ex.submit(_ins_econ, econ_params[:mid_e]), ex.submit(_ins_econ, econ_params[mid_e:])]
+            for f in fs:
+                f.result()
 
     def simple_query_fundamentals(self):
         rows = self.session.execute(
@@ -1137,24 +1156,30 @@ class CassandraAdapter(DBAdapter):
         return len(list(rows))
 
     def complex_query_workload(self):
-        from cassandra.concurrent import execute_concurrent
-        from cassandra.query import SimpleStatement
-
         total = 0
-        # Execute all 3 queries concurrently using execute_concurrent()
-        statements = [
-            (SimpleStatement("SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals"), ()),
-            (SimpleStatement(
+        # Submit all 3 queries to a 2-thread pool; each thread calls session.execute().
+        def _q1():
+            return list(self.session.execute(
+                "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals"
+            ))
+
+        def _q2():
+            return list(self.session.execute(
                 "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals "
                 "WHERE gross_margin > 0.3 AND roe > 0.05 ALLOW FILTERING"
-            ), ()),
-            (SimpleStatement("SELECT indicator_id, frequency, value FROM economic_indicators"), ()),
-        ]
-        results = execute_concurrent(self.session, statements, concurrency=3, raise_on_first_error=True)
-        # Collect results
-        rows = list(results[0][1])
-        result = list(results[1][1])
-        econ_rows = list(results[2][1])
+            ))
+
+        def _q3():
+            return list(self.session.execute(
+                "SELECT indicator_id, frequency, value FROM economic_indicators"
+            ))
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            f1, f2, f3 = ex.submit(_q1), ex.submit(_q2), ex.submit(_q3)
+            rows = f1.result()
+            result = f2.result()
+            econ_rows = f3.result()
+
         # Full table scan + Python-side double groupby (symbol, year)
         groups_sy: dict = {}
         for r in rows:
@@ -1170,6 +1195,7 @@ class CassandraAdapter(DBAdapter):
         total += len(econ_groups)
         return total
 
+
     def teardown(self):
         self.cluster.shutdown()
 
@@ -1181,7 +1207,6 @@ class ScyllaDBAdapter(DBAdapter):
 
     def setup(self, fundamentals, economic):
         from cassandra.cluster import Cluster
-        from cassandra.concurrent import execute_concurrent_with_args
         from cassandra.policies import TokenAwarePolicy, RoundRobinPolicy
         from datetime import datetime
 
@@ -1241,8 +1266,28 @@ class ScyllaDBAdapter(DBAdapter):
              r["value"], r["revision_number"]]
             for r in economic
         ]
-        execute_concurrent_with_args(self.session, fund_stmt, fund_params, concurrency=200)
-        execute_concurrent_with_args(self.session, econ_stmt, econ_params, concurrency=200)
+
+        # Use 2 threads for parallel bulk inserts. scylla-driver sessions are
+        # thread-safe; each thread calls session.execute() in a loop.
+        def _ins_fund(rows):
+            for params in rows:
+                self.session.execute(fund_stmt, params)
+
+        def _ins_econ(rows):
+            for params in rows:
+                self.session.execute(econ_stmt, params)
+
+        mid_f = len(fund_params) // 2
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            fs = [ex.submit(_ins_fund, fund_params[:mid_f]), ex.submit(_ins_fund, fund_params[mid_f:])]
+            for f in fs:
+                f.result()
+
+        mid_e = len(econ_params) // 2
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            fs = [ex.submit(_ins_econ, econ_params[:mid_e]), ex.submit(_ins_econ, econ_params[mid_e:])]
+            for f in fs:
+                f.result()
 
     def simple_query_fundamentals(self):
         rows = self.session.execute(
@@ -1258,24 +1303,30 @@ class ScyllaDBAdapter(DBAdapter):
         return len(list(rows))
 
     def complex_query_workload(self):
-        from cassandra.concurrent import execute_concurrent
-        from cassandra.query import SimpleStatement
-
         total = 0
-        # Execute all 3 queries concurrently using execute_concurrent()
-        statements = [
-            (SimpleStatement("SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals"), ()),
-            (SimpleStatement(
+        # Submit all 3 queries to a 2-thread pool; each thread calls session.execute().
+        def _q1():
+            return list(self.session.execute(
+                "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals"
+            ))
+
+        def _q2():
+            return list(self.session.execute(
                 "SELECT symbol, period, revenue, eps, pe_ratio FROM fundamentals "
                 "WHERE gross_margin > 0.3 AND roe > 0.05 ALLOW FILTERING"
-            ), ()),
-            (SimpleStatement("SELECT indicator_id, frequency, value FROM economic_indicators"), ()),
-        ]
-        results = execute_concurrent(self.session, statements, concurrency=3, raise_on_first_error=True)
-        # Collect results
-        rows = list(results[0][1])
-        result = list(results[1][1])
-        econ_rows = list(results[2][1])
+            ))
+
+        def _q3():
+            return list(self.session.execute(
+                "SELECT indicator_id, frequency, value FROM economic_indicators"
+            ))
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            f1, f2, f3 = ex.submit(_q1), ex.submit(_q2), ex.submit(_q3)
+            rows = f1.result()
+            result = f2.result()
+            econ_rows = f3.result()
+
         # Full table scan + Python-side double groupby (symbol, year)
         groups_sy: dict = {}
         for r in rows:
@@ -1290,6 +1341,7 @@ class ScyllaDBAdapter(DBAdapter):
             econ_groups[key] = econ_groups.get(key, 0) + 1
         total += len(econ_groups)
         return total
+
 
     def teardown(self):
         self.cluster.shutdown()
