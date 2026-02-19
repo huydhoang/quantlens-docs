@@ -107,16 +107,21 @@ jobs:
             duckdb \
             psycopg2-binary \
             mysql-connector-python \
-            fastmssql \
+            mssql-python \
             pyodbc \
             pymongo \
-            cassandra-driver \
+            scylla-driver \
             clickhouse-connect \
             redis[hiredis] \
             requests
 
-      - name: Install MSSQL ODBC driver
+      - name: Install system dependencies for mssql-python and ODBC driver
         run: |
+          # mssql-python (Microsoft's native TDS driver) requires these on Debian/Ubuntu.
+          # No external ODBC driver manager needed — the wheel bundles its own.
+          sudo apt-get update -q
+          sudo apt-get install -y libltdl7 libkrb5-3 libgssapi-krb5-2
+          # pyodbc still requires msodbcsql18
           curl -sSL https://packages.microsoft.com/keys/microsoft.asc \
             | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/microsoft.gpg
           . /etc/os-release
@@ -127,10 +132,7 @@ jobs:
 
       - name: Start SQL Server
         run: |
-          # No custom TLS cert needed: fastmssql uses SslConfig.disabled()
-          # (EncryptionLevel::NotSupported in tiberius), which skips TLS entirely.
-          # SQL Server on Linux defaults to ForceEncryption=OFF and accepts
-          # plaintext connections from clients that advertise no encryption support.
+          # mssql-python uses TrustServerCertificate=yes so no custom cert needed.
           docker run -d --name bench-mssql \
             -p 1433:1433 \
             -e ACCEPT_EULA=Y \
