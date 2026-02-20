@@ -1,6 +1,6 @@
 # Integration Questions
 
-Cross-referencing [ARCHITECTURE.md](ARCHITECTURE.md), [local_frontend.md](local_frontend.md), [asgi_web_server.md](asgi_web_server.md), and [core_engine.md](core_engine.md) against all other architecture docs surfaced the following open questions. See [integration_questions.md](integration_questions.md) for full context on each item.
+Cross-referencing [ARCHITECTURE.md](ARCHITECTURE.md), [local_frontend.md](local_frontend.md), [backend_server.md](backend_server.md), and [core_engine.md](core_engine.md) against all other architecture docs surfaced the following open questions. See [integration_questions.md](integration_questions.md) for full context on each item.
 
 **Priority levels:**
 - 🔴 **P0 — Blocks MVP**: Architectural contradictions that must be resolved before implementation can begin
@@ -13,12 +13,12 @@ Cross-referencing [ARCHITECTURE.md](ARCHITECTURE.md), [local_frontend.md](local_
 ## Frontend ↔ API Layer Communication
 - [ ] 🔴 **1.1 API process ownership** — Does FastAPI run inside Docker Compose or as a native process managed by Tauri? Affects port binding, startup orchestration, and dev workflow.
 - [ ] 🟡 **1.2 Service discovery** — How does the Tauri app discover FastAPI (and the Tier 2 gateway on port 8001)? Hardcoded ports, Tauri IPC, or Docker networking?
-- [ ] 🟡 **1.3 CORS configuration** — `asgi_web_server.md` allows `http://localhost:3000` (Vite dev), but production Tauri uses `tauri://` or `https://tauri.localhost`. What's the production CORS strategy?
+- [ ] 🟡 **1.3 CORS configuration** — `backend_server.md` allows `http://localhost:3000` (Vite dev), but production Tauri uses `tauri://` or `https://tauri.localhost`. What's the production CORS strategy?
 
 ## Backtest Execution: FastAPI ↔ Celery ↔ NautilusTrader
 - [ ] 🔴 **2.1 Frontend → backtest path** — Contradictory diagrams: one shows `Frontend → FastAPI → Celery`, another shows `Tauri → Redis` directly. Which is canonical?
 - [ ] 🟠 **2.2 WebSocket progress ownership** — Does Tier 1 (FastAPI) or Tier 2 (vanilla ASGI on 8001) own the backtest progress WebSocket?
-- [ ] 🔴 **2.3 NautilusKernel in FastAPI lifespan** — `asgi_web_server.md` initializes a kernel in FastAPI, but all docs say backtests run in Celery workers. What does the FastAPI-hosted kernel do?
+- [ ] 🔴 **2.3 NautilusKernel in FastAPI lifespan** — `backend_server.md` initializes a kernel in FastAPI, but all docs say backtests run in Celery workers. What does the FastAPI-hosted kernel do?
 - [ ] 🟠 **2.4 ProcessPoolExecutor vs Celery** — Both are used for CPU-bound work. What's the decision boundary (skfolio in-process vs backtests in Celery)? Does `ProcessPoolExecutor` conflict with `uvicorn --workers 4`?
 
 ## Two-Tier Architecture
@@ -64,6 +64,6 @@ Cross-referencing [ARCHITECTURE.md](ARCHITECTURE.md), [local_frontend.md](local_
 - [ ] 🟠 **14.2 Strategy dry-run validation** — What does NautilusTrader "dry-run parse" mean? Does it execute user code in FastAPI's process, conflicting with sandboxing (7.1)?
 - [ ] 🔴 **14.3 Strategy code serialization** — Celery uses JSON serialization, but strategies are Python classes. How does code travel from Monaco → PostgreSQL → Celery worker → NautilusTrader?
 - [ ] 🟠 **15.1 Data type conversion stage** — At which pipeline stage are provider responses converted to NautilusTrader `Bar`/`QuoteTick` types (ingestion time vs catalog read time)?
-- [x] 🟠 **16.1 Granian vs Uvicorn contradiction** — `python_rust_or_go.md` recommends Granian; `asgi_web_server.md` recommends Uvicorn. Which is canonical? Update the outdated doc. **RESOLVED: Gunicorn+Uvicorn Raw ASGI is the default** (see asgi_web_server.md extended benchmarks).
+- [x] 🟠 **16.1 Granian vs Uvicorn contradiction** — `python_rust_or_go.md` recommends Granian; `backend_server.md` recommends Uvicorn. Which is canonical? Update the outdated doc. **RESOLVED: Gunicorn+Uvicorn Raw ASGI is the default** (see `backend_server.md` extended benchmarks).
 - [ ] 🟠 **17.1 NautilusTrader → skfolio handoff** — No doc defines how NautilusTrader trade results are converted to the asset-return DataFrames that skfolio expects. Who does the conversion, and where?
 - [ ] 🟢 **18.1 Live/paper trading scope** — `core_engine.md` highlights backtest-live parity as the key value prop, but no doc describes the live trading path. Is this MVP or future? Should docs explicitly label it?

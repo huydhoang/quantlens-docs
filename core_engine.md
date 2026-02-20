@@ -233,7 +233,7 @@ NautilusTrader as the sole engine aligns cleanly with every existing architectur
 | Component | Integration |
 |-----------|-------------|
 | **Celery workers** ([task_queue.md](task_queue.md)) | One `BacktestNode` per prefork worker process — NautilusTrader's singleton constraint matches Celery's process isolation model |
-| **FastAPI on Uvicorn** ([asgi_web_server.md](asgi_web_server.md)) | API layer enqueues backtest jobs; NautilusTrader runs in workers, not in the web process — clean separation |
+| **FastAPI on Uvicorn** ([backend_server.md](backend_server.md)) | API layer enqueues backtest jobs; NautilusTrader runs in workers, not in the web process — clean separation |
 | **QuestDB → ParquetDataCatalog** ([ohlcv_database.md](ohlcv_database.md)) | Historical OHLCV stored in QuestDB (local Docker), exported to Parquet for NautilusTrader's native data catalog |
 | **skfolio** ([portfolio_opt.md](portfolio_opt.md)) | Portfolio optimization runs independently of the backtest engine — NautilusTrader produces trade results, skfolio optimizes allocations |
 | **Monaco Editor** ([ARCHITECTURE.md](ARCHITECTURE.md)) | Strategy templates target NautilusTrader's `TradingStrategy` API exclusively — one template system, one validation path |

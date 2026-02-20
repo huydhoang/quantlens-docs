@@ -77,7 +77,7 @@ This keeps MVP single-tier. When Tier 2 is added for live trading, market data W
 
 **Recommendation: Remove `NautilusKernel` from FastAPI's lifespan. It conflicts with the established design patterns across all other architecture documents.**
 
-All docs agree: NautilusTrader is a library used in Celery workers, not in the API process. The `NautilusKernel` in `asgi_web_server.md`'s Tier 1 example is incorrect — it conflicts with:
+All docs agree: NautilusTrader is a library used in Celery workers, not in the API process. The `NautilusKernel` in `backend_server.md`'s Tier 1 example is incorrect — it conflicts with:
 - `ARCHITECTURE.md`: "NautilusTrader is a library, not a service"
 - `core_engine.md`: Backtests run in Celery prefork workers
 - The one-`BacktestNode`-per-process constraint
@@ -107,7 +107,7 @@ To avoid conflicts with `uvicorn --workers`, use `ProcessPoolExecutor(max_worker
 
 **Recommendation: MVP is single-tier (FastAPI on port 8000 only). Tier 2 is explicitly future scope, to be added when live trading features are implemented.**
 
-`asgi_web_server.md`'s own final verdict says: "start with FastAPI on Uvicorn. When live trading is added, extract real-time endpoints." Both `ARCHITECTURE.md` and `local_frontend.md` show only a single API layer. Label Tier 2 code in `asgi_web_server.md` as "Future — Live Trading" to avoid confusion.
+`backend_server.md`'s own final verdict says: "start with FastAPI on Uvicorn. When live trading is added, extract real-time endpoints." Both `ARCHITECTURE.md` and `local_frontend.md` show only a single API layer. Label Tier 2 code in `backend_server.md` as "Future — Live Trading" to avoid confusion.
 
 ### 3.2 Shared NautilusTrader kernel — 🟠
 
@@ -132,7 +132,7 @@ When Tier 2 is implemented:
 | ILP over HTTP | 9000 | Alternative for environments where TCP sockets are inconvenient (e.g., serverless) — not primary |
 | PGWire (asyncpg) | 8812 | All reads (`SAMPLE BY`, `LATEST ON` queries), ad-hoc single-row inserts from Tier 2 |
 
-The Tier 2 code in `asgi_web_server.md` that uses `pool.execute("INSERT INTO ohlcv_1m ...")` is acceptable for individual tick writes but suboptimal for bulk ingestion. For the data ingestion pipeline, prefer ILP over TCP.
+The Tier 2 code in `backend_server.md` that uses `pool.execute("INSERT INTO ohlcv_1m ...")` is acceptable for individual tick writes but suboptimal for bulk ingestion. For the data ingestion pipeline, prefer ILP over TCP.
 
 ### 4.4 PostgreSQL connection pools — 🟡
 
@@ -163,7 +163,7 @@ MVP data flow:
 2. Ingestion tasks write to QuestDB via ILP over TCP.
 3. No real-time streaming ingestion in MVP — backtest data is batch-loaded.
 
-When Tier 2 is added, the vanilla ASGI gateway ingests real-time WebSocket streams (Finnhub, Alpaca) and writes to QuestDB while simultaneously serving data to the React frontend. This collapses ingestion and serving into a single process, which is the design shown in `asgi_web_server.md`.
+When Tier 2 is added, the vanilla ASGI gateway ingests real-time WebSocket streams (Finnhub, Alpaca) and writes to QuestDB while simultaneously serving data to the React frontend. This collapses ingestion and serving into a single process, which is the design shown in `backend_server.md`.
 
 ### 5.2 Finnhub trade → OHLCV mismatch — 🟠
 
@@ -474,7 +474,7 @@ This approach:
 
 Extended benchmarks on QuantLens's actual CPU-bound workload (skfolio portfolio optimization) show that Gunicorn+Uvicorn Raw ASGI wins the critical CPU-burst scenario, has a lower memory footprint, requires no non-obvious tuning, and produces cleaner code than FastAPI or Granian alternatives. The Granian recommendation in `python_rust_or_go.md` has been updated to reflect this. The "Performance Optimization Strategy" section now reads:
 
-> Use Gunicorn+Uvicorn Raw ASGI for HTTP handling. See [asgi_web_server.md](asgi_web_server.md) for the benchmark-driven rationale.
+> Use Gunicorn+Uvicorn Raw ASGI for HTTP handling. See [backend_server.md](backend_server.md) for the benchmark-driven rationale.
 
 FastAPI is only introduced when WebSocket support is explicitly required.
 
@@ -520,4 +520,4 @@ For MVP, QuantLens is a **backtest-only** tool. The backtest-live parity claim i
 Add a note to `core_engine.md`:
 > **MVP Scope:** QuantLens v1 supports backtesting only. Live and paper trading via broker adapters (Binance, Interactive Brokers, etc.) are planned for a future release. The architecture is designed so that strategies written for backtesting will run in live mode with zero code changes when this feature is added.
 
-The Tier 2 real-time gateway in `asgi_web_server.md` is the foundation for this future work and should be labeled accordingly.
+The Tier 2 real-time gateway in `backend_server.md` is the foundation for this future work and should be labeled accordingly.

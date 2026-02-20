@@ -96,7 +96,7 @@ sequenceDiagram
     participant React as React Component
     participant Monaco as Monaco Editor
     participant PyLinter as Python Linter<br/>Pyodide WASM
-    participant FastAPI as FastAPI Backend
+    participant API as Raw ASGI API
     participant Nautilus as NautilusTrader
     
     User->>React: Open Strategy Editor
@@ -104,12 +104,12 @@ sequenceDiagram
     Monaco->>Monaco: Load Python Syntax Colorization
     
     alt New Strategy
-        React->>FastAPI: GET /api/strategies/template
-        FastAPI-->>React: Return template code
+        React->>API: GET /api/strategies/template
+        API-->>React: Return template code
         React->>Monaco: Set Value
     else Existing Strategy
-        React->>FastAPI: GET /api/strategies/:id
-        FastAPI-->>React: Return strategy code
+        React->>API: GET /api/strategies/:id
+        API-->>React: Return strategy code
         React->>Monaco: Set Value
     end
     
@@ -119,15 +119,15 @@ sequenceDiagram
     PyLinter-->>Monaco: Set Model Markers
     
     User->>React: Click "Validate Strategy"
-    React->>FastAPI: POST /api/strategies/validate
-    FastAPI->>Nautilus: Dry-run parse
-    Nautilus-->>FastAPI: Validation Result
-    FastAPI-->>React: Success/Error
+    React->>API: POST /api/strategies/validate
+    API->>Nautilus: Dry-run parse
+    Nautilus-->>API: Validation Result
+    API-->>React: Success/Error
     
     User->>React: Save Strategy
-    React->>FastAPI: POST /api/strategies
-    FastAPI->>Nautilus: Register Strategy Class
-    FastAPI-->>React: Strategy ID
+    React->>API: POST /api/strategies
+    API->>Nautilus: Register Strategy Class
+    API-->>React: Strategy ID
 ```
 
 ## Backtest Execution Flow
@@ -136,7 +136,7 @@ sequenceDiagram
 sequenceDiagram
     autonumber
     participant UI as React UI
-    participant API as FastAPI
+    participant API as Raw ASGI API
     participant Queue as Task Queue<br/>Celery/Redis
     participant Worker as Celery Worker<br/>prefork pool
     participant Nautilus as NautilusTrader<br/>BacktestEngine
@@ -203,7 +203,7 @@ graph TB
     end
     
     subgraph "Live Data for UI"
-        T -->|IEX Quotes| J[FastAPI WebSocket]
+        T -->|IEX Quotes| J[Raw ASGI WebSocket]
         F -->|Quotes| J
         A -->|Quotes| J
         J -->|WebSocket| K[Market Data Hook]
@@ -430,6 +430,6 @@ Based on this architecture, here are critical implementation points:
 - Implement resource limits (max backtest duration, memory caps)
 
 **6. Portfolio Optimization (skfolio)**
-- Use `skfolio` as the optimization engine with a scikit-learn-native `fit/predict/transform` workflow for clean FastAPI dependency injection.
+- Use `skfolio` as the optimization engine with a scikit-learn-native `fit/predict/transform` workflow. In the Raw ASGI layer, call skfolio directly in request handlers using `asyncio.get_running_loop().run_in_executor` for the CPU-bound optimization step.
 - Default to downside-aware risk objectives (`CVaR`) and monitor drawdown-focused metrics (max drawdown, conditional drawdown, tracking error).
 - Use walk-forward cross-validation for optimization endpoints to reduce overfitting in production allocation workflows.

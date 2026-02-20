@@ -1,10 +1,10 @@
 # Integration Questions
 
-Deep-dive cross-referencing of [ARCHITECTURE.md](ARCHITECTURE.md), [local_frontend.md](local_frontend.md), [asgi_web_server.md](asgi_web_server.md), and [core_engine.md](core_engine.md) against all other architecture documents surfaced the following integration questions, contradictions, and unresolved design decisions.
+Deep-dive cross-referencing of [ARCHITECTURE.md](ARCHITECTURE.md), [local_frontend.md](local_frontend.md), [backend_server.md](backend_server.md), and [core_engine.md](core_engine.md) against all other architecture documents surfaced the following integration questions, contradictions, and unresolved design decisions.
 
 ---
 
-## Cross-Review: ARCHITECTURE.md × local_frontend.md × asgi_web_server.md
+## Cross-Review: ARCHITECTURE.md × local_frontend.md × backend_server.md
 
 ---
 
@@ -21,7 +21,7 @@ Deep-dive cross-referencing of [ARCHITECTURE.md](ARCHITECTURE.md), [local_fronte
 
 ### 1.2 How does the Tauri app discover the FastAPI backend?
 
-`local_frontend.md` hardcodes `ws://localhost:8000/ws/backtest` and `http://localhost:3000` (React dev server in CORS config). `asgi_web_server.md` adds a second service on port 8001 for the real-time gateway.
+`local_frontend.md` hardcodes `ws://localhost:8000/ws/backtest` and `http://localhost:3000` (React dev server in CORS config). `backend_server.md` adds a second service on port 8001 for the real-time gateway.
 
 **Question:** What's the service discovery mechanism?
 - Are ports hardcoded in the frontend, or does Tauri's Rust backend provide them via IPC?
@@ -30,7 +30,7 @@ Deep-dive cross-referencing of [ARCHITECTURE.md](ARCHITECTURE.md), [local_fronte
 
 ### 1.3 CORS configuration contradiction
 
-`asgi_web_server.md` sets `allow_origins=["http://localhost:3000"]` (Vite dev server). But in production, the Tauri webview loads from a `tauri://` or `https://tauri.localhost` origin, not `http://localhost:3000`.
+`backend_server.md` sets `allow_origins=["http://localhost:3000"]` (Vite dev server). But in production, the Tauri webview loads from a `tauri://` or `https://tauri.localhost` origin, not `http://localhost:3000`.
 
 **Question:** What's the CORS strategy for the production Tauri build? Options:
 - Tauri's Rust backend proxies all API calls (no CORS needed)
@@ -52,17 +52,17 @@ Deep-dive cross-referencing of [ARCHITECTURE.md](ARCHITECTURE.md), [local_fronte
 
 ### 2.2 WebSocket progress broadcasting — who pushes to the client?
 
-The Backtest Execution Flow in `ARCHITECTURE.md` shows: `Worker → Queue → API → UI (WebSocket)`. But `asgi_web_server.md` (Tier 2) shows a Redis pub/sub pattern where the vanilla ASGI gateway subscribes to Redis channels and forwards to WebSocket clients.
+The Backtest Execution Flow in `ARCHITECTURE.md` shows: `Worker → Queue → API → UI (WebSocket)`. But `backend_server.md` (Tier 2) shows a Redis pub/sub pattern where the vanilla ASGI gateway subscribes to Redis channels and forwards to WebSocket clients.
 
 **Question:** Which service owns the backtest progress WebSocket?
 - **Tier 1 (FastAPI):** As shown in `ARCHITECTURE.md` — FastAPI manages WebSocket connections and receives progress from Celery/Redis
-- **Tier 2 (Vanilla ASGI):** As shown in `asgi_web_server.md` — a separate process on port 8001 handles all WebSocket streaming
+- **Tier 2 (Vanilla ASGI):** As shown in `backend_server.md` — a separate process on port 8001 handles all WebSocket streaming
 
 If it's Tier 1, then backtest progress and market data WebSockets live on different services (FastAPI vs vanilla ASGI). How does the frontend manage two separate WebSocket connections to two different ports?
 
 ### 2.3 NautilusTrader lifespan management in FastAPI
 
-`asgi_web_server.md` Tier 1 implementation shows a `NautilusKernel` initialized in FastAPI's lifespan context:
+`backend_server.md` Tier 1 implementation shows a `NautilusKernel` initialized in FastAPI's lifespan context:
 
 ```python
 @asynccontextmanager
@@ -79,7 +79,7 @@ But `core_engine.md` and `ARCHITECTURE.md` both state that NautilusTrader runs *
 
 ### 2.4 ProcessPoolExecutor vs Celery for CPU-bound work
 
-`asgi_web_server.md` shows:
+`backend_server.md` shows:
 
 ```python
 executor = ProcessPoolExecutor(max_workers=4)
@@ -103,17 +103,17 @@ Meanwhile, `task_queue.md` shows Celery handling all background work including o
 
 ### 3.1 Is the two-tier architecture for MVP or future?
 
-`asgi_web_server.md` presents the hybrid two-tier setup (FastAPI on 8000 + Vanilla ASGI on 8001) as the recommended production architecture. But the final verdict says: "start with **FastAPI on Uvicorn**. When live trading is added, extract real-time endpoints."
+`backend_server.md` presents the hybrid two-tier setup (FastAPI on 8000 + Vanilla ASGI on 8001) as the recommended production architecture. But the final verdict says: "start with **FastAPI on Uvicorn**. When live trading is added, extract real-time endpoints."
 
 The ARCHITECTURE.md and local_frontend.md show only a single API layer (FastAPI).
 
 **Question:** Is the local desktop app (MVP) single-tier or two-tier?
-- If single-tier, should `asgi_web_server.md`'s Tier 2 code be labeled as "future" to avoid confusion?
+- If single-tier, should `backend_server.md`'s Tier 2 code be labeled as "future" to avoid confusion?
 - If two-tier from day one, the Docker Compose config, frontend WebSocket management, and CORS setup all need to account for two backend services
 
 ### 3.2 NautilusKernel shared between tiers
 
-The two-tier diagram in `asgi_web_server.md` shows both tiers connecting to a "Shared Layer" containing `NautilusTrader kernel`. But NautilusTrader enforces a **one-BacktestNode-per-process** constraint (documented in `ARCHITECTURE.md` and `core_engine.md`).
+The two-tier diagram in `backend_server.md` shows both tiers connecting to a "Shared Layer" containing `NautilusTrader kernel`. But NautilusTrader enforces a **one-BacktestNode-per-process** constraint (documented in `ARCHITECTURE.md` and `core_engine.md`).
 
 **Question:** How do two separate Uvicorn processes (Tier 1 + Tier 2) share a NautilusTrader kernel?
 - Is the "shared" kernel a misconception? Each tier would need its own kernel instance
@@ -138,7 +138,7 @@ The `psycopg2` compatibility issues (no scrollable cursors) are not a concern be
 
 ### 4.2 QuestDB access protocol inconsistency
 
-`asgi_web_server.md` shows two different QuestDB access patterns:
+`backend_server.md` shows two different QuestDB access patterns:
 - **Writes:** HTTP REST (Influx Line Protocol) via `session.post("http://localhost:9000/write", data=line)`
 - **Reads:** PGWire protocol via `asyncpg.create_pool(dsn="postgresql://localhost:8812/qdb")`
 - **Tier 2 writes:** Also PGWire via `pool.execute("INSERT INTO ohlcv_1m ...")`
@@ -159,7 +159,7 @@ The deployment architecture diagram in `ARCHITECTURE.md` has been updated to sho
 
 ### 4.4 PostgreSQL — single instance or separate per concern?
 
-`ARCHITECTURE.md` shows a single PostgreSQL instance for Strategies, Backtest Results, and User Data. But Celery also uses Redis (not PostgreSQL) as its result backend (`task_queue.md`). Meanwhile, `asgi_web_server.md` references `asyncpg` connections to both PostgreSQL and QuestDB (PGWire).
+`ARCHITECTURE.md` shows a single PostgreSQL instance for Strategies, Backtest Results, and User Data. But Celery also uses Redis (not PostgreSQL) as its result backend (`task_queue.md`). Meanwhile, `backend_server.md` references `asyncpg` connections to both PostgreSQL and QuestDB (PGWire).
 
 **Question:** How many PostgreSQL-compatible connections does the FastAPI app maintain?
 - One `asyncpg` pool for PostgreSQL (strategies, results, users)
@@ -172,7 +172,7 @@ The deployment architecture diagram in `ARCHITECTURE.md` has been updated to sho
 
 ### 5.1 WebSocket fan-in/fan-out architecture
 
-`asgi_web_server.md` Tier 2 shows individual WebSocket connections to Finnhub and Alpaca, with data published to Redis channels. But `ARCHITECTURE.md`'s Data Flow Architecture shows a separate "Data Ingestion Service" with a "Data Normalizer" component.
+`backend_server.md` Tier 2 shows individual WebSocket connections to Finnhub and Alpaca, with data published to Redis channels. But `ARCHITECTURE.md`'s Data Flow Architecture shows a separate "Data Ingestion Service" with a "Data Normalizer" component.
 
 **Question:** Is the data ingestion service the same as the Tier 2 vanilla ASGI gateway, or is it a separate process?
 - If they're the same, the Tier 2 gateway handles both ingestion (Finnhub/Alpaca → QuestDB) and serving (QuestDB → React frontend)
@@ -180,7 +180,7 @@ The deployment architecture diagram in `ARCHITECTURE.md` has been updated to sho
 
 ### 5.2 Finnhub WebSocket data type mismatch
 
-`asgi_web_server.md` Tier 2 code subscribes to `"BINANCE:BTCUSDT"` on Finnhub's WebSocket, which is a crypto trade stream. But `data_providers.md` says Finnhub **Stock Candles (OHLCV) and Tick Data are Premium-only** on the free tier, and the free WebSocket provides real-time **trade streaming** (not OHLCV bars).
+`backend_server.md` Tier 2 code subscribes to `"BINANCE:BTCUSDT"` on Finnhub's WebSocket, which is a crypto trade stream. But `data_providers.md` says Finnhub **Stock Candles (OHLCV) and Tick Data are Premium-only** on the free tier, and the free WebSocket provides real-time **trade streaming** (not OHLCV bars).
 
 **Question:** The Tier 2 code inserts into `ohlcv_1m` table, but the raw Finnhub WebSocket data is individual trades, not OHLCV bars.
 - Is the OHLCV bar generation happening in QuestDB (via `SAMPLE BY`) or in the Python ingestion layer?
@@ -267,7 +267,7 @@ For a local-first single-user app, the threat model is arguably just accidental 
 
 ### 10.1 Custom dataset upload pipeline
 
-`user_stories.md` includes "bring-your-own data (custom datasets I upload via the app UI)." `todos.md` lists this as "Not Started." Neither `ARCHITECTURE.md` nor `asgi_web_server.md` specifies the upload flow.
+`user_stories.md` includes "bring-your-own data (custom datasets I upload via the app UI)." `todos.md` lists this as "Not Started." Neither `ARCHITECTURE.md` nor `backend_server.md` specifies the upload flow.
 
 **Question:** What's the planned pipeline?
 - File format support (CSV, Parquet, Excel)?
@@ -277,7 +277,7 @@ For a local-first single-user app, the threat model is arguably just accidental 
 
 ### 10.2 Authentication and authorization
 
-`ARCHITECTURE.md` database schema includes a `USERS` table. `asgi_web_server.md`'s two-tier diagram mentions "JWT auth" for Tier 1. But for a local-first single-user desktop app:
+`ARCHITECTURE.md` database schema includes a `USERS` table. `backend_server.md`'s two-tier diagram mentions "JWT auth" for Tier 1. But for a local-first single-user desktop app:
 
 **Question:** Is authentication needed for the local app?
 - If single-user, why is there a USERS table?
@@ -287,7 +287,7 @@ For a local-first single-user app, the threat model is arguably just accidental 
 
 ### 10.3 Error handling and retry strategy
 
-`asgi_web_server.md` Tier 2 shows a bare `except Exception` with a 5-second reconnect delay for Finnhub WebSocket failures. `task_queue.md` shows Celery retry with `max_retries=2` and `countdown=30`.
+`backend_server.md` Tier 2 shows a bare `except Exception` with a 5-second reconnect delay for Finnhub WebSocket failures. `task_queue.md` shows Celery retry with `max_retries=2` and `countdown=30`.
 
 **Question:** What's the unified error handling strategy?
 - Data provider connection failures: exponential backoff? circuit breaker?
@@ -437,7 +437,7 @@ But the data flow in `ARCHITECTURE.md` and `data_providers.md` shows data going 
 
 ### 16.1 Resolution: Gunicorn+Uvicorn Raw ASGI is the canonical default
 
-Extended benchmarks on QuantLens's actual CPU-bound workload (skfolio portfolio optimization) confirm that **Gunicorn+Uvicorn Raw ASGI** is the default server stack. `python_rust_or_go.md` has been updated to remove the Granian recommendation. `asgi_web_server.md` now documents the extended benchmark results and the final decision: Gunicorn+Uvicorn Raw ASGI by default; FastAPI on Gunicorn+Uvicorn only when WebSocket support is explicitly required.
+Extended benchmarks on QuantLens's actual CPU-bound workload (skfolio portfolio optimization) confirm that **Gunicorn+Uvicorn Raw ASGI** is the default server stack. `python_rust_or_go.md` has been updated to remove the Granian recommendation. `backend_server.md` now documents the extended benchmark results and the final decision: Gunicorn+Uvicorn Raw ASGI by default; FastAPI on Gunicorn+Uvicorn only when WebSocket support is explicitly required.
 
 ---
 
@@ -469,4 +469,4 @@ But no other document describes the live trading architecture:
 - `core_engine.md` mentions broker adapters (Binance, Interactive Brokers, OKX, Bybit) — are any of these configured in QuantLens, or is live trading entirely future scope?
 - `data_providers.md` says Alpaca is for "paper trading only." Does QuantLens have a paper trading mode, or is this deferred?
 - If live/paper trading is future scope, should `core_engine.md` explicitly label it as such to avoid setting incorrect expectations about MVP capabilities?
-- The `asgi_web_server.md` Tier 2 real-time gateway assumes live signal processing with `nautilus.process_tick()`. Is this the live trading path, and if so, how does it relate to the Tier 1 backtest workflow?
+- The `backend_server.md` Tier 2 real-time gateway assumes live signal processing with `nautilus.process_tick()`. Is this the live trading path, and if so, how does it relate to the Tier 1 backtest workflow?
