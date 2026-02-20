@@ -584,6 +584,7 @@ def bench_rocketry(scenario: dict) -> dict:
 def bench_procrastinate(scenario: dict) -> dict:
     import asyncio
     import procrastinate
+    from procrastinate.contrib.aiopg import AiopgConnector
 
     dsn = os.environ.get(
         "PROCRASTINATE_URL", "postgresql://bench:bench@localhost:5432/bench"
@@ -591,7 +592,7 @@ def bench_procrastinate(scenario: dict) -> dict:
     count = scenario["count"]
 
     async def _run(n):
-        connector = procrastinate.AiopgConnector(dsn=dsn)
+        connector = AiopgConnector(dsn=dsn)
         app = procrastinate.App(connector=connector)
 
         @app.task

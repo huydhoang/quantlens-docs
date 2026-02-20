@@ -129,14 +129,17 @@ jobs:
           echo "$HOME/go/bin" >> "$GITHUB_PATH"
 
       - name: Apply Procrastinate schema
+        continue-on-error: true
         run: |
           python - << 'EOF'
-          import asyncio, procrastinate
+          import asyncio
+          import procrastinate
+          from procrastinate.contrib.aiopg import AiopgConnector
 
           async def _apply():
-              connector = procrastinate.AiopgConnector()
+              connector = AiopgConnector(dsn="postgresql://bench:bench@localhost:5432/bench")
               app = procrastinate.App(connector=connector)
-              async with app.open_async(dsn="postgresql://bench:bench@localhost:5432/bench"):
+              async with app.open_async():
                   await app.schema_manager.apply_schema_async()
 
           asyncio.run(_apply())
