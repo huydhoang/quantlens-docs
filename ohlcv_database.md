@@ -467,7 +467,7 @@ The decision is driven by benchmark results across 4 leading time-series databas
 
 **Why not InfluxDB**: Catastrophic on analytical queries (917ms full-table scans, 13x slower than QuestDB) makes it unsuitable despite fast simple queries.
 
-**Docker Compose ships with QuestDB** as documented in system_design.md.
+**Docker Compose ships with QuestDB** as documented in ARCHITECTURE.md.
 
 ---
 

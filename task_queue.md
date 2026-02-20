@@ -8,7 +8,7 @@
 
 ## Why a Task Queue
 
-Backtests are CPU-intensive, long-running jobs (seconds to minutes per run). They cannot execute synchronously in the API request cycle. The system design (see [system_design.md](system_design.md)) defines a **Task Queue → Worker → NautilusTrader** pipeline:
+Backtests are CPU-intensive, long-running jobs (seconds to minutes per run). They cannot execute synchronously in the API request cycle. The system design (see [ARCHITECTURE.md](ARCHITECTURE.md)) defines a **Task Queue → Worker → NautilusTrader** pipeline:
 
 1. **API** receives backtest request, creates a job record, enqueues to the task queue, and returns `202 Accepted`
 2. **Worker** picks up the job, initializes the NautilusTrader engine, streams data, and runs the simulation
@@ -90,7 +90,7 @@ FluxQueue's Rust performance advantage is largely irrelevant for QuantLens — t
 
 The existing system design and language decision documents already specify Celery:
 
-- [system_design.md](system_design.md): Backtest Execution Flow diagram shows `Task Queue (BullMQ/Redis)` — Celery fills this role on the Python side
+- [ARCHITECTURE.md](ARCHITECTURE.md): Backtest Execution Flow diagram shows `Task Queue (BullMQ/Redis)` — Celery fills this role on the Python side
 - [python_rust_or_go.md](python_rust_or_go.md): Architecture diagram shows `Redis Queue (BullMQ/Celery)` with a `Celery Worker` pool
 - [README.md](README.md): Lists `Celery Workers` under the backend stack
 

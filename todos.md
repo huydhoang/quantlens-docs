@@ -1,6 +1,6 @@
 # Integration Questions
 
-Cross-referencing [system_design.md](system_design.md), [local_frontend.md](local_frontend.md), [asgi_web_server.md](asgi_web_server.md), and [core_engine.md](core_engine.md) against all other architecture docs surfaced the following open questions. See [integration_questions.md](integration_questions.md) for full context on each item.
+Cross-referencing [ARCHITECTURE.md](ARCHITECTURE.md), [local_frontend.md](local_frontend.md), [asgi_web_server.md](asgi_web_server.md), and [core_engine.md](core_engine.md) against all other architecture docs surfaced the following open questions. See [integration_questions.md](integration_questions.md) for full context on each item.
 
 **Priority levels:**
 - 🔴 **P0 — Blocks MVP**: Architectural contradictions that must be resolved before implementation can begin
@@ -22,13 +22,13 @@ Cross-referencing [system_design.md](system_design.md), [local_frontend.md](loca
 - [ ] 🟠 **2.4 ProcessPoolExecutor vs Celery** — Both are used for CPU-bound work. What's the decision boundary (skfolio in-process vs backtests in Celery)? Does `ProcessPoolExecutor` conflict with `uvicorn --workers 4`?
 
 ## Two-Tier Architecture
-- [ ] 🔴 **3.1 MVP scope** — Is the two-tier setup (FastAPI on 8000 + vanilla ASGI on 8001) for MVP or future? `system_design.md` and `local_frontend.md` show only a single API layer.
+- [ ] 🔴 **3.1 MVP scope** — Is the two-tier setup (FastAPI on 8000 + vanilla ASGI on 8001) for MVP or future? `ARCHITECTURE.md` and `local_frontend.md` show only a single API layer.
 - [ ] 🟠 **3.2 Shared NautilusTrader kernel** — The two-tier diagram shows a "shared" kernel, but NautilusTrader enforces one-BacktestNode-per-process. How do two Uvicorn processes share it?
 
 ## Data Layer
-- [x] 🔴 **4.1 QuestDB vs TimescaleDB** — `system_design.md` uses QuestDB; `ohlcv_database.md` recommends TimescaleDB for Phase 1. Which ships in Docker Compose? **RESOLVED: QuestDB** (see ohlcv_database.md for benchmark-driven decision)
+- [x] 🔴 **4.1 QuestDB vs TimescaleDB** — `ARCHITECTURE.md` uses QuestDB; `ohlcv_database.md` recommends TimescaleDB for Phase 1. Which ships in Docker Compose? **RESOLVED: QuestDB** (see ohlcv_database.md for benchmark-driven decision)
 - [ ] 🟠 **4.2 QuestDB write protocol** — Three patterns shown: ILP over HTTP (port 9000), ILP over TCP (port 9009), PGWire SQL INSERT (port 8812). Which is canonical, or are different protocols for different tiers?
-- [x] 🟠 **4.3 MongoDB → DuckDB** — MongoDB Docker container had persistent connection errors during local benchmarking. **RESOLVED: DuckDB** (embedded, in-process) replaces MongoDB for fundamentals and economic indicators. See nosql_database.md for rationale.
+- [x] 🟠 **4.3 MongoDB → DuckDB** — MongoDB Docker container had persistent connection errors during local benchmarking. **RESOLVED: DuckDB** (embedded, in-process) replaces MongoDB for fundamentals and economic indicators. See fundamentals_database.md for rationale.
 - [ ] 🟡 **4.4 PostgreSQL connection pools** — How many asyncpg pools does FastAPI maintain (PostgreSQL + QuestDB PGWire + potentially TimescaleDB)?
 
 ## Real-Time Data Flow
@@ -41,7 +41,7 @@ Cross-referencing [system_design.md](system_design.md), [local_frontend.md](loca
 - [ ] 🟠 **6.2 Startup orchestration** — Does the user run `docker compose up` manually before opening Tauri, or does Tauri launch Docker on startup? What's the health check / retry UX?
 
 ## Strategy Execution Security
-- [ ] 🟡 **7.1 Sandboxing mechanism** — `system_design.md` says "restricted environment, no network access" but specifies no mechanism. What's the interim plan for MVP? For a single-user local app, is the threat model accidental harm (infinite loops) rather than malicious code?
+- [ ] 🟡 **7.1 Sandboxing mechanism** — `ARCHITECTURE.md` says "restricted environment, no network access" but specifies no mechanism. What's the interim plan for MVP? For a single-user local app, is the threat model accidental harm (infinite loops) rather than malicious code?
 
 ## Platform App Integration (Future)
 - [ ] 🟢 **8.1 Local → platform data flow** — What exactly is "submit results"? Raw trades, equity curves, strategy code? What's the API contract and auth model between local and platform apps?
@@ -55,12 +55,12 @@ Cross-referencing [system_design.md](system_design.md), [local_frontend.md](loca
 - [ ] 🟡 **10.3 Error handling / retry strategy** — Define unified approach for data provider failures, backtest failures, QuestDB write failures, and frontend WebSocket reconnection.
 
 ## Core Engine (core_engine.md cross-review)
-- [ ] 🔴 **11.1 BacktestEngine vs BacktestNode API assignment** — `system_design.md` class diagram uses `BacktestEngine`; `task_queue.md` uses `BacktestNode` in Celery. Which API is used where (FastAPI validation vs Celery execution)? Can `BacktestEngine.reset()` reuse engines within prefork workers?
+- [ ] 🔴 **11.1 BacktestEngine vs BacktestNode API assignment** — `ARCHITECTURE.md` class diagram uses `BacktestEngine`; `task_queue.md` uses `BacktestNode` in Celery. Which API is used where (FastAPI validation vs Celery execution)? Can `BacktestEngine.reset()` reuse engines within prefork workers?
 - [ ] 🔴 **12.1 QuestDB → Parquet export mechanism** — `core_engine.md` assumes a QuestDB → Parquet → ParquetDataCatalog pipeline but no doc specifies how data moves from QuestDB to Parquet files (COPY command, Celery Beat job, or dual-write).
 - [ ] 🟠 **12.2 Parquet catalog Docker volume** — Celery workers and the data ingestion service need shared access to `/data/validated`. How is this mapped in Docker Compose?
 - [ ] 🟡 **13.1 Parameter sweep duration** — With 4 Celery workers and hundreds of combinations, what's the expected sweep time? Is there UI progress for sweeps?
 - [ ] 🟡 **13.2 Memory pressure from parallel BacktestNodes** — 4 prefork workers each loading a full ParquetDataCatalog. Does NautilusTrader use memory-mapped files, or does each worker hold a separate copy?
-- [ ] 🟠 **14.1 Strategy template system** — Referenced in `core_engine.md` and `system_design.md` but never defined. What templates exist? What Monaco completions are offered?
+- [ ] 🟠 **14.1 Strategy template system** — Referenced in `core_engine.md` and `ARCHITECTURE.md` but never defined. What templates exist? What Monaco completions are offered?
 - [ ] 🟠 **14.2 Strategy dry-run validation** — What does NautilusTrader "dry-run parse" mean? Does it execute user code in FastAPI's process, conflicting with sandboxing (7.1)?
 - [ ] 🔴 **14.3 Strategy code serialization** — Celery uses JSON serialization, but strategies are Python classes. How does code travel from Monaco → PostgreSQL → Celery worker → NautilusTrader?
 - [ ] 🟠 **15.1 Data type conversion stage** — At which pipeline stage are provider responses converted to NautilusTrader `Bar`/`QuoteTick` types (ingestion time vs catalog read time)?

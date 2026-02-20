@@ -1,6 +1,6 @@
 # Data Providers — Comprehensive Analysis
 
-This document consolidates the analysis of free-tier data providers for the backtesting service built on NautilusTrader and skfolio. It covers provider capabilities, API constraints, data quality concerns, and a multi-provider integration strategy aligned with the system architecture defined in `system_design.md`.
+This document consolidates the analysis of free-tier data providers for the backtesting service built on NautilusTrader and skfolio. It covers provider capabilities, API constraints, data quality concerns, and a multi-provider integration strategy aligned with the system architecture defined in `ARCHITECTURE.md`.
 
 ---
 
@@ -161,7 +161,7 @@ All providers use different timestamp formats. Standardize to UTC before catalog
 
 ## Data Layer Architecture
 
-This architecture aligns with the Data Flow Architecture defined in `system_design.md`, extending it with the full provider strategy, validation layer, and acquisition cadences.
+This architecture aligns with the Data Flow Architecture defined in `ARCHITECTURE.md`, extending it with the full provider strategy, validation layer, and acquisition cadences.
 
 ### Data Acquisition Pipeline
 

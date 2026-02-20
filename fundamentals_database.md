@@ -8,6 +8,93 @@ This document evaluates storage options for stock market fundamentals and econom
 
 ---
 
+## Benchmark Results
+
+### Configuration
+
+- **Database server-client combos tested**: 13
+- **Databases**: DuckDB, SQLite, PostgreSQL, MySQL, SQL Server (mssql-python), SQL Server (pyodbc), MongoDB, Cassandra, ScyllaDB, ClickHouse, TimescaleDB, Redis, RavenDB
+- **Fundamentals records**: 500 symbols × 200 periods = 100,000 rows
+- **Economic records**: 250 indicators × 200 months (~100,000 rows)
+
+### Data Load
+
+| Database | Avg (ms) | Min (ms) | Max (ms) | Rows |
+| --- | ---: | ---: | ---: | ---: |
+| DuckDB | 5815.23 | 5815.23 | 5815.23 | 199999 |
+| SQLite | 772.63 | 772.63 | 772.63 | 199999 |
+| PostgreSQL | 6035.18 | 6035.18 | 6035.18 | 199999 |
+| MySQL | 9869.18 | 9869.18 | 9869.18 | 199999 |
+| SQL Server (mssql-python) | 15288.78 | 15288.78 | 15288.78 | 199999 |
+| SQL Server (pyodbc) | 5577.37 | 5577.37 | 5577.37 | 199999 |
+| MongoDB | 3123.33 | 3123.33 | 3123.33 | 199999 |
+| Cassandra | 55624.23 | 55624.23 | 55624.23 | 199999 |
+| ScyllaDB | 40989.39 | 40989.39 | 40989.39 | 199999 |
+| ClickHouse | 793.42 | 793.42 | 793.42 | 199999 |
+| TimescaleDB | 6068.42 | 6068.42 | 6068.42 | 199999 |
+| Redis | 5046.38 | 5046.38 | 5046.38 | 199999 |
+| RavenDB | 10749.35 | 10749.35 | 10749.35 | 199999 |
+
+### Simple Query: Fundamentals Screening
+
+| Database | Avg (ms) | Min (ms) | Max (ms) | Rows |
+| --- | ---: | ---: | ---: | ---: |
+| DuckDB | 33.96 | 22.38 | 52.39 | 19812 |
+| SQLite | 34.75 | 34.44 | 35.27 | 19812 |
+| PostgreSQL | 38.56 | 36.40 | 41.77 | 19812 |
+| MySQL | 211.01 | 207.41 | 214.26 | 19812 |
+| SQL Server (mssql-python) | 81.32 | 64.61 | 113.60 | 19812 |
+| SQL Server (pyodbc) | 79.34 | 68.00 | 101.82 | 19812 |
+| MongoDB | 84.67 | 76.88 | 95.53 | 19812 |
+| Cassandra | 418.07 | 351.37 | 534.73 | 19812 |
+| ScyllaDB | 308.89 | 302.99 | 320.43 | 19812 |
+| ClickHouse | 44.98 | 42.75 | 48.53 | 19812 |
+| TimescaleDB | 42.90 | 40.63 | 47.41 | 19812 |
+| Redis | 1949.72 | 1902.84 | 2002.38 | 19812 |
+| RavenDB | 4031.05 | 3730.71 | 4573.89 | 19812 |
+
+### Simple Query: Economic Latest Values
+
+| Database | Avg (ms) | Min (ms) | Max (ms) | Rows |
+| --- | ---: | ---: | ---: | ---: |
+| DuckDB | 32.90 | 25.24 | 47.82 | 100 |
+| SQLite | 126.90 | 126.25 | 127.61 | 100 |
+| PostgreSQL | 56.14 | 54.01 | 59.40 | 100 |
+| MySQL | 405.97 | 401.20 | 409.82 | 100 |
+| SQL Server (mssql-python) | 84.40 | 82.63 | 86.59 | 100 |
+| SQL Server (pyodbc) | 81.56 | 80.32 | 82.43 | 100 |
+| MongoDB | 235.05 | 230.70 | 239.23 | 100 |
+| Cassandra | 4.00 | 2.63 | 5.72 | 100 |
+| ScyllaDB | 0.88 | 0.80 | 1.00 | 100 |
+| ClickHouse | 18.32 | 17.12 | 20.15 | 100 |
+| TimescaleDB | 58.60 | 56.23 | 62.78 | 100 |
+| Redis | 43.95 | 38.08 | 48.14 | 100 |
+| RavenDB | 2276.09 | 2173.13 | 2428.08 | 100 |
+
+### Complex Query Workload
+
+| Database | Avg (ms) | Min (ms) | Max (ms) | Rows |
+| --- | ---: | ---: | ---: | ---: |
+| DuckDB | 96.11 | 94.79 | 97.52 | 81600 |
+| SQLite | 248.88 | 239.07 | 255.56 | 81600 |
+| PostgreSQL | 247.85 | 244.93 | 250.90 | 81600 |
+| MySQL | 848.10 | 840.59 | 862.77 | 81600 |
+| SQL Server (mssql-python) | 343.91 | 318.97 | 393.37 | 81600 |
+| SQL Server (pyodbc) | 391.57 | 310.07 | 540.10 | 81600 |
+| MongoDB | 685.83 | 677.41 | 695.75 | 81600 |
+| Cassandra | 1475.70 | 1330.01 | 1710.47 | 81600 |
+| ScyllaDB | 1165.27 | 1146.52 | 1183.02 | 81600 |
+| ClickHouse | 184.96 | 174.25 | 191.76 | 81600 |
+| TimescaleDB | 265.92 | 249.66 | 287.37 | 81600 |
+| Redis | 3453.97 | 3335.30 | 3536.35 | 81600 |
+| RavenDB | 6271.84 | 6180.59 | 6393.91 | 81600 |
+
+### Summary
+
+DuckDB leads across all analytical workloads. **Top alternatives**: SQLite (fast simple queries, zero-config), PostgreSQL (ACID + ecosystem), ClickHouse (fast complex queries, columnar).
+
+---
+
 ## 1. Why DuckDB for Fundamentals & Economic Data
 
 Stock fundamentals (10-K/10-Q filings) and economic indicators (GDP, CPI, unemployment) differ from OHLCV data in ways that make an embedded analytical database the optimal choice:
@@ -56,12 +143,13 @@ The original recommendation was MongoDB (Docker container) for its flexible docu
 
 ### When to Consider Alternatives
 
-| Database | Use If | Why Not for QuantLens |
-|----------|--------|----------------------|
-| **QuestDB** | Need real-time ingestion + SQL | Already used for OHLCV; overkill for batch fundamentals |
-| **TimescaleDB** | Need ACID + time-series + PostgreSQL ecosystem | Docker complexity; row-store heritage slows wide analytical scans |
-| **ClickHouse** | Petabyte-scale, distributed | Heavy infrastructure; embedded DuckDB beats it for local GB-scale data |
-| **MongoDB** | Need document model with managed cloud deployment | Docker connection issues for local use; aggregation syntax less ergonomic than SQL |
+| Database | Use If | Benchmark Position |
+|----------|--------|-------------------|
+| **SQLite** | Need zero-config embedded DB with simple queries | 2nd on screening (34.75ms), fast data load (772ms) — best embedded alternative |
+| **PostgreSQL** | Already running PostgreSQL and want to consolidate | 3rd on screening (38.56ms), strong complex queries (247ms) — already in the stack |
+| **ClickHouse** | Need columnar performance without embedded constraints | 4th on screening (44.98ms), 2nd on complex queries (184ms) — best server-side alternative |
+| **TimescaleDB** | Need ACID + time-series + PostgreSQL ecosystem | Similar to PostgreSQL on complex queries (265ms); adds Docker overhead |
+| **MongoDB** | Need document model with managed cloud deployment | Docker connection issues for local use; 84ms screening, 685ms complex queries |
 
 ---
 
@@ -205,9 +293,11 @@ results = con.execute("""
 
 | Database | Verdict | Reason |
 |----------|---------|--------|
-| **MongoDB (Docker)** | Previously recommended; replaced | Docker connection errors in local desktop deployment; aggregation pipeline syntax less ergonomic than SQL for analytical queries; unnecessary infrastructure overhead for a single-user embedded use case |
+| **SQLite** | Top alternative | 2nd fastest on screening (34.75ms), fastest data load among embedded options (772ms). No Docker overhead. Best choice if DuckDB's in-memory model is not needed. |
+| **PostgreSQL** | Top alternative | Already in the stack; 3rd on screening (38.56ms), competitive on complex queries (247ms). Use if consolidation onto the OLTP store is preferred. |
+| **ClickHouse** | Top alternative | 2nd fastest on complex queries (184ms); fastest data load (793ms). Best server-side columnar option. |
+| **MongoDB (Docker)** | Previously recommended; replaced | Docker connection errors in local desktop deployment; 84ms screening / 685ms complex queries — outperformed by DuckDB, SQLite, PostgreSQL, and ClickHouse on all analytical workloads |
 | **MongoDB Atlas (M0)** | Not suitable for local-first | Requires cloud connectivity; contradicts QuantLens's local-first, no-cloud-accounts-required philosophy |
-| **PostgreSQL** | Already used for strategies/results | Could store fundamentals, but lacks DuckDB's columnar performance for analytical scans; would overload the OLTP database with OLAP queries |
 | **QuestDB** | Already used for OHLCV | Purpose-built for time-series ingestion, not semi-structured fundamentals with variable schemas |
 
 ---

@@ -4,7 +4,7 @@
 
 This document evaluates embedded/local vector databases for QuantLens's semantic search and retrieval-augmented generation (RAG) needs. The primary use case is **local LLM chat** — enabling users to query strategy documentation, backtest results, and financial research using natural language, with an LLM grounded by relevant context retrieved from a local vector store. Secondary use cases include semantic search over strategy libraries, similarity-based strategy discovery, and embedding-based anomaly detection on portfolio metrics.
 
-Unlike the time-series ([ohlcv_database.md](ohlcv_database.md)) and document ([nosql_database.md](nosql_database.md)) storage decisions, this evaluation prioritizes **embedded, serverless operation** — no external database process, no network calls, no infrastructure overhead. The vector database must run in-process alongside the Python backend.
+Unlike the time-series ([ohlcv_database.md](ohlcv_database.md)) and document ([fundamentals_database.md](fundamentals_database.md)) storage decisions, this evaluation prioritizes **embedded, serverless operation** — no external database process, no network calls, no infrastructure overhead. The vector database must run in-process alongside the Python backend.
 
 ---
 
@@ -228,7 +228,7 @@ When feeding fundamentals and price patterns to an LLM for financial modeling, v
 
 | Layer | Technology | Purpose |
 |-------|-----------|---------|
-| **Structured Storage** | DuckDB (see [nosql_database.md](nosql_database.md)) | Fundamentals, economic indicators, screening queries |
+| **Structured Storage** | DuckDB (see [fundamentals_database.md](fundamentals_database.md)) | Fundamentals, economic indicators, screening queries |
 | **Time-Series Storage** | QuestDB (see [ohlcv_database.md](ohlcv_database.md)) | OHLCV prices, tick data, market data |
 | **Vector Store** | LanceDB | Expert analyses, company news, pattern embeddings, semantic search |
 | **Orchestration** | Python (LangChain/LlamaIndex) | Retrieve structured + semantic context → LLM prompt |
