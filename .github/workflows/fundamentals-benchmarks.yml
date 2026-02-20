@@ -1,7 +1,7 @@
 name: Fundamentals Database Benchmarks
 
 on:
-  push:
+  workflow_dispatch:
 
 concurrency:
   group: fundamentals-benchmarks-${{ github.ref }}
