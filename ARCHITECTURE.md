@@ -52,7 +52,7 @@ flowchart TD
     end
 
     Frontend -.->|HTTP / WebSocket| API
-    API -.->|Celery / Redis| Nautilus
+    API -.->|Huey / Redis| Nautilus
     API -.->|REST| DataProv
     Nautilus -.->|psycopg / asyncpg| PG
     DataProv -.->|Write| TSDB
@@ -137,8 +137,8 @@ sequenceDiagram
     autonumber
     participant UI as React UI
     participant API as Raw ASGI API
-    participant Queue as Task Queue<br/>Celery/Redis
-    participant Worker as Celery Worker<br/>prefork pool
+    participant Queue as Task Queue<br/>Huey/Redis
+    participant Worker as Huey Worker<br/>process pool
     participant Nautilus as NautilusTrader<br/>BacktestEngine
     participant Data as Data Provider<br/>Tiingo/Alpaca/Finnhub
     participant DB as PostgreSQL
@@ -343,7 +343,7 @@ All services run locally — Docker containers via `docker compose up`, plus emb
 graph TB
     subgraph "Docker Compose (Local)"
         A[Tauri Desktop App<br/>Vite + React SPA]
-        B[Celery Workers<br/>Backtest Engine]
+        B[Huey Workers<br/>Backtest Engine]
         C[Redis<br/>Queue + Cache]
 
         D[PostgreSQL<br/>Strategies · Results · Users]
@@ -403,9 +403,9 @@ Based on this architecture, here are critical implementation points:
 - Add Python linting via Pyodide (WASM) for client-side AST parsing, with markers set via `monaco.editor.setModelMarkers`; deep validation (NautilusTrader import resolution) must happen server-side
 
 **2. NautilusTrader Integration**
-- Run backtests in isolated worker processes — **one `BacktestNode` per process** (NautilusTrader enforces this due to global singleton state: force-stop flag, logger mode, Tokio runtime). Celery `prefork` pool satisfies this naturally.
+- Run backtests in isolated worker processes — **one `BacktestNode` per process** (NautilusTrader enforces this due to global singleton state: force-stop flag, logger mode, Tokio runtime). Huey `--worker-type process` satisfies this naturally.
 - Use `BacktestEngine` (low-level, fine-grained control) or `BacktestNode` with `BacktestRunConfig` objects (high-level, recommended for production). The catalog class is `ParquetDataCatalog`, not `DataCatalog`.
-- NautilusTrader is a **library, not a service** — there is no REST/gRPC API. The API layer enqueues jobs to Celery; workers import and call `nautilus_trader` directly in-process.
+- NautilusTrader is a **library, not a service** — there is no REST/gRPC API. The API layer enqueues jobs to Huey; workers import and call `nautilus_trader` directly in-process.
 - Implement adapter pattern for Tiingo/Finnhub/Alpaca data normalization to Nautilus `Bar`/`QuoteTick`/`TradeTick` types
 
 **3. Tauri + Vite + React Patterns**
