@@ -14,23 +14,19 @@ Cross-referencing [ARCHITECTURE.md](ARCHITECTURE.md), [local_frontend.md](local_
 
 ### Backtest Execution: API Layer ↔ Celery ↔ NautilusTrader
 - [ ] 🔴 **2.1 Frontend → backtest path** — Contradictory diagrams: one shows `Frontend → Raw ASGI API → Celery`, another shows `Tauri → Redis` directly. Which is canonical?
-- [ ] 🟠 **2.2 WebSocket progress ownership** — Does Tier 1 (Raw ASGI on 8000) or Tier 2 (vanilla ASGI on 8001) own the backtest progress WebSocket?
+- [ ] 🟠 **2.2 WebSocket progress ownership** — How does the Raw ASGI API manage per-client Redis pub/sub subscriptions for backtest progress forwarding over WebSocket?
 - [ ] 🔴 **2.3 NautilusTrader in API lifespan** — Earlier examples show a NautilusKernel initialized in the API lifespan, but all docs say backtests run in Celery workers. Should any NautilusTrader component live in the Raw ASGI API process?
 - [ ] 🟠 **2.4 ProcessPoolExecutor vs Celery** — Both are used for CPU-bound work. What's the decision boundary (skfolio in-process vs backtests in Celery)? Does `ProcessPoolExecutor` conflict with Gunicorn `--workers 4`?
 
-### Two-Tier Architecture
-- [ ] 🔴 **3.1 MVP scope** — Is the two-tier setup (Raw ASGI on 8000 + vanilla ASGI on 8001) for MVP or future? `ARCHITECTURE.md` and `local_frontend.md` show only a single API layer.
-- [ ] 🟠 **3.2 Shared NautilusTrader kernel** — A two-tier diagram shows a "shared" kernel, but NautilusTrader enforces one-BacktestNode-per-process. How do two Uvicorn processes share it?
-
 ### Data Layer
 - [x] 🔴 **4.1 QuestDB vs TimescaleDB** — `ARCHITECTURE.md` uses QuestDB; `ohlcv_database.md` recommends TimescaleDB for Phase 1. Which ships in Docker Compose? **RESOLVED: QuestDB** (see ohlcv_database.md for benchmark-driven decision)
-- [ ] 🟠 **4.2 QuestDB write protocol** — Three patterns shown: ILP over HTTP (port 9000), ILP over TCP (port 9009), PGWire SQL INSERT (port 8812). Which is canonical, or are different protocols for different tiers?
+- [ ] 🟠 **4.2 QuestDB write protocol** — Three patterns shown: ILP over HTTP (port 9000), ILP over TCP (port 9009), PGWire SQL INSERT (port 8812). Which is canonical for bulk ingestion vs ad-hoc writes?
 - [x] 🟠 **4.3 MongoDB → DuckDB** — MongoDB Docker container had persistent connection errors during local benchmarking. **RESOLVED: DuckDB** (embedded, in-process) replaces MongoDB for fundamentals and economic indicators. See fundamentals_database.md for rationale.
 - [ ] 🟡 **4.4 PostgreSQL connection pools** — How many asyncpg pools does the Raw ASGI API maintain (PostgreSQL + QuestDB PGWire)?
 
 ### Real-Time Data Flow
-- [ ] 🟠 **5.1 Data ingestion service** — Is the Tier 2 vanilla ASGI gateway also the data ingestion service, or is ingestion a separate process?
-- [ ] 🟠 **5.2 Finnhub trade → OHLCV mismatch** — Tier 2 inserts into `ohlcv_1m`, but Finnhub WebSocket delivers raw trades. Where does bar aggregation happen (QuestDB `SAMPLE BY` or Python)?
+- [ ] 🟠 **5.1 Data ingestion service** — Is the data ingestion service a separate process from the Raw ASGI API, or are long-lived outbound WebSocket connections managed within the same Gunicorn workers?
+- [ ] 🟠 **5.2 Finnhub trade → OHLCV mismatch** — Finnhub WebSocket delivers raw trades, not OHLCV bars. Should ingestion write to a `trades` table with bar aggregation via QuestDB `SAMPLE BY`, rather than inserting directly into `ohlcv_1m`?
 
 ### Strategy Execution Security
 - [ ] 🟡 **7.1 Sandboxing mechanism** — `ARCHITECTURE.md` says "restricted environment, no network access" but specifies no mechanism. What's the interim plan for MVP? For a single-user local app, is the threat model accidental harm (infinite loops) rather than malicious code?
@@ -69,7 +65,7 @@ Cross-referencing [ARCHITECTURE.md](ARCHITECTURE.md), [local_frontend.md](local_
 
 ### Frontend ↔ API Layer Communication
 - [ ] 🔴 **1.1 API process ownership** — Does the Raw ASGI API run inside Docker Compose or as a native process managed by Tauri? Affects port binding, startup orchestration, and dev workflow.
-- [ ] 🟡 **1.2 Service discovery** — How does the Tauri app discover the Raw ASGI API (and the Tier 2 gateway on port 8001)? Hardcoded ports, Tauri IPC, or Docker networking?
+- [ ] 🟡 **1.2 Service discovery** — How does the Tauri app discover the Raw ASGI API on `localhost:8000`? Hardcoded port, Tauri IPC, or Docker networking?
 - [ ] 🟡 **1.3 CORS configuration** — `backend_server.md` production config uses port 8000 with Gunicorn+Uvicorn, but production Tauri uses `tauri://` or `https://tauri.localhost`. What's the production CORS strategy?
 
 ### Tauri Integration

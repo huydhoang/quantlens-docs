@@ -22,13 +22,13 @@ The Deployment Architecture diagram in `ARCHITECTURE.md` (section "Local App (Do
 
 #### 2.2 WebSocket progress ownership — 🟠
 
-**Recommendation: Tier 1 (Raw ASGI on port 8000) owns backtest progress WebSocket for MVP.**
+**Recommendation: The Raw ASGI API (Gunicorn+Uvicorn, port 8000) owns all WebSocket connections — both backtest progress and market data.**
 
 The Backtest Execution Flow sequence diagram in `ARCHITECTURE.md` shows `API → UI` via WebSocket, placing progress broadcasting in the main API process. The pattern:
 1. Celery worker publishes progress to a Redis channel (e.g., `backtest:{id}:progress`).
 2. The Raw ASGI API subscribes to that channel and forwards messages to the connected WebSocket client.
 
-This keeps MVP single-tier. When Tier 2 is added for live trading, market data WebSockets move to port 8001, but backtest progress stays in Tier 1 since it's tied to the request lifecycle.
+All WebSocket traffic (backtest progress, market data, live signals) flows through the single Gunicorn+Uvicorn endpoint — there is no separate port or process for real-time data.
 
 #### 2.3 NautilusTrader lifespan management in the API process — 🔴
 
@@ -58,25 +58,6 @@ To avoid conflicts with Gunicorn's `--workers` flag, use `ProcessPoolExecutor(ma
 
 ---
 
-### Two-Tier Architecture
-
-#### 3.1 MVP scope — 🔴
-
-**Recommendation: MVP is single-tier (Gunicorn+Uvicorn Raw ASGI on port 8000 only). Tier 2 is explicitly future scope, to be added when live trading features are implemented.**
-
-`backend_server.md` confirms Gunicorn+Uvicorn Raw ASGI as the default stack. Both `ARCHITECTURE.md` and `local_frontend.md` show only a single API layer. Label any Tier 2 code snippets as "Future — Live Trading" to avoid confusion.
-
-#### 3.2 Shared NautilusTrader kernel — 🟠
-
-**Recommendation: The "shared kernel" in any two-tier diagram is a misconception. Each tier runs its own process; NautilusTrader instances are per-process.**
-
-When Tier 2 is implemented:
-- Tier 2 does not need a full `BacktestNode`. It uses lightweight NautilusTrader components (data types, indicator calculations) — or processes ticks without NautilusTrader at all, using custom signal logic.
-- The "shared layer" is Redis pub/sub (for cross-tier communication) and shared databases (QuestDB, PostgreSQL), not a shared in-process kernel.
-- Update any two-tier diagram to remove "NautilusTrader kernel" from the shared layer and replace with "Redis pub/sub · Shared databases."
-
----
-
 ### Data Layer
 
 #### 4.2 QuestDB write protocol — 🟠
@@ -87,9 +68,9 @@ When Tier 2 is implemented:
 |----------|------|----------|
 | ILP over TCP | 9009 | Bulk historical data ingestion (Tiingo/Alpaca batch downloads) — highest throughput |
 | ILP over HTTP | 9000 | Alternative for environments where TCP sockets are inconvenient (e.g., serverless) — not primary |
-| PGWire (asyncpg) | 8812 | All reads (`SAMPLE BY`, `LATEST ON` queries), ad-hoc single-row inserts from Tier 2 |
+| PGWire (asyncpg) | 8812 | All reads (`SAMPLE BY`, `LATEST ON` queries), ad-hoc single-row inserts for real-time ingestion |
 
-Tier 2 code that uses `pool.execute("INSERT INTO ohlcv_1m ...")` is acceptable for individual tick writes but suboptimal for bulk ingestion. For the data ingestion pipeline, prefer ILP over TCP.
+For the data ingestion pipeline, prefer ILP over TCP. PGWire SQL INSERT is acceptable for low-throughput individual writes (e.g., a single real-time tick from a Gunicorn worker) but should not be used for bulk loads.
 
 #### 4.4 PostgreSQL connection pools — 🟡
 
@@ -113,20 +94,20 @@ Each pool is configured independently (different pool sizes, timeouts). No abstr
 
 #### 5.1 Data ingestion service — 🟠
 
-**Recommendation: For MVP, data ingestion is a Celery Beat scheduled task, not a separate service. When Tier 2 is added, the vanilla ASGI gateway handles both ingestion and serving.**
+**Recommendation: For MVP, data ingestion is a Celery Beat scheduled task running within the unified Gunicorn+Uvicorn stack.**
 
 MVP data flow:
 1. Celery Beat triggers periodic data ingestion tasks (nightly Tiingo EOD, weekly Alpaca intraday backfill).
 2. Ingestion tasks write to QuestDB via ILP over TCP.
 3. No real-time streaming ingestion in MVP — backtest data is batch-loaded.
 
-When Tier 2 is added, the vanilla ASGI gateway ingests real-time WebSocket streams (Finnhub, Alpaca) and writes to QuestDB while simultaneously serving data to the React frontend. This collapses ingestion and serving into a single process.
+For live trading (future scope), real-time WebSocket streams from Finnhub/Alpaca can be managed as long-lived asyncio tasks within the Raw ASGI process, publishing to Redis and writing to QuestDB from within the same Gunicorn workers.
 
 #### 5.2 Finnhub trade → OHLCV mismatch — 🟠
 
 **Recommendation: Insert raw trades into a `trades` table; generate OHLCV bars via QuestDB's `SAMPLE BY`.**
 
-The Tier 2 code should insert into a `trades` table (not `ohlcv_1m`):
+The ingestion service should insert into a `trades` table (not `ohlcv_1m`):
 
 ```sql
 INSERT INTO trades (timestamp, symbol, price, volume) VALUES ($1, $2, $3, $4);
@@ -373,8 +354,6 @@ For MVP, QuantLens is a **backtest-only** tool. The backtest-live parity claim i
 Add a note to `core_engine.md`:
 > **MVP Scope:** QuantLens v1 supports backtesting only. Live and paper trading via broker adapters (Binance, Interactive Brokers, etc.) are planned for a future release. The architecture is designed so that strategies written for backtesting will run in live mode with zero code changes when this feature is added.
 
-The Tier 2 real-time gateway is the foundation for this future work and should be labeled accordingly.
-
 ---
 
 ## Frontend
@@ -396,7 +375,7 @@ The `ARCHITECTURE.md` Deployment Architecture diagram is authoritative — the R
 
 **Recommendation: Hardcode ports in a frontend config module; use environment variables for overrides.**
 
-For a local-first single-user app, hardcoded defaults (`localhost:8000` for Tier 1, `localhost:8001` for Tier 2 when added) are pragmatic. Create a `src/lib/config.ts` that reads environment variables at build time:
+For a local-first single-user app, the hardcoded default (`localhost:8000` for the single Gunicorn+Uvicorn endpoint) is pragmatic. Create a `src/lib/config.ts` that reads environment variables at build time:
 
 ```typescript
 export const API_BASE = import.meta.env.VITE_API_URL ?? "http://localhost:8000";

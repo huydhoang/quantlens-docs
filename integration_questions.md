@@ -19,13 +19,11 @@ Deep-dive cross-referencing of [ARCHITECTURE.md](ARCHITECTURE.md), [local_fronte
 
 #### 2.2 WebSocket progress broadcasting — who pushes to the client?
 
-The Backtest Execution Flow in `ARCHITECTURE.md` shows: `Worker → Queue → API → UI (WebSocket)`. A two-tier setup (Raw ASGI on 8000 + Vanilla ASGI on 8001) would use a Redis pub/sub pattern where the vanilla ASGI gateway subscribes to Redis channels and forwards to WebSocket clients.
+The Backtest Execution Flow in `ARCHITECTURE.md` shows: `Worker → Queue → API → UI (WebSocket)`. With Gunicorn+Uvicorn Raw ASGI as the unified backend, the pattern would be Redis pub/sub where the Raw ASGI API subscribes to Redis channels and forwards to WebSocket clients.
 
-**Question:** Which service owns the backtest progress WebSocket?
-- **Tier 1 (Raw ASGI on port 8000):** As shown in `ARCHITECTURE.md` — the main API manages WebSocket connections and receives progress from Celery/Redis
-- **Tier 2 (Vanilla ASGI on port 8001):** A separate process handles all WebSocket streaming
-
-If it's Tier 1, then backtest progress and market data WebSockets live on different services. How does the frontend manage two separate WebSocket connections to two different ports?
+**Question:** Specifically, how does the Raw ASGI API manage the WebSocket lifecycle for backtest progress?
+- Does a long-lived Redis subscription run per connected client, or does the Raw ASGI handler poll a Redis key?
+- How does the API route progress messages from a Celery worker back to the specific WebSocket client that initiated the backtest?
 
 #### 2.3 NautilusTrader lifespan management in the API process
 
@@ -43,27 +41,6 @@ Some earlier API examples show a `NautilusKernel` initialized in the application
 - Are skfolio optimizations always synchronous (ProcessPoolExecutor) while backtests are always async (Celery)?
 - If both are used, what's the decision boundary? Latency tolerance? Expected runtime?
 - Does the `ProcessPoolExecutor` conflict with Gunicorn's `--workers 4` flag (both forking processes)?
-
----
-
-### Two-Tier Architecture: When and How
-
-#### 3.1 Is the two-tier architecture for MVP or future?
-
-`backend_server.md` shows **Gunicorn+Uvicorn Raw ASGI** as the default single-tier stack. The two-tier setup (Raw ASGI on 8000 + Vanilla ASGI on 8001) is a potential future addition for live trading. `ARCHITECTURE.md` and `local_frontend.md` show only a single API layer.
-
-**Question:** Is the local desktop app (MVP) single-tier or two-tier?
-- If single-tier, should Tier 2 code snippets be labeled as "future" to avoid confusion?
-- If two-tier from day one, the Docker Compose config, frontend WebSocket management, and CORS setup all need to account for two backend services
-
-#### 3.2 NautilusKernel shared between tiers
-
-A two-tier diagram shows both tiers connecting to a "Shared Layer" containing `NautilusTrader kernel`. But NautilusTrader enforces a **one-BacktestNode-per-process** constraint (documented in `ARCHITECTURE.md` and `core_engine.md`).
-
-**Question:** How do two separate Uvicorn processes (Tier 1 + Tier 2) share a NautilusTrader kernel?
-- Is the "shared" kernel a misconception? Each tier would need its own kernel instance
-- Or is the kernel shared via Redis/IPC rather than in-process?
-- Does Tier 2's signal-checking function (which calls `nautilus.process_tick()`) require a full `BacktestNode`, or a lighter-weight component?
 
 ---
 
@@ -86,13 +63,12 @@ The `psycopg2` compatibility issues (no scrollable cursors) are not a concern be
 `backend_server.md` shows two different QuestDB access patterns:
 - **Writes:** HTTP REST (Influx Line Protocol) via `session.post("http://localhost:9000/write", data=line)`
 - **Reads:** PGWire protocol via `asyncpg.create_pool(dsn="postgresql://localhost:8812/qdb")`
-- **Tier 2 writes:** Also PGWire via `pool.execute("INSERT INTO ohlcv_1m ...")`
 
 **Question:** Which write protocol is canonical for QuestDB in QuantLens?
 - ILP over HTTP (port 9000) — optimized for high-throughput ingestion
 - ILP over TCP (port 9009) — even higher throughput, documented in ARCHITECTURE.md
-- PGWire SQL INSERT (port 8812) — shown in Tier 2 code
-- Are different protocols used for different tiers (ILP for bulk ingestion, PGWire for individual tick writes)?
+- PGWire SQL INSERT (port 8812) — simple but lower throughput
+- Are different protocols intended for different workloads (ILP for bulk ingestion, PGWire for ad-hoc writes)?
 
 #### 4.3 MongoDB → DuckDB (RESOLVED)
 
@@ -117,19 +93,19 @@ The deployment architecture diagram in `ARCHITECTURE.md` has been updated to sho
 
 #### 5.1 WebSocket fan-in/fan-out architecture
 
-A Tier 2 vanilla ASGI gateway would show individual WebSocket connections to Finnhub and Alpaca, with data published to Redis channels. But `ARCHITECTURE.md`'s Data Flow Architecture shows a separate "Data Ingestion Service" with a "Data Normalizer" component.
+`ARCHITECTURE.md`'s Data Flow Architecture shows a "Data Ingestion Service" with a "Data Normalizer" component connecting Tiingo/Finnhub/Alpaca WebSocket streams to QuestDB and Redis. This service needs to simultaneously serve real-time data to the React frontend via WebSocket.
 
-**Question:** Is the data ingestion service the same as the Tier 2 vanilla ASGI gateway, or is it a separate process?
-- If they're the same, the Tier 2 gateway handles both ingestion (Finnhub/Alpaca → QuestDB) and serving (QuestDB → React frontend)
-- If separate, where does the ingestion service run? Another Docker container? A Celery worker?
+**Question:** Is the data ingestion service a separate process from the Raw ASGI API, or is it part of the same Gunicorn+Uvicorn server?
+- If separate, where does it run? Another Docker container? A Celery worker?
+- If co-located with the Raw ASGI API, how does it manage long-lived outbound WebSocket connections (to Finnhub/Alpaca) alongside inbound HTTP requests?
 
 #### 5.2 Finnhub WebSocket data type mismatch
 
-Tier 2 code subscribes to `"BINANCE:BTCUSDT"` on Finnhub's WebSocket, which is a crypto trade stream. But `data_providers.md` says Finnhub **Stock Candles (OHLCV) and Tick Data are Premium-only** on the free tier, and the free WebSocket provides real-time **trade streaming** (not OHLCV bars).
+The data ingestion service would subscribe to `"BINANCE:BTCUSDT"` on Finnhub's WebSocket, which is a crypto trade stream. But `data_providers.md` says Finnhub **Stock Candles (OHLCV) and Tick Data are Premium-only** on the free tier, and the free WebSocket provides real-time **trade streaming** (not OHLCV bars).
 
-**Question:** The Tier 2 code inserts into `ohlcv_1m` table, but the raw Finnhub WebSocket data is individual trades, not OHLCV bars.
+**Question:** Raw Finnhub WebSocket data is individual trades, not OHLCV bars.
 - Is the OHLCV bar generation happening in QuestDB (via `SAMPLE BY`) or in the Python ingestion layer?
-- If in QuestDB, the `INSERT INTO ohlcv_1m` statement should be inserting into a `trades` table, not `ohlcv_1m`
+- Should the ingestion service insert into a `trades` table instead of `ohlcv_1m`?
 - What does the schema look like for raw trade ingestion vs aggregated bars?
 
 ---
@@ -320,7 +296,6 @@ But no other document describes the live trading architecture:
 - `core_engine.md` mentions broker adapters (Binance, Interactive Brokers, OKX, Bybit) — are any of these configured in QuantLens, or is live trading entirely future scope?
 - `data_providers.md` says Alpaca is for "paper trading only." Does QuantLens have a paper trading mode, or is this deferred?
 - If live/paper trading is future scope, should `core_engine.md` explicitly label it as such to avoid setting incorrect expectations about MVP capabilities?
-- The Tier 2 real-time gateway assumes live signal processing with `nautilus.process_tick()`. Is this the live trading path, and if so, how does it relate to the Tier 1 backtest workflow?
 
 ---
 
@@ -339,12 +314,11 @@ But no other document describes the live trading architecture:
 
 #### 1.2 How does the Tauri app discover the backend?
 
-`local_frontend.md` hardcodes `ws://localhost:8000/ws/backtest` and `http://localhost:3000` (React dev server in CORS config). A two-tier setup would add a second service on port 8001 for the real-time gateway.
+`local_frontend.md` hardcodes `ws://localhost:8000/ws/backtest` and `http://localhost:3000` (React dev server in CORS config). All backend communication goes through the single Gunicorn+Uvicorn Raw ASGI endpoint on port 8000.
 
 **Question:** What's the service discovery mechanism?
 - Are ports hardcoded in the frontend, or does Tauri's Rust backend provide them via IPC?
 - If the API is in Docker, does the container expose ports to the host, or does Tauri communicate via Docker networking?
-- In a two-tier setup (port 8000 + 8001), how does the React SPA know which WebSocket endpoint to connect to for backtest progress (Tier 1) vs market data (Tier 2)?
 
 #### 1.3 CORS configuration contradiction
 
@@ -429,7 +403,7 @@ The user story says `docker compose up` starts all backend services. But Tauri i
 
 #### 10.2 Authentication model
 
-`ARCHITECTURE.md` database schema includes a `USERS` table. A two-tier diagram mentions "JWT auth" for Tier 1. But for a local-first single-user desktop app:
+`ARCHITECTURE.md` database schema includes a `USERS` table. Some earlier docs mention JWT auth. But for a local-first single-user desktop app:
 
 **Question:** Is authentication needed for the local app?
 - If single-user, why is there a USERS table?
