@@ -2,22 +2,23 @@
 """
 Task Queue Benchmark Runner
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Benchmarks 10 task queue packages across throughput, latency, and reliability
-scenarios using a gunicorn+uvicorn FastAPI server to enqueue jobs.
+Benchmarks 11 task queue configurations across throughput, latency, reliability,
+and long-running backtest simulation scenarios.
 
 Packages under test:
   Distributed Task Queues:
-    1.  Celery        — enterprise standard
-    2.  RQ            — simple Redis-only queue
-    3.  BullMQ        — cross-platform (Node.js/Python), high performance
-    4.  Huey          — lightweight, multi-backend
-    5.  Dramatiq      — modern, middleware-based
-    6.  ARQ           — async-first, type-hinted
-    7.  TaskTiger     — Redis-based, Close.io origin
-    8.  Taskiq        — Redis Streams, fastest performance
-    9.  Procrastinate — PostgreSQL-based (no Redis required)
+    1.  Celery         — enterprise standard (Redis broker)
+    2.  RQ             — simple Redis-only queue
+    3.  BullMQ         — cross-platform (Node.js/Python), high performance
+    4.  Huey (Redis)   — lightweight, Redis backend
+    5.  Huey (SQLite)  — lightweight, SQLite backend (no Redis required)
+    6.  Dramatiq       — modern, middleware-based
+    7.  ARQ            — async-first, type-hinted
+    8.  TaskTiger      — Redis-based, Close.io origin
+    9.  Taskiq         — Redis Streams, fastest performance
+    10. Procrastinate  — PostgreSQL-based (no Redis required)
   In-Process Schedulers:
-    10. APScheduler   — advanced scheduling, multiple backends
+    11. APScheduler    — advanced scheduling, multiple backends
 
 Excluded:
   - Rocketry — unmaintained since December 2022, incompatible with Pydantic v2
@@ -71,12 +72,21 @@ QUEUES = [
     },
     {
         "id": "huey",
-        "name": "Huey",
+        "name": "Huey (Redis)",
         "category": "Distributed Task Queue",
         "pip": "huey",
         "import": "huey",
         "broker": "redis",
-        "description": "Lightweight — Redis, SQLite, file-system backends",
+        "description": "Lightweight — Redis backend",
+    },
+    {
+        "id": "huey-sqlite",
+        "name": "Huey (SQLite)",
+        "category": "Distributed Task Queue",
+        "pip": "huey",
+        "import": "huey",
+        "broker": "sqlite",
+        "description": "Lightweight — SQLite backend, no external broker required",
     },
     {
         "id": "dramatiq",
@@ -176,6 +186,15 @@ SCENARIOS = [
         "count": 20,
         "wait": True,
     },
+    {
+        "name": "backtest-sim",
+        "label": "Backtest simulation — 3 long-running tasks",
+        "desc": "Enqueue 3 tasks that each simulate a ~5 s NautilusTrader backtest (CPU-bound). "
+                "Measures dispatch overhead for long-running jobs — the primary QuantLens workload.",
+        "task": "backtest_sim",
+        "count": 3,
+        "wait": True,
+    },
 ]
 
 # ── Import availability check ────────────────────────────────────────
@@ -210,8 +229,23 @@ def _bench_cpu_work():
     return sum(i * i for i in range(10_000))
 
 
+def _bench_backtest_sim():
+    """Simulate a NautilusTrader backtest (~5 s of CPU work).
+
+    Uses iterative floating-point math to approximate the CPU profile of a
+    real backtest: indicator calculation, order matching, and portfolio
+    accounting.  The loop count is calibrated to run ~5 s on a 2-core
+    GitHub Actions runner.
+    """
+    total = 0.0
+    for i in range(25_000_000):
+        total += (i * 0.0001) ** 0.5
+    return total
+
+
 _bench_noop.__module__ = _MODULE_PATH
 _bench_cpu_work.__module__ = _MODULE_PATH
+_bench_backtest_sim.__module__ = _MODULE_PATH
 
 
 # ── Benchmark implementations ────────────────────────────────────────
@@ -274,7 +308,12 @@ def bench_celery(scenario: dict) -> dict:
             self._tried = True
             raise ValueError("transient error")
 
-    task_fn = {"noop": noop, "cpu_work": cpu_work, "flaky": flaky}[scenario["task"]]
+    @app.task
+    def backtest_sim():
+        return _bench_backtest_sim()
+
+    task_fn = {"noop": noop, "cpu_work": cpu_work, "flaky": flaky,
+               "backtest_sim": backtest_sim}[scenario["task"]]
     count = scenario["count"]
 
     def enqueue(n):
@@ -305,7 +344,8 @@ def bench_rq(scenario: dict) -> dict:
     conn = redis.Redis(host="localhost", port=6379)
     q = Queue(connection=conn)
 
-    fn_map = {"noop": _bench_noop, "cpu_work": _bench_cpu_work, "flaky": _bench_noop}
+    fn_map = {"noop": _bench_noop, "cpu_work": _bench_cpu_work, "flaky": _bench_noop,
+              "backtest_sim": _bench_backtest_sim}
     fn = fn_map[scenario["task"]]
     count = scenario["count"]
 
@@ -326,7 +366,7 @@ def bench_rq(scenario: dict) -> dict:
     return metrics
 
 
-# ── Huey ─────────────────────────────────────────────────────────────
+# ── Huey (Redis) ─────────────────────────────────────────────────────
 
 def bench_huey(scenario: dict) -> dict:
     from huey import RedisHuey
@@ -341,7 +381,55 @@ def bench_huey(scenario: dict) -> dict:
     def cpu_task():
         return sum(i * i for i in range(10_000))
 
-    task_map = {"noop": noop_task, "cpu_work": cpu_task, "flaky": noop_task}
+    @huey.task()
+    def backtest_sim_task():
+        return _bench_backtest_sim()
+
+    task_map = {
+        "noop": noop_task,
+        "cpu_work": cpu_task,
+        "flaky": noop_task,
+        "backtest_sim": backtest_sim_task,
+    }
+    task_fn = task_map[scenario["task"]]
+    count = scenario["count"]
+
+    def enqueue(n):
+        for _ in range(n):
+            task_fn()
+
+    metrics = _time_enqueue(enqueue, count)
+    return metrics
+
+
+# ── Huey (SQLite) ────────────────────────────────────────────────────
+
+def bench_huey_sqlite(scenario: dict) -> dict:
+    import tempfile
+    from huey import SqliteHuey
+
+    # Use a temp file so benchmarks don't leave artifacts in the repo
+    db_path = os.path.join(tempfile.gettempdir(), "huey_bench.db")
+    huey = SqliteHuey("bench-sqlite", filename=db_path, immediate=False)
+
+    @huey.task()
+    def noop_task():
+        pass
+
+    @huey.task()
+    def cpu_task():
+        return sum(i * i for i in range(10_000))
+
+    @huey.task()
+    def backtest_sim_task():
+        return _bench_backtest_sim()
+
+    task_map = {
+        "noop": noop_task,
+        "cpu_work": cpu_task,
+        "flaky": noop_task,
+        "backtest_sim": backtest_sim_task,
+    }
     task_fn = task_map[scenario["task"]]
     count = scenario["count"]
 
@@ -370,7 +458,12 @@ def bench_dramatiq(scenario: dict) -> dict:
     def cpu_actor():
         return sum(i * i for i in range(10_000))
 
-    actor_map = {"noop": noop_actor, "cpu_work": cpu_actor, "flaky": noop_actor}
+    @dramatiq.actor
+    def backtest_sim_actor():
+        return _bench_backtest_sim()
+
+    actor_map = {"noop": noop_actor, "cpu_work": cpu_actor, "flaky": noop_actor,
+                 "backtest_sim": backtest_sim_actor}
     actor = actor_map[scenario["task"]]
     count = scenario["count"]
 
@@ -396,7 +489,8 @@ def bench_arq(scenario: dict) -> dict:
 
     async def _run(count):
         redis = await arq.create_pool(arq.connections.RedisSettings(host="localhost", port=6379))
-        fn_name = {"noop": "noop", "cpu_work": "cpu_work", "flaky": "noop"}[scenario["task"]]
+        fn_name = {"noop": "noop", "cpu_work": "cpu_work", "flaky": "noop",
+                   "backtest_sim": "backtest_sim"}[scenario["task"]]
         start = time.perf_counter()
         for _ in range(count):
             await redis.enqueue_job(fn_name)
@@ -429,7 +523,12 @@ def bench_taskiq(scenario: dict) -> dict:
     async def cpu_task():
         return sum(i * i for i in range(10_000))
 
-    task_map = {"noop": noop_task, "cpu_work": cpu_task, "flaky": noop_task}
+    @broker.task
+    async def backtest_sim_task():
+        return _bench_backtest_sim()
+
+    task_map = {"noop": noop_task, "cpu_work": cpu_task, "flaky": noop_task,
+                "backtest_sim": backtest_sim_task}
     task_fn = task_map[scenario["task"]]
     count = scenario["count"]
 
@@ -461,14 +560,22 @@ def bench_apscheduler(scenario: dict) -> dict:
     def noop_job():
         results.append(1)
 
+    def backtest_job():
+        _bench_backtest_sim()
+        results.append(1)
+
+    job_fn = backtest_job if scenario["task"] == "backtest_sim" else noop_job
     count = scenario["count"]
+    # For backtest sim, extend the deadline to accommodate ~5 s/task
+    wait_limit = max(10, count * 8) if scenario["task"] == "backtest_sim" else 10
+
     start = time.perf_counter()
     for i in range(count):
-        scheduler.add_job(noop_job, "date")
+        scheduler.add_job(job_fn, "date")
     elapsed = time.perf_counter() - start
 
     scheduler.start()
-    deadline = time.time() + 10
+    deadline = time.time() + wait_limit
     while len(results) < count and time.time() < deadline:
         time.sleep(0.05)
     scheduler.shutdown(wait=False)
@@ -515,7 +622,8 @@ def bench_tasktiger(scenario: dict) -> dict:
     conn = redislib.Redis(host="localhost", port=6379)
     tiger = tasktiger.TaskTiger(connection=conn)
 
-    fn_map = {"noop": _bench_noop, "cpu_work": _bench_cpu_work, "flaky": _bench_noop}
+    fn_map = {"noop": _bench_noop, "cpu_work": _bench_cpu_work, "flaky": _bench_noop,
+              "backtest_sim": _bench_backtest_sim}
     fn = fn_map[scenario["task"]]
     count = scenario["count"]
 
@@ -551,7 +659,12 @@ def bench_procrastinate(scenario: dict) -> dict:
         async def cpu_task():
             return sum(i * i for i in range(10_000))
 
-        task_map = {"noop": noop_task, "cpu_work": cpu_task, "flaky": noop_task}
+        @app.task
+        async def backtest_sim_task():
+            return _bench_backtest_sim()
+
+        task_map = {"noop": noop_task, "cpu_work": cpu_task, "flaky": noop_task,
+                    "backtest_sim": backtest_sim_task}
         task_fn = task_map[scenario["task"]]
 
         async with app.open_async():
@@ -582,6 +695,7 @@ BENCH_FNS = {
     "rq":            bench_rq,
     "bullmq":        bench_bullmq,
     "huey":          bench_huey,
+    "huey-sqlite":   bench_huey_sqlite,
     "dramatiq":      bench_dramatiq,
     "arq":           bench_arq,
     "tasktiger":     bench_tasktiger,

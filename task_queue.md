@@ -2,7 +2,7 @@
 
 ## Decision Summary
 
-**Huey** is the task queue for QuantLens. Benchmarks across 10 packages confirm it delivers the best combination of simplicity, backend flexibility, and throughput for a **local single-machine desktop app**. Huey's SQLite backend eliminates Redis as a hard dependency for the task queue (Redis remains in Docker Compose for cache and pub/sub). Its `immediate=True` development mode removes the need for a separate worker process during development and testing. Enqueue throughput is irrelevant — a NautilusTrader backtest takes 5–120 seconds to run; dispatch overhead is under 1 ms for every package tested.
+**Huey** is the task queue for QuantLens. Benchmarks across 11 configurations (10 packages, Huey tested with both Redis and SQLite backends) confirm it delivers the best combination of simplicity, backend flexibility, and throughput for a **local single-machine desktop app**. Huey's SQLite backend eliminates Redis as a hard dependency for the task queue (Redis remains in Docker Compose for cache and pub/sub). Its `immediate=True` development mode removes the need for a separate worker process during development and testing. A new **backtest simulation** scenario (~5 s CPU-bound tasks mimicking NautilusTrader) measures dispatch overhead for the primary QuantLens workload — enqueue overhead is noise relative to a multi-second backtest.
 
 **Dramatiq** is the second choice if pipeline chaining with a Redis broker is preferred.
 
@@ -73,7 +73,9 @@ flowchart LR
 
 ### Methodology
 
-> **Important:** The numbers in these tables are **not directly comparable across categories**. Huey (`immediate=True`) and APScheduler (in-process) execute tasks in-process — fundamentally different from dispatching to a Redis queue. The benchmark script has been updated to use Huey with `immediate=False` to measure actual Redis write throughput for a fair apples-to-apples comparison; re-run benchmarks for updated Huey numbers. For the distributed queues (Celery, RQ, Dramatiq, etc.), workers were not started; these numbers measure **broker write throughput only** — how fast messages can be written to Redis or PostgreSQL. `completed=0` for Celery, RQ means enqueue was measured but execution was not tested.
+> **Important:** The benchmark script now tests Huey with **both Redis and SQLite backends** using `immediate=False` (actual broker I/O). A new **backtest simulation** scenario enqueues 3 tasks that each run ~5 s of CPU work, mimicking a real NautilusTrader backtest — the primary QuantLens workload. APScheduler (in-process) executes in the same process and is not directly comparable to distributed queues. For all distributed queues (Celery, RQ, Dramatiq, etc.), workers were not started; numbers measure **broker write throughput only**. `completed=0` means enqueue was measured but execution was not tested. Re-run benchmarks for updated numbers with the new scenarios.
+
+> The tables below reflect results from the previous benchmark run (Huey `immediate=True`, no SQLite backend, no backtest simulation). They are retained for reference but should be superseded by the next CI run.
 
 ### Burst Enqueue — 1,000 Tasks
 
@@ -90,7 +92,7 @@ flowchart LR
 | Procrastinate | Distributed Task Queue | 1,211 | 825.6 ms | PostgreSQL-based |
 | Celery | Distributed Task Queue | 1,199 | 833.7 ms | |
 
-† Huey was benchmarked with `immediate=True` (in-process execution, no Redis I/O). The benchmark script has been updated to use `immediate=False` for fair comparison with other distributed queues. Re-run benchmarks for updated numbers.
+† Huey was benchmarked with `immediate=True` (in-process execution, no broker I/O). The benchmark script now tests Huey with both Redis and SQLite backends using `immediate=False`, plus a new backtest simulation scenario. Re-run benchmarks for updated numbers.
 
 ### Heavy Enqueue — 10,000 Tasks
 
@@ -155,6 +157,12 @@ Workers not running for distributed queues — completed count reflects enqueue 
 | RQ | Distributed Task Queue | 1,792 | 11.2 ms | 0 | No workers |
 | Procrastinate | Distributed Task Queue | 756 | 26.5 ms | 20 | |
 | Celery | Distributed Task Queue | 516 | 38.7 ms | 0 | No workers |
+
+### Backtest Simulation — 3 Long-Running Tasks *(new)*
+
+> Enqueue 3 tasks that each simulate a ~5 s NautilusTrader backtest (CPU-bound). Measures dispatch overhead for long-running jobs — the primary QuantLens workload. Huey tested with both Redis and SQLite backends.
+
+*Awaiting first CI run with updated benchmark script. Re-run `task-queue-benchmarks` workflow to populate.*
 
 ---
 
