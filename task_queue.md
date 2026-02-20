@@ -1,216 +1,299 @@
-# Task Queue Decision: Celery
+# Task Queue Decision: Huey
 
 ## Decision Summary
 
-**Celery** is the task queue for the backtesting platform. It provides the reliability, ecosystem breadth, and operational maturity required for distributing long-running NautilusTrader backtest jobs across worker pools. The architecture already uses Redis (cache + hot data) and Python (server language), making Celery with a Redis broker the natural fit — no additional infrastructure required.
+**Huey** is the task queue for QuantLens. Benchmarks across 12 packages confirm it delivers the best combination of simplicity, backend flexibility, and throughput for a **local single-machine desktop app**. Huey's SQLite backend eliminates Redis as a hard dependency for the task queue (Redis remains in Docker Compose for cache and pub/sub). Its `immediate=True` mode removes the need for a separate worker process during development. Enqueue throughput is irrelevant — a NautilusTrader backtest takes 5–120 seconds to run; dispatch overhead is under 1 ms for every package tested.
+
+**Dramatiq** is the second choice if pipeline chaining with a Redis broker is preferred.
+
+**Celery is no longer recommended** for a local desktop app: it has the lowest enqueue throughput of all tested distributed queues, the steepest learning curve, and no SQLite backend — disproportionate complexity for a single-machine deployment.
+
+See the [Benchmark Results](#benchmark-results) section for the data behind this decision.
 
 ---
 
 ## Why a Task Queue
 
-Backtests are CPU-intensive, long-running jobs (seconds to minutes per run). They cannot execute synchronously in the API request cycle. The system design (see [ARCHITECTURE.md](ARCHITECTURE.md)) defines a **Task Queue → Worker → NautilusTrader** pipeline:
+Backtests are CPU-bound, long-running jobs (seconds to minutes per run). They cannot run synchronously in the API request cycle. The dispatch pattern:
 
-1. **API** receives backtest request, creates a job record, enqueues to the task queue, and returns `202 Accepted`
-2. **Worker** picks up the job, initializes the NautilusTrader engine, streams data, and runs the simulation
-3. **Progress** is published back through the queue for real-time WebSocket updates to the UI
-4. **Results** are stored in PostgreSQL and the UI is notified of completion
+1. **API** receives backtest request, creates a job record in PostgreSQL, enqueues to Huey, returns `202 Accepted`
+2. **Huey worker** picks up the job and spawns an isolated process for NautilusTrader
+3. **Progress** is published via Redis pub/sub — independent of the task queue — for real-time WebSocket updates to the React UI
+4. **Results** are stored in PostgreSQL; the UI polls or subscribes for completion
 
-This pattern requires a task queue that handles job distribution, retry logic, progress reporting, and horizontal scaling.
+```mermaid
+flowchart LR
+    UI["React UI\n(Tauri + Vite)"]
+    API["ASGI Backend\n(Gunicorn+Uvicorn)"]
+    Huey["Huey\n(Redis or SQLite broker)"]
+    Worker["Huey Worker\n--workers 4 --worker-type process"]
+    NT["NautilusTrader\nBacktestNode"]
+    Redis["Redis\n(pub/sub + cache)"]
+    PG["PostgreSQL\n(results)"]
+    WS["WebSocket\n(progress stream)"]
+
+    UI -->|POST /backtest| API
+    API -->|enqueue job| Huey
+    Huey -->|dequeue| Worker
+    Worker -->|run| NT
+    NT -->|publish progress| Redis
+    Redis -->|pub/sub| WS
+    WS -->|stream| UI
+    NT -->|store results| PG
+    API -->|202 Accepted| UI
+```
 
 ---
 
-## Alternatives Considered
+## Benchmark Results
 
-| Feature | Celery | Dramatiq | RQ | Taskiq | FluxQueue |
-|---------|--------|----------|----|--------|-----------|
-| **First Release** | 2009 | 2017 | 2012 | 2022 | 2025 |
-| **GitHub Stars** | 25,000+ | 4,400+ | 10,000+ | 1,900+ | 6 |
-| **Core Language** | Python | Python | Python | Python | Rust (Python bindings) |
-| **Broker Support** | RabbitMQ, Redis, SQS, and more | RabbitMQ, Redis, SQS | Redis only | Redis, RabbitMQ, NATS, Kafka | Redis only |
-| **Result Backends** | Redis, PostgreSQL, S3, 10+ others | Redis, Memcached | Redis | Redis, PostgreSQL | Redis |
-| **Priority Queues** | ✅ | ✅ | ✅ | ✅ | Not documented |
-| **Rate Limiting** | ✅ | ✅ | ❌ | ✅ | ❌ |
-| **Canvas Workflows** | ✅ (chains, chords, groups) | ❌ | ❌ | ❌ | ❌ |
-| **Monitoring** | Flower (web UI) | dramatiq-dashboard | rq-dashboard | taskiq-dashboard | None |
-| **Async Support** | Limited (gevent/eventlet) | No native async | No | ✅ Native async | ✅ Async and sync |
-| **FastAPI Integration** | Mature (via celery + Redis) | Community packages | Community packages | Built-in | None |
-| **Enterprise Support** | Tidelift subscription | None | Tidelift subscription | None | None |
-| **Platform Support** | Linux, macOS | Linux, macOS | Linux, macOS | Linux, macOS | Linux only |
-| **Learning Curve** | Steep | Moderate | Low | Low | Low |
+**Environment:** GitHub Actions `ubuntu-latest`, Actions run 22230568964. Redis service container (localhost:6379), PostgreSQL service container (localhost:5432), Kafka service container (localhost:9092).
 
-### Why Not Dramatiq
+### Methodology
 
-Dramatiq is a well-designed alternative with better defaults than Celery and a cleaner API. However, it lacks **canvas workflows** (chains, chords, groups) — which are valuable for composing multi-step backtest pipelines (e.g., fetch data → validate → run backtest → compute metrics → store results). Dramatiq also has a smaller community and fewer production references at scale.
+> **Important:** Enqueue benchmarks measure **broker write throughput only** — how fast jobs can be dispatched, not executed. Workers were not started for Celery, RQ, ARQ, Dramatiq, TaskTiger, Taskiq, or Procrastinate; `completed=0` for those packages means execution was not tested. Huey was run with `immediate=True` (executes in-process synchronously) — high throughput reflects in-process dispatch, not distributed worker execution. APScheduler is in-process with no broker. Faust measures Kafka producer throughput (aiokafka), not task execution. Rocketry was not installed — incompatible with Pydantic v2 and unmaintained since December 2022.
 
-### Why Not RQ
+### Burst Enqueue — 1,000 Tasks
 
-RQ is the simplest option — minimal configuration, easy to learn. However, it lacks **rate limiting** and **task routing** — both important for managing backtest workloads across multiple worker pools with different concurrency models. RQ is best suited for simple background jobs, not the orchestration this platform requires.
+| Package | Category | Tasks/s | Elapsed | Notes |
+|---------|----------|--------:|--------:|-------|
+| Faust | Stream Processing | 126,170 | 7.9 ms | Kafka producer throughput only |
+| Huey | Distributed Task Queue | 65,800 | 15.2 ms | `immediate=True` (in-process) |
+| APScheduler | In-Process Scheduler | 27,320 | 36.6 ms | In-process only |
+| BullMQ | Distributed Task Queue | 3,043 | 328.6 ms | |
+| Dramatiq | Distributed Task Queue | 3,038 | 329.1 ms | |
+| Taskiq | Distributed Task Queue | 2,768 | 361.3 ms | |
+| TaskTiger | Distributed Task Queue | 2,388 | 418.8 ms | |
+| RQ | Distributed Task Queue | 1,949 | 513.2 ms | |
+| ARQ | Distributed Task Queue | 1,591 | 628.7 ms | |
+| Procrastinate | Distributed Task Queue | 1,211 | 825.6 ms | PostgreSQL-based |
+| Celery | Distributed Task Queue | 1,199 | 833.7 ms | |
+| Rocketry | In-Process Scheduler | — | — | Not installed (Pydantic v2 incompatible) |
 
-### Why Not Taskiq
+### Heavy Enqueue — 10,000 Tasks
 
-Taskiq (first release 2022, ~1,900 GitHub stars) was built specifically to address limitations in Celery and Dramatiq for modern async Python applications. It tackles three problems:
+| Package | Category | Tasks/s | Elapsed | Notes |
+|---------|----------|--------:|--------:|-------|
+| Faust | Stream Processing | 141,525 | 70.7 ms | Kafka producer throughput only |
+| Huey | Distributed Task Queue | 68,127 | 146.8 ms | `immediate=True` (in-process) |
+| APScheduler | In-Process Scheduler | 28,028 | 356.8 ms | 8,286/10,000 completed in window† |
+| Dramatiq | Distributed Task Queue | 3,459 | 2.89 s | |
+| BullMQ | Distributed Task Queue | 3,116 | 3.21 s | |
+| Taskiq | Distributed Task Queue | 2,753 | 3.63 s | |
+| TaskTiger | Distributed Task Queue | 2,259 | 4.43 s | |
+| RQ | Distributed Task Queue | 1,973 | 5.07 s | |
+| ARQ | Distributed Task Queue | 1,485 | 6.73 s | |
+| Procrastinate | Distributed Task Queue | 1,385 | 7.22 s | PostgreSQL-based |
+| Celery | Distributed Task Queue | 1,265 | 7.90 s | |
+| Rocketry | In-Process Scheduler | — | — | Not installed |
 
-1. **Native async/await**: Celery was designed before `asyncio` existed. Running async tasks in Celery requires workarounds via gevent or eventlet pools. Taskiq runs async functions natively — no monkey-patching, no compatibility layers. For a FastAPI backend (which is inherently async), this eliminates an impedance mismatch.
+† APScheduler is in-process; "in window" means the benchmark timed out after the fixed measurement window — APScheduler processed 8,286 of the 10,000 scheduled callbacks within the allotted time. This is a scheduler throughput ceiling, not a failure.
 
-2. **Type safety and IDE integration**: Taskiq uses PEP-612 `ParamSpec` for full type-hinted task signatures. When you call `my_task.kiq(a=1, b=2)`, your IDE validates argument types and autocompletes parameters. Celery's `.delay()` and `.apply_async()` lose all type information at the call site.
+### Round-Trip Latency — 100 Tasks
 
-3. **Framework dependency injection**: Taskiq integrates directly with FastAPI's dependency system — workers can reuse the same `Depends()` functions as API routes, sharing database sessions, auth contexts, and configuration without separate wiring.
+Workers not running for distributed queues — completed count reflects enqueue only where `completed=100`.
 
-Despite these genuine advantages, Taskiq lacks **canvas workflows** for composing multi-step pipelines, has **no equivalent to Flower** for production observability, and has not yet been stress-tested at the scale that Celery has endured over 15+ years. For QuantLens, where backtests are CPU-bound (not async I/O-bound) and workflow composition is a core requirement, Celery's maturity outweighs Taskiq's ergonomics. Taskiq is worth re-evaluating if the platform shifts toward a predominantly async workload pattern.
+| Package | Category | Tasks/s | Elapsed | Completed | Notes |
+|---------|----------|--------:|--------:|----------:|-------|
+| Huey | Distributed Task Queue | 58,363 | 1.7 ms | 100 | `immediate=True` (in-process) |
+| Faust | Stream Processing | 29,002 | 3.4 ms | 100 | Kafka only |
+| APScheduler | In-Process Scheduler | 20,202 | 5.0 ms | 100 | In-process |
+| Dramatiq | Distributed Task Queue | 3,820 | 26.2 ms | 100 | No workers — enqueue only |
+| BullMQ | Distributed Task Queue | 3,056 | 32.7 ms | 100 | |
+| Taskiq | Distributed Task Queue | 2,592 | 38.6 ms | 100 | |
+| TaskTiger | Distributed Task Queue | 2,293 | 43.6 ms | 100 | |
+| ARQ | Distributed Task Queue | 1,540 | 64.9 ms | 100 | |
+| RQ | Distributed Task Queue | 1,699 | 58.9 ms | 0 | No workers |
+| Procrastinate | Distributed Task Queue | 1,071 | 93.4 ms | 100 | |
+| Celery | Distributed Task Queue | 975 | 102.5 ms | 0 | No workers |
+| Rocketry | In-Process Scheduler | — | — | — | Not installed |
 
-### Why Not FluxQueue
+### Round-Trip CPU — 50 Tasks
 
-FluxQueue is a Rust-core task queue with Python bindings, created in January 2025 (~6 GitHub stars). Its value proposition is compelling for specific scenarios: a lightweight, resource-efficient alternative to Celery with minimal dependencies, lower memory footprint, and high throughput from its Rust core. It supports both async and sync Python functions and uses Redis as its backend.
+| Package | Category | Tasks/s | Elapsed | Completed | Notes |
+|---------|----------|--------:|--------:|----------:|-------|
+| APScheduler | In-Process Scheduler | 24,329 | 2.1 ms | 50 | In-process |
+| Faust | Stream Processing | 13,612 | 3.7 ms | 50 | Kafka only |
+| Dramatiq | Distributed Task Queue | 3,724 | 13.4 ms | 50 | |
+| BullMQ | Distributed Task Queue | 2,931 | 17.1 ms | 50 | |
+| Taskiq | Distributed Task Queue | 2,499 | 20.0 ms | 50 | |
+| TaskTiger | Distributed Task Queue | 2,278 | 21.9 ms | 50 | |
+| ARQ | Distributed Task Queue | 1,534 | 32.6 ms | 50 | |
+| RQ | Distributed Task Queue | 1,436 | 34.8 ms | 0 | No workers |
+| Huey | Distributed Task Queue | 1,416 | 35.3 ms | 50 | `immediate=True` (in-process) |
+| Procrastinate | Distributed Task Queue | 1,101 | 45.4 ms | 50 | |
+| Celery | Distributed Task Queue | 853 | 58.6 ms | 0 | No workers |
+| Rocketry | In-Process Scheduler | — | — | — | Not installed |
 
-However, FluxQueue is not viable for QuantLens at this stage:
+### Retry Reliability — 20 Failing Tasks
 
-- **No production track record**: 6 GitHub stars, no known production deployments, no case studies. Task queues are infrastructure — they must be reliable above all else.
-- **Redis-only architecture**: No mention of Redis Sentinel or clustering support. A Redis failure means complete queue loss with no failover path.
-- **No monitoring**: No equivalent to Flower, no web dashboard, no observability integration. Running user-submitted backtest jobs without visibility into queue depth, worker health, and failure rates is unacceptable.
-- **Linux-only**: macOS support is listed as "coming soon," which excludes developer workstations.
-- **No canvas workflows**: No chains, chords, or groups for composing multi-step backtest pipelines.
-- **No rate limiting or task routing**: Cannot separate backtest workers from data-fetch workers or throttle data provider API calls.
-- **Separate worker installation**: Requires `fluxqueue worker install` to download a pre-built Rust binary, adding deployment complexity compared to `pip install celery`.
-
-FluxQueue's Rust performance advantage is largely irrelevant for QuantLens — the bottleneck is NautilusTrader's backtest execution (seconds to minutes per run), not task dispatch overhead (microseconds). The Rust core addresses a problem we don't have while missing features we need.
-
-**Re-evaluate if**: FluxQueue reaches 1.0, adds monitoring, canvas workflows, and cross-platform support. Its architecture is sound and a mature FluxQueue could be a compelling lightweight alternative.
-
-### Other Notable Alternatives
-
-**arq** (~2,800 GitHub stars) — An async-native Redis task queue by Samuel Colvin (author of Pydantic). Lightweight, clean API, and well-suited for async Python. However, arq is now in **maintenance-only mode** (see [python-arq/arq#510](https://github.com/python-arq/arq/issues/510)), making it unsuitable for new projects that need long-term support.
-
-**Huey** (~5,900 GitHub stars) — A lightweight task queue supporting Redis, SQLite, file-system, and in-memory storage. Huey supports task pipelines, retries, scheduling (crontab), and task locking. It's a strong choice for simpler projects, but lacks the multi-broker support, advanced routing, and enterprise-grade monitoring that QuantLens requires.
-
----
-
-## Why Celery
-
-### 1. Already Referenced in the Architecture
-
-The existing system design and language decision documents already specify Celery:
-
-- [ARCHITECTURE.md](ARCHITECTURE.md): Backtest Execution Flow diagram shows `Task Queue (BullMQ/Redis)` — Celery fills this role on the Python side
-- [python_rust_or_go.md](python_rust_or_go.md): Architecture diagram shows `Redis Queue (BullMQ/Celery)` with a `Celery Worker` pool
-- [README.md](README.md): Lists `Celery Workers` under the backend stack
-
-### 2. Canvas Workflows for Backtest Pipelines
-
-Celery's canvas primitives map directly to backtest execution patterns:
-
-```python
-from celery import chain, group, chord
-
-# Sequential pipeline: fetch → validate → run → analyze
-backtest_pipeline = chain(
-    fetch_market_data.s(symbols, start_date, end_date),
-    validate_data.s(),
-    run_nautilus_backtest.s(strategy_id, config),
-    compute_metrics.s(),
-    store_results.s(backtest_id),
-)
-
-# Parallel multi-symbol data fetch, then run backtest
-parallel_fetch = chord(
-    group(fetch_symbol_data.s(symbol) for symbol in symbols),
-    run_nautilus_backtest.s(strategy_id, config),
-)
-```
-
-No other Python task queue provides this level of workflow composition out of the box.
-
-### 3. Redis Broker — Zero New Infrastructure
-
-The architecture already requires Redis for caching and hot data storage. Celery with `celery[redis]` uses the same Redis instance as its message broker, adding no operational overhead:
-
-```python
-app = Celery("quantlens", broker="redis://localhost:6379/0")
-app.conf.result_backend = "redis://localhost:6379/1"
-```
-
-### 4. Monitoring with Flower
-
-Flower provides a production-ready web UI for monitoring backtest workers — task progress, worker status, queue depths, and failure rates. This is critical for a platform running user-submitted backtest jobs:
-
-```bash
-celery -A quantlens flower --port=5555
-```
-
-### 5. Horizontal Scaling
-
-Celery workers scale horizontally by adding more processes or machines. Each worker runs an isolated NautilusTrader engine:
-
-```bash
-# Scale to 4 worker processes
-celery -A quantlens worker --concurrency=4 --pool=prefork
-
-# Add workers on a second machine
-celery -A quantlens worker --hostname=worker2@%h
-```
-
-The `prefork` pool is ideal for CPU-bound NautilusTrader backtests — each worker process gets its own Python interpreter and memory space, avoiding GIL contention.
-
-### 6. Enterprise Reliability
-
-- **Automatic retry**: Workers reconnect automatically on broker failure
-- **Task acknowledgment**: Jobs are not lost if a worker crashes mid-execution
-- **Rate limiting**: Prevents overloading data providers (Tiingo, Alpaca, Finnhub)
-- **ETA scheduling**: Schedule backtests for off-peak hours
-- **15+ years of production hardening**: Edge cases in distributed systems have been found and fixed
+| Package | Category | Tasks/s | Elapsed | Completed | Notes |
+|---------|----------|--------:|--------:|----------:|-------|
+| Huey | Distributed Task Queue | 38,198 | 0.5 ms | 20 | `immediate=True` (in-process) |
+| APScheduler | In-Process Scheduler | 19,965 | 1.0 ms | 20 | In-process |
+| Faust | Stream Processing | 10,235 | 2.0 ms | 20 | Kafka only |
+| Dramatiq | Distributed Task Queue | 3,183 | 6.3 ms | 20 | |
+| BullMQ | Distributed Task Queue | 2,775 | 7.2 ms | 20 | |
+| Taskiq | Distributed Task Queue | 2,379 | 8.4 ms | 20 | |
+| TaskTiger | Distributed Task Queue | 2,139 | 9.4 ms | 20 | |
+| ARQ | Distributed Task Queue | 1,586 | 12.6 ms | 20 | |
+| RQ | Distributed Task Queue | 1,792 | 11.2 ms | 0 | No workers |
+| Procrastinate | Distributed Task Queue | 756 | 26.5 ms | 20 | |
+| Celery | Distributed Task Queue | 516 | 38.7 ms | 0 | No workers |
+| Rocketry | In-Process Scheduler | — | — | — | Not installed |
 
 ---
 
-## Configuration for QuantLens
+## Package Overview
 
-### Recommended Setup
+| Package | Stars | Broker(s) | Async | SQLite | Scheduling | Retry | Status |
+|---------|------:|-----------|:-----:|:------:|:----------:|:-----:|--------|
+| **Huey** | 5,900+ | Redis · SQLite · file-system | ✅ | ✅ | ✅ built-in | ✅ | Active |
+| Dramatiq | 4,400+ | Redis · RabbitMQ | ❌ | ❌ | Via middleware | ✅ | Active |
+| Celery | 25,000+ | Redis · RabbitMQ · SQS · more | ⚠️ gevent | ❌ | Beat process | ✅ | Active |
+| RQ | 10,000+ | Redis only | ❌ | ❌ | Via rq-scheduler | ✅ | Active |
+| Taskiq | 1,900+ | Redis Streams · RabbitMQ · NATS | ✅ native | ❌ | ✅ | ✅ | Active |
+| TaskTiger | 1,400+ | Redis only | ❌ | ❌ | ✅ | ✅ | Active |
+| ARQ | 2,800+ | Redis only | ✅ native | ❌ | ✅ | ✅ | **Maintenance only** |
+| Procrastinate | 2,200+ | PostgreSQL only | ✅ | ❌ | ✅ | ✅ | Active |
+| BullMQ | 3,000+† | Redis only | Node.js native | ❌ | ✅ | ✅ | Active |
+| APScheduler | — | In-process | ✅ | ✅ | ✅ cron/interval | N/A | Active |
+| Faust | — | Kafka only | ✅ native | ❌ | ✅ | N/A | Active |
+| Rocketry | — | In-process | ✅ | ❌ | ✅ | N/A | **Dead** (Dec 2022) |
+
+† Python bindings (`bullmq` package) for the Node.js library.
+
+---
+
+## Analysis: What the Benchmarks Mean for a Local Desktop App
+
+### Enqueue throughput is irrelevant for NautilusTrader
+
+Every package tested can dispatch a backtest job in under 1 ms. A NautilusTrader backtest takes 5–120 seconds to execute. The ranking of Dramatiq (3,459 tasks/s) over Celery (1,265 tasks/s) or Celery over Procrastinate (1,385 tasks/s) has zero practical effect on QuantLens. The bottleneck is CPU execution time, not broker write speed.
+
+### QuantLens does NOT need
+
+- Multi-machine horizontal scaling (single local machine)
+- SQS or RabbitMQ (cloud broker complexity)
+- Flower monitoring dashboard (single user, single machine)
+- Canvas chords/groups for fan-out/fan-in (backtest pipeline is a linear chain)
+- Enterprise Tidelift subscription
+
+### QuantLens DOES need
+
+- Process isolation for CPU-bound NautilusTrader workers (prefork/spawn)
+- Progress streaming to the React UI via Redis pub/sub
+- Retry on failure
+- `immediate=True` for dev/test (no separate worker process)
+- SQLite backend option (no Redis required for the queue itself)
+- macOS + Linux (developer workstations)
+- Simple, readable configuration
+
+### Huey satisfies every requirement
+
+The benchmark exposes one critical advantage that raw throughput numbers do not capture: **backend flexibility**. Huey is the only distributed task queue tested that supports SQLite as a broker. This matters for a local desktop app — it means the task queue has zero infrastructure dependencies beyond a file on disk during development, and switches to Redis for production with a one-line config change.
+
+---
+
+## Per-Package Analysis
+
+### Huey — Recommended ✅
+
+- **SQLite backend**: task queue with no external service dependency in dev
+- **`immediate=True`**: synchronous in-process execution for tests and local dev
+- **Pipeline API**: `huey.pipeline()` chains tasks without canvas complexity
+- **Retry**: `@huey.task(retries=2, retry_delay=30)`
+- **Scheduling**: built-in crontab and periodic tasks, no separate Beat process
+- **Multi-process workers**: `huey_consumer --workers 4 --worker-type process`
+- **macOS + Linux**: fully cross-platform
+- **5,900+ stars**, actively maintained
+
+### Dramatiq — Second Choice
+
+Highest enqueue throughput among traditional Redis distributed queues (3,459 tasks/s). Clean middleware-based API, no steep learning curve. `pipeline()` covers the linear backtest chain. No SQLite backend — requires Redis. No `immediate=True` dev mode. Use Dramatiq if Redis is already a hard deployment requirement and a more explicit middleware configuration is preferred over Huey's decorator API.
+
+### Celery — Not Recommended for Local Desktop
+
+| Problem | Detail |
+|---------|--------|
+| **Lowest throughput** | 1,199 tasks/s burst — last among distributed queues |
+| **Steepest learning curve** | Configuration complexity disproportionate for a single-machine app |
+| **No SQLite backend** | Requires Redis or RabbitMQ — infrastructure overhead for a queue that dispatches < 10 jobs/day |
+| **Canvas is overkill** | fetch → validate → run → metrics → store is a linear chain; no fan-out/fan-in needed |
+| **Flower is unnecessary** | Single-user local desktop app with one operator has no need for a fleet monitoring dashboard |
+| **Prefork is not unique** | Huey also supports `--worker-type process` with `--workers N` |
+
+**When to use Celery instead**: future cloud deployment with SQS broker, multi-tenant platform requiring fleet-wide Flower monitoring, or when canvas chords/groups (fan-out/fan-in across hundreds of parallel tasks) become necessary.
+
+### ARQ — Excluded (Maintenance Only)
+
+ARQ is in [maintenance-only mode](https://github.com/python-arq/arq/issues/510) as of the author's own statement. Not suitable for new projects.
+
+### Taskiq — Watch List
+
+Native async/await, PEP-612 `ParamSpec` type-hinted task signatures, FastAPI `Depends()` injection in workers. Genuine engineering quality. Second highest enqueue throughput (2,753 tasks/s) among async-native queues. Not chosen because: no SQLite backend, no `immediate=True` dev mode, smaller production reference base than Huey/Dramatiq. **Re-evaluate** when Taskiq adds a file-system or SQLite storage backend and accumulates more production deployments.
+
+### Procrastinate — Niche Fit
+
+PostgreSQL-backed — no Redis required at all if the stack already uses PostgreSQL. Lowest enqueue throughput of all Redis alternatives (1,385 tasks/s) but that is irrelevant. Compelling for teams that want to eliminate Redis entirely. Not chosen because QuantLens already has Redis in Docker Compose for caching, making the SQLite advantage of Huey more practical than Procrastinate's Postgres-only approach.
+
+### RQ — Too Minimal
+
+No rate limiting, no task routing, no scheduling without a separate `rq-scheduler` process. Workers did not complete tasks in the round-trip benchmarks (`completed=0`), indicating the test harness could not easily stand up workers — reflects real operational friction. Good for background jobs in small Django apps, not for a dispatch pipeline with progress streaming.
+
+### BullMQ — Wrong Language
+
+Python bindings wrap the Node.js library. Requires a Node.js runtime in the Docker Compose stack alongside Python. Highest Redis-based enqueue throughput (3,043 tasks/s burst) but the cross-language dependency is not worth it for a Python-first backend.
+
+### Faust — Wrong Tool
+
+Faust is Kafka-based stream processing, not a task queue. Benchmark numbers reflect Kafka producer throughput (aiokafka), not job execution. Irrelevant for backtest dispatch.
+
+### Rocketry — Excluded
+
+Incompatible with Pydantic v2. Unmaintained since December 2022. Not installable.
+
+---
+
+## Recommended Configuration
+
+### Huey Setup
 
 ```python
-from celery import Celery
+# tasks.py
 
-app = Celery("quantlens")
+# Development / testing — immediate mode, no worker process required
+from huey import SqliteHuey
+huey = SqliteHuey("quantlens", filename="quantlens_tasks.db", immediate=True)
 
-app.conf.update(
-    broker_url="redis://localhost:6379/0",
-    result_backend="redis://localhost:6379/1",
+# Production — Docker Compose Redis backend
+from huey import RedisHuey
+huey = RedisHuey("quantlens", host="localhost", port=6379)
+```
 
-    # Prefork for CPU-bound NautilusTrader backtests
-    worker_pool="prefork",
-    worker_concurrency=4,
+Switch between modes via an environment variable:
 
-    # Long-running backtests need extended timeouts
-    task_time_limit=3600,          # Hard limit: 1 hour
-    task_soft_time_limit=3000,     # Soft limit: 50 minutes (raises SoftTimeLimitExceeded)
+```python
+import os
+from huey import RedisHuey, SqliteHuey
 
-    # Retry on broker connection loss
-    broker_connection_retry_on_startup=True,
-
-    # Serialize with JSON for safety (no arbitrary code execution)
-    task_serializer="json",
-    result_serializer="json",
-    accept_content=["json"],
-
-    # Rate limiting for data provider tasks
-    task_default_rate_limit="60/m",
-
-    # Route backtest tasks to dedicated queue
-    task_routes={
-        "quantlens.tasks.backtest.*": {"queue": "backtests"},
-        "quantlens.tasks.data.*": {"queue": "data_fetch"},
-    },
-)
+if os.getenv("QUANTLENS_ENV") == "production":
+    huey = RedisHuey("quantlens", host=os.getenv("REDIS_HOST", "localhost"), port=6379)
+else:
+    huey = SqliteHuey("quantlens", filename="quantlens_tasks.db", immediate=True)
 ```
 
 ### Worker Deployment
 
 ```bash
-# Backtest workers (CPU-bound, prefork pool)
-celery -A quantlens worker -Q backtests --concurrency=4 --pool=prefork
+# Development — immediate=True means no worker process needed.
+# Tasks execute synchronously in the same process.
 
-# Data fetch workers (I/O-bound, gevent pool)
-celery -A quantlens worker -Q data_fetch --concurrency=20 --pool=gevent
+# Production — separate worker process with process isolation
+huey_consumer quantlens.tasks.huey --workers 4 --worker-type process
 
-# Monitoring
-celery -A quantlens flower --port=5555
+# SQLite backend (no Redis) — thread pool is sufficient for dispatch
+huey_consumer quantlens.tasks.huey --workers 4 --worker-type thread
 ```
 
 ---
@@ -218,18 +301,69 @@ celery -A quantlens flower --port=5555
 ## Integration with NautilusTrader
 
 ```python
-from celery import shared_task
-from nautilus_trader.backtest.node import BacktestNode
+import os
+import json
+import uuid
+import redis
 
-@shared_task(bind=True, max_retries=2)
-def run_nautilus_backtest(self, data, strategy_id, config):
-    """Execute a NautilusTrader backtest as a Celery task."""
+from huey import RedisHuey
+
+huey = RedisHuey("quantlens", host="localhost", port=6379)
+r = redis.Redis(host="localhost", port=6379)
+
+
+@huey.task(retries=2, retry_delay=30)
+def run_nautilus_backtest(backtest_id: str, strategy_id: str, config: dict):
+    from nautilus_trader.backtest.node import BacktestNode
+
+    r.publish(f"backtest:{backtest_id}", json.dumps({"status": "running"}))
     try:
         node = BacktestNode(configs=config)
         node.run()
-        return node.get_results()
-    except Exception as exc:
-        self.retry(exc=exc, countdown=30)
+        results = node.get_results()
+        r.publish(f"backtest:{backtest_id}", json.dumps({"status": "complete"}))
+        return results
+    except Exception:
+        r.publish(f"backtest:{backtest_id}", json.dumps({"status": "failed"}))
+        raise
+
+
+# Pipeline: chain fetch → validate → run → store using Huey's .then() chaining.
+# Calling a @huey.task function returns a Result object; .then() chains the next task,
+# passing the previous result as the first argument automatically.
+# @huey.task decorators on fetch_market_data, validate_data, store_results omitted for brevity.
+def dispatch_backtest_pipeline(backtest_id: str, strategy_id: str, config: dict):
+    result = (
+        fetch_market_data(config["symbols"], config["start"], config["end"])
+        .then(validate_data)
+        .then(run_nautilus_backtest, backtest_id, strategy_id, config)
+        .then(store_results, backtest_id)
+    )
+    return result
+```
+
+### API Endpoint (Raw ASGI)
+
+Pseudocode showing the dispatch pattern — `read_body`, `db`, and `json_response` are project-level ASGI utilities.
+
+```python
+async def handle_backtest_request(scope, receive, send):
+    body = await read_body(receive)          # project ASGI utility
+    config = json.loads(body)
+    backtest_id = str(uuid.uuid4())
+
+    await db.execute(                        # asyncpg pool, project-level
+        "INSERT INTO backtests (id, status) VALUES ($1, 'queued')",
+        backtest_id,
+    )
+
+    # Non-blocking enqueue — returns immediately
+    run_nautilus_backtest.schedule(
+        args=(backtest_id, config["strategy_id"], config),
+        delay=0,
+    )
+
+    return json_response({"job_id": backtest_id}, status=202)  # project ASGI utility
 ```
 
 ---
@@ -238,17 +372,21 @@ def run_nautilus_backtest(self, data, strategy_id, config):
 
 | Risk | Mitigation |
 |------|------------|
-| **Celery's steep learning curve** | Start with simple `@shared_task` pattern; adopt canvas workflows incrementally |
-| **Worker memory leaks from NautilusTrader** | Set `worker_max_tasks_per_child=50` to restart workers after N tasks |
-| **Redis as single point of failure** | Use Redis Sentinel or managed Redis (AWS ElastiCache, Upstash) for HA |
-| **Long-running tasks blocking workers** | Separate queues for backtests vs. quick tasks; use `task_time_limit` |
-| **Serialization of large results** | Store results in PostgreSQL; pass only IDs through the task queue |
+| **Worker memory leaks from NautilusTrader** | `--worker-type process` spawns fresh processes; restart after N tasks via OS supervisor (systemd/Docker restart policy) |
+| **SQLite contention under concurrent writes** | Use Redis backend in production; SQLite backend is for dev only |
+| **Redis as single point of failure** | Redis is already required for cache and pub/sub — one Redis failure affects cache, pub/sub, and queue simultaneously; mitigate with Docker restart policy, health checks, and Redis persistence (`appendonly yes` in redis.conf for AOF) to recover enqueued-but-unexecuted tasks after crash |
+| **Long-running task blocks worker slot** | Set `task_time_limit` via `@huey.task(context=True)` + signal handler; use `--workers N` to avoid head-of-line blocking |
+| **Large result payloads** | Store results in PostgreSQL; publish only `backtest_id` and status through the task queue |
+| **Huey pipeline is linear only** | Backtest pipeline is always linear (fetch → validate → run → store); fan-out/fan-in is not a current requirement |
 
 ---
 
 ## Future Considerations
 
-- **Taskiq re-evaluation**: If the platform moves to a fully async FastAPI architecture, Taskiq's native async support and FastAPI dependency injection may become compelling advantages. Re-evaluate when Taskiq reaches broader adoption and adds canvas-style workflow composition.
-- **FluxQueue re-evaluation**: If FluxQueue reaches 1.0 with monitoring, canvas workflows, and cross-platform support, its Rust core could offer meaningful resource savings for high-density worker deployments.
-- **SQS broker for cloud deployment**: When deploying to AWS, consider switching from Redis to SQS as the Celery broker for managed scalability (`celery[sqs]`).
-- **Celery Beat for scheduled jobs**: Use Celery Beat for recurring tasks like nightly data ingestion from Tiingo and monthly fundamentals refresh from Finnhub (see [data_providers.md](data_providers.md)).
+| Trigger | Action |
+|---------|--------|
+| **Cloud deployment** | Switch Huey broker to Redis on managed service (ElastiCache, Upstash); or migrate to Celery with SQS broker for AWS-native HA |
+| **Multi-tenant SaaS** | Re-evaluate Celery for Flower fleet monitoring, canvas chords for parallel multi-user backtests, and Tidelift enterprise support |
+| **Taskiq maturity** | Re-evaluate when Taskiq adds a SQLite/file-system backend and accumulates broader production references; its native async and type-safe API are genuinely superior to Huey's decorator model |
+| **Fan-out/fan-in backtests** | If parallel multi-symbol backtests with a join step become necessary, evaluate Celery canvas chords or Taskiq pipelines |
+| **Scheduled data ingestion** | Huey's built-in crontab handles nightly Tiingo data pulls and monthly Finnhub fundamentals refresh without a separate Beat process (see [data_providers.md](data_providers.md)) |
