@@ -2,7 +2,7 @@
 """
 Task Queue Benchmark Runner
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Benchmarks 11 task queue packages across throughput, latency, and reliability
+Benchmarks 10 task queue packages across throughput, latency, and reliability
 scenarios using a gunicorn+uvicorn FastAPI server to enqueue jobs.
 
 Packages under test:
@@ -18,8 +18,9 @@ Packages under test:
     9.  Procrastinate — PostgreSQL-based (no Redis required)
   In-Process Schedulers:
     10. APScheduler   — advanced scheduling, multiple backends
-    11. Rocketry      — statement-based scheduling (excluded: incompatible
-                       with Pydantic v2, unmaintained since Dec 2022)
+
+Excluded:
+  - Rocketry — unmaintained since December 2022, incompatible with Pydantic v2
 
 Usage:
     python benchmarks/run_task_queue_benchmarks.py
@@ -131,18 +132,6 @@ QUEUES = [
         "import": "apscheduler",
         "broker": "in-process",
         "description": "Advanced scheduling — multiple backends, cron/interval/date",
-    },
-    {
-        "id": "rocketry",
-        "name": "Rocketry",
-        "category": "In-Process Scheduler",
-        "pip": "rocketry",
-        "import": "rocketry",
-        "broker": "in-process",
-        "description": "Statement-based scheduling — powerful conditions ¹",
-        "note": "Rocketry is excluded from benchmarks: it is incompatible with "
-               "Pydantic v2 and has been unmaintained since its last release "
-               "(v2.5.1, December 2022). See https://github.com/Miksus/rocketry/issues/210.",
     },
 ]
 
@@ -538,42 +527,6 @@ def bench_tasktiger(scenario: dict) -> dict:
     return metrics
 
 
-# ── Rocketry ─────────────────────────────────────────────────────────
-
-def bench_rocketry(scenario: dict) -> dict:
-    import threading
-    from rocketry import Rocketry
-    from rocketry.conds import every
-
-    count = scenario["count"]
-    # Rocketry is an in-process scheduler; benchmark measures execution
-    # throughput by running the scheduler for a fixed window.
-    counter = [0]
-    app = Rocketry(config={"execution": "thread"})
-
-    @app.task(every("0.001 seconds"))
-    def noop_task():
-        counter[0] += 1
-
-    thread = threading.Thread(target=app.run, daemon=True)
-    start = time.perf_counter()
-    thread.start()
-
-    deadline = time.time() + max(10, count * 0.05)
-    while counter[0] < count and time.time() < deadline:
-        time.sleep(0.01)
-
-    elapsed = time.perf_counter() - start
-    app.session.shut_down()
-
-    return {
-        "count": count,
-        "elapsed_s": round(elapsed, 4),
-        "tasks_per_sec": round(counter[0] / elapsed, 1) if elapsed > 0 else None,
-        "completed": counter[0],
-    }
-
-
 # ── Procrastinate ────────────────────────────────────────────────────
 
 def bench_procrastinate(scenario: dict) -> dict:
@@ -635,7 +588,6 @@ BENCH_FNS = {
     "taskiq":        bench_taskiq,
     "procrastinate": bench_procrastinate,
     "apscheduler":   bench_apscheduler,
-    "rocketry":      bench_rocketry,
 }
 
 
