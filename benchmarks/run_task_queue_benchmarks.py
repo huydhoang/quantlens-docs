@@ -18,7 +18,8 @@ Packages under test:
     9.  Procrastinate — PostgreSQL-based (no Redis required)
   In-Process Schedulers:
     10. APScheduler   — advanced scheduling, multiple backends
-    11. Rocketry      — statement-based scheduling
+    11. Rocketry      — statement-based scheduling (excluded: incompatible
+                       with Pydantic v2, unmaintained since Dec 2022)
   Stream Processing:
     12. Faust         — Kafka-based real-time streaming
 
@@ -140,7 +141,10 @@ QUEUES = [
         "pip": "rocketry",
         "import": "rocketry",
         "broker": "in-process",
-        "description": "Statement-based scheduling — powerful conditions",
+        "description": "Statement-based scheduling — powerful conditions ¹",
+        "note": "Rocketry is excluded from benchmarks: it is incompatible with "
+               "Pydantic v2 and has been unmaintained since its last release "
+               "(v2.5.1, December 2022). See https://github.com/Miksus/rocketry/issues/210.",
     },
     # ── Stream Processing ────────────────────────────────────────────
     {
@@ -206,6 +210,31 @@ def check_import(module_name: str) -> bool:
         return importlib.util.find_spec(module_name) is not None
     except (ValueError, ModuleNotFoundError):
         return False
+
+
+# ── Module-level task functions for RQ & TaskTiger ───────────────────
+# RQ and TaskTiger store function references by importable path.
+# Defining these at module level (rather than inside bench_*) and setting
+# __module__ to the package-relative name allows enqueue to succeed even
+# when the script is executed directly via ``python …/run_task_queue_benchmarks.py``.
+# Workers are not started during benchmarks, so only enqueue throughput
+# is measured; round-trip scenarios will time-out gracefully.
+
+_MODULE_PATH = "benchmarks.run_task_queue_benchmarks"
+
+
+def _bench_noop():
+    """No-op task for enqueue benchmarks."""
+    pass
+
+
+def _bench_cpu_work():
+    """CPU-bound task for throughput benchmarks."""
+    return sum(i * i for i in range(10_000))
+
+
+_bench_noop.__module__ = _MODULE_PATH
+_bench_cpu_work.__module__ = _MODULE_PATH
 
 
 # ── Benchmark implementations ────────────────────────────────────────
@@ -309,19 +338,8 @@ def bench_rq(scenario: dict) -> dict:
     conn = redis.Redis(host="localhost", port=6379)
     q = Queue(connection=conn)
 
-    def _noop():
-        pass
-
-    def _cpu_work():
-        return sum(i * i for i in range(10_000))
-
-    fn_map = {"noop": _noop, "cpu_work": _cpu_work, "flaky": _noop}
+    fn_map = {"noop": _bench_noop, "cpu_work": _bench_cpu_work, "flaky": _bench_noop}
     fn = fn_map[scenario["task"]]
-
-    # RQ rejects functions whose __module__ is '__main__' (cannot be found by workers)
-    if fn.__module__ == "__main__":
-        return {"skipped": True, "reason": "RQ cannot enqueue __main__ functions; run as a module for worker results"}
-
     count = scenario["count"]
 
     def enqueue(n):
@@ -530,19 +548,8 @@ def bench_tasktiger(scenario: dict) -> dict:
     conn = redislib.Redis(host="localhost", port=6379)
     tiger = tasktiger.TaskTiger(connection=conn)
 
-    def noop():
-        pass
-
-    def cpu_work():
-        return sum(i * i for i in range(10_000))
-
-    fn_map = {"noop": noop, "cpu_work": cpu_work, "flaky": noop}
+    fn_map = {"noop": _bench_noop, "cpu_work": _bench_cpu_work, "flaky": _bench_noop}
     fn = fn_map[scenario["task"]]
-
-    # TaskTiger rejects functions whose __module__ is '__main__'
-    if fn.__module__ == "__main__":
-        return {"skipped": True, "reason": "TaskTiger cannot enqueue __main__ functions; run as a module for worker results"}
-
     count = scenario["count"]
 
     def enqueue(n):
@@ -772,6 +779,13 @@ def generate_report(all_results: dict, queues_run: list) -> str:
                 f'| {q["name"]} | {q["category"]} | {tps} | {elapsed} | {completed} | {notes} |'
             )
         lines.append("")
+
+    # ── Footnotes ────────────────────────────────────────────────────
+    footnotes = [q.get("note") for q in QUEUES if q.get("note")]
+    if footnotes:
+        lines.append("---\n")
+        for idx, note in enumerate(footnotes, 1):
+            lines.append(f"¹ {note}\n" if idx == 1 else f"{'¹²³⁴⁵'[idx - 1]} {note}\n")
 
     return "\n".join(lines)
 
