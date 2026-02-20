@@ -13,9 +13,9 @@ Packages under test:
     4.  Huey          — lightweight, multi-backend
     5.  Dramatiq      — modern, middleware-based
     6.  ARQ           — async-first, type-hinted
-    7.  TaskTiger      — Redis-based, Close.io origin
-    8.  Taskiq         — Redis Streams, fastest performance
-    9.  Procrastinate  — PostgreSQL-based (no Redis required)
+    7.  TaskTiger     — Redis-based, Close.io origin
+    8.  Taskiq        — Redis Streams, fastest performance
+    9.  Procrastinate — PostgreSQL-based (no Redis required)
   In-Process Schedulers:
     10. APScheduler   — advanced scheduling, multiple backends
     11. Rocketry      — statement-based scheduling
@@ -23,20 +23,17 @@ Packages under test:
     12. Faust         — Kafka-based real-time streaming
 
 Usage:
-    python benchmarks/run_task_queue_benchmarks.py [--duration 30] [--workers 2]
+    python benchmarks/run_task_queue_benchmarks.py
     python benchmarks/run_task_queue_benchmarks.py --queues celery rq huey
+    python benchmarks/run_task_queue_benchmarks.py --scenarios enqueue-burst
 """
 
 import argparse
 import importlib.util
 import json
 import os
-import subprocess
-import sys
 import time
-import textwrap
 from pathlib import Path
-from urllib.request import urlopen
 
 # ── Project root ─────────────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -216,6 +213,28 @@ def _redis_available() -> bool:
     try:
         import socket
         s = socket.create_connection(("127.0.0.1", 6379), timeout=1)
+        s.close()
+        return True
+    except OSError:
+        return False
+
+
+def _postgres_available() -> bool:
+    """Quick check that PostgreSQL is reachable on localhost:5432."""
+    try:
+        import socket
+        s = socket.create_connection(("127.0.0.1", 5432), timeout=1)
+        s.close()
+        return True
+    except OSError:
+        return False
+
+
+def _kafka_available() -> bool:
+    """Quick check that Kafka is reachable on localhost:9092."""
+    try:
+        import socket
+        s = socket.create_connection(("127.0.0.1", 9092), timeout=1)
         s.close()
         return True
     except OSError:
@@ -472,6 +491,166 @@ def bench_apscheduler(scenario: dict) -> dict:
     }
 
 
+# ── BullMQ ───────────────────────────────────────────────────────────
+
+def bench_bullmq(scenario: dict) -> dict:
+    import asyncio
+    from bullmq import Queue as BullQueue
+
+    count = scenario["count"]
+
+    async def _run(n):
+        q = BullQueue("bench", {"connection": {"host": "localhost", "port": 6379}})
+        start = time.perf_counter()
+        for _ in range(n):
+            await q.add("noop", {})
+        elapsed = time.perf_counter() - start
+        await q.close()
+        return elapsed
+
+    elapsed = asyncio.run(_run(count))
+    return {
+        "count": count,
+        "elapsed_s": round(elapsed, 4),
+        "tasks_per_sec": round(count / elapsed, 1) if elapsed > 0 else None,
+    }
+
+
+# ── TaskTiger ────────────────────────────────────────────────────────
+
+def bench_tasktiger(scenario: dict) -> dict:
+    import redis as redislib
+    import tasktiger
+
+    conn = redislib.Redis(host="localhost", port=6379)
+    tiger = tasktiger.TaskTiger(connection=conn)
+
+    def noop():
+        pass
+
+    def cpu_work():
+        return sum(i * i for i in range(10_000))
+
+    fn_map = {"noop": noop, "cpu_work": cpu_work, "flaky": noop}
+    fn = fn_map[scenario["task"]]
+    count = scenario["count"]
+
+    def enqueue(n):
+        for _ in range(n):
+            tiger.delay(fn)
+
+    metrics = _time_enqueue(enqueue, count)
+    return metrics
+
+
+# ── Rocketry ─────────────────────────────────────────────────────────
+
+def bench_rocketry(scenario: dict) -> dict:
+    import threading
+    from rocketry import Rocketry
+    from rocketry.conds import every
+
+    count = scenario["count"]
+    # Rocketry is an in-process scheduler; benchmark measures execution
+    # throughput by running the scheduler for a fixed window.
+    counter = [0]
+    app = Rocketry(config={"execution": "thread"})
+
+    @app.task(every("0.001 seconds"))
+    def noop_task():
+        counter[0] += 1
+
+    thread = threading.Thread(target=app.run, daemon=True)
+    start = time.perf_counter()
+    thread.start()
+
+    deadline = time.time() + max(10, count * 0.05)
+    while counter[0] < count and time.time() < deadline:
+        time.sleep(0.01)
+
+    elapsed = time.perf_counter() - start
+    app.session.shut_down()
+
+    return {
+        "count": count,
+        "elapsed_s": round(elapsed, 4),
+        "tasks_per_sec": round(counter[0] / elapsed, 1) if elapsed > 0 else None,
+        "completed": counter[0],
+    }
+
+
+# ── Procrastinate ────────────────────────────────────────────────────
+
+def bench_procrastinate(scenario: dict) -> dict:
+    import asyncio
+    import procrastinate
+
+    dsn = os.environ.get(
+        "PROCRASTINATE_URL", "postgresql://bench:bench@localhost:5432/bench"
+    )
+    count = scenario["count"]
+
+    async def _run(n):
+        connector = procrastinate.AiopgConnector(dsn=dsn)
+        app = procrastinate.App(connector=connector)
+
+        @app.task
+        async def noop_task():
+            pass
+
+        @app.task
+        async def cpu_task():
+            return sum(i * i for i in range(10_000))
+
+        task_map = {"noop": noop_task, "cpu_work": cpu_task, "flaky": noop_task}
+        task_fn = task_map[scenario["task"]]
+
+        async with app.open_async():
+            start = time.perf_counter()
+            for _ in range(n):
+                await task_fn.defer_async()
+            elapsed = time.perf_counter() - start
+        return elapsed
+
+    elapsed = asyncio.run(_run(count))
+    return {
+        "count": count,
+        "elapsed_s": round(elapsed, 4),
+        "tasks_per_sec": round(count / elapsed, 1) if elapsed > 0 else None,
+    }
+
+
+# ── Faust ────────────────────────────────────────────────────────────
+
+def bench_faust(scenario: dict) -> dict:
+    import asyncio
+    import faust
+
+    count = scenario["count"]
+    app = faust.App(
+        "bench",
+        broker="kafka://localhost:9092",
+        store="memory://",
+        cache="memory://",
+    )
+    topic = app.topic("bench-tasks", value_type=bytes)
+
+    async def _run(n):
+        async with app.Producer() as producer:
+            start = time.perf_counter()
+            for _ in range(n):
+                await producer.send(topic, value=b"{}")
+            elapsed = time.perf_counter() - start
+        return elapsed
+
+    elapsed = asyncio.run(_run(count))
+    return {
+        "count": count,
+        "elapsed_s": round(elapsed, 4),
+        "tasks_per_sec": round(count / elapsed, 1) if elapsed > 0 else None,
+    }
+
+
 # ── Fallback: record unavailable packages ────────────────────────────
 
 def bench_unavailable(queue: dict, scenario: dict, reason: str) -> dict:
@@ -481,13 +660,18 @@ def bench_unavailable(queue: dict, scenario: dict, reason: str) -> dict:
 # ── Dispatcher ───────────────────────────────────────────────────────
 
 BENCH_FNS = {
-    "celery":      bench_celery,
-    "rq":          bench_rq,
-    "huey":        bench_huey,
-    "dramatiq":    bench_dramatiq,
-    "arq":         bench_arq,
-    "taskiq":      bench_taskiq,
-    "apscheduler": bench_apscheduler,
+    "celery":        bench_celery,
+    "rq":            bench_rq,
+    "bullmq":        bench_bullmq,
+    "huey":          bench_huey,
+    "dramatiq":      bench_dramatiq,
+    "arq":           bench_arq,
+    "tasktiger":     bench_tasktiger,
+    "taskiq":        bench_taskiq,
+    "procrastinate": bench_procrastinate,
+    "apscheduler":   bench_apscheduler,
+    "rocketry":      bench_rocketry,
+    "faust":         bench_faust,
 }
 
 
@@ -502,11 +686,11 @@ def run_queue_scenario(queue: dict, scenario: dict) -> dict:
     if broker == "redis" and not _redis_available():
         return bench_unavailable(queue, scenario, "Redis not reachable on localhost:6379")
 
-    if broker == "postgresql":
-        return bench_unavailable(queue, scenario, "PostgreSQL broker — skipped in CI (no PG server)")
+    if broker == "postgresql" and not _postgres_available():
+        return bench_unavailable(queue, scenario, "PostgreSQL not reachable on localhost:5432")
 
-    if broker == "kafka":
-        return bench_unavailable(queue, scenario, "Kafka broker — skipped in CI (no Kafka server)")
+    if broker == "kafka" and not _kafka_available():
+        return bench_unavailable(queue, scenario, "Kafka not reachable on localhost:9092")
 
     bench_fn = BENCH_FNS.get(qid)
     if bench_fn is None:
@@ -536,9 +720,9 @@ def generate_report(all_results: dict, queues_run: list) -> str:
     lines = [
         "# Task Queue Benchmark Results\n",
         "- **Runner**: `ubuntu-latest` (GitHub Actions)",
-        "- **Redis**: system Redis service container (localhost:6379)",
-        "- **PostgreSQL / Kafka brokers**: skipped (no server in CI)",
-        "- **BullMQ / TaskTiger / Rocketry / Faust**: skipped (no benchmark implementation yet)\n",
+        "- **Redis**: service container (localhost:6379)",
+        "- **PostgreSQL**: service container (localhost:5432) — used by Procrastinate",
+        "- **Kafka**: service container (localhost:9092) — used by Faust\n",
         "---\n",
         "## Package Overview\n",
         "| # | Package | Category | Broker | Notes |",

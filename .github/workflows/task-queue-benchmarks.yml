@@ -2,8 +2,6 @@ name: Task Queue Benchmarks
 
 on:
   push:
-    branches:
-      - main
     paths:
       - "benchmarks/run_task_queue_benchmarks.py"
       - ".github/workflows/task-queue-benchmarks.yml"
@@ -22,13 +20,13 @@ on:
 
 # Cancel previous runs on re-push / re-dispatch
 concurrency:
-  group: task-queue-benchmarks
+  group: task-queue-benchmarks-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   benchmark:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     permissions:
       contents: read
 
@@ -42,6 +40,39 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+
+      postgres:
+        image: postgres:16-alpine
+        ports:
+          - 5432:5432
+        env:
+          POSTGRES_USER: bench
+          POSTGRES_PASSWORD: bench
+          POSTGRES_DB: bench
+        options: >-
+          --health-cmd "pg_isready -U bench"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      kafka:
+        image: bitnami/kafka:3.6
+        ports:
+          - 9092:9092
+        env:
+          KAFKA_CFG_NODE_ID: "1"
+          KAFKA_CFG_PROCESS_ROLES: "broker,controller"
+          KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: "1@localhost:9093"
+          KAFKA_CFG_LISTENERS: "PLAINTEXT://:9092,CONTROLLER://:9093"
+          KAFKA_CFG_ADVERTISED_LISTENERS: "PLAINTEXT://localhost:9092"
+          KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: "PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT"
+          KAFKA_CFG_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+          ALLOW_PLAINTEXT_LISTENER: "yes"
+        options: >-
+          --health-cmd "kafka-topics.sh --bootstrap-server 127.0.0.1:9092 --list"
+          --health-interval 15s
+          --health-timeout 10s
+          --health-retries 10
 
     steps:
       - name: Checkout repository
@@ -57,10 +88,15 @@ jobs:
         with:
           go-version: "1.22"
 
+      - name: Install system libraries
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q libpq-dev
+
       - name: Install Python dependencies
         run: |
           pip install --upgrade pip
-          # Server stack (same gunicorn+uvicorn setup as extended-server-benchmarks)
+          # Server stack — same gunicorn+uvicorn setup as extended-server-benchmarks
           pip install \
             uvicorn[standard] gunicorn uvicorn-worker \
             fastapi pydantic
@@ -74,35 +110,60 @@ jobs:
             arq \
             tasktiger \
             "taskiq[redis]" taskiq-redis \
-            procrastinate[aiopg] \
+            "procrastinate[aiopg]" \
             apscheduler \
             rocketry \
             faust-streaming \
-            redis
+            redis \
+            psycopg2-binary \
+            aiopg \
+            aiokafka
 
       - name: Install hey
         run: |
           go install github.com/rakyll/hey@latest
           echo "$HOME/go/bin" >> "$GITHUB_PATH"
 
-      - name: Verify tools
+      - name: Apply Procrastinate schema
+        run: |
+          procrastinate --app=procrastinate.SyncPsycopg2Connector \
+            schema --apply \
+            --url "postgresql://bench:bench@localhost:5432/bench" || true
+
+      - name: Create Kafka benchmark topic
+        run: |
+          kafka-topics.sh \
+            --bootstrap-server localhost:9092 \
+            --create --if-not-exists \
+            --topic bench-tasks \
+            --partitions 1 \
+            --replication-factor 1 || true
+
+      - name: Verify tools and services
         run: |
           python --version
           redis-cli -h 127.0.0.1 ping
+          psql "postgresql://bench:bench@localhost:5432/bench" -c "SELECT 1" -q
           pip show gunicorn | grep Version
           uvicorn --version
           python -c "import celery; print('celery', celery.__version__)"
           python -c "import rq; print('rq', rq.__version__)"
+          python -c "import bullmq; print('bullmq', bullmq.__version__)" || true
           python -c "import huey; print('huey', huey.__version__)"
           python -c "import dramatiq; print('dramatiq', dramatiq.__version__)"
           python -c "import arq; print('arq', arq.__version__)"
-          python -c "import apscheduler; print('apscheduler', apscheduler.__version__)" || true
+          python -c "import tasktiger; print('tasktiger OK')"
           python -c "import taskiq; print('taskiq', taskiq.__version__)" || true
+          python -c "import procrastinate; print('procrastinate', procrastinate.__version__)"
+          python -c "import apscheduler; print('apscheduler', apscheduler.__version__)" || true
+          python -c "import rocketry; print('rocketry OK')" || true
+          python -c "import faust; print('faust', faust.__version__)" || true
 
       - name: Run task queue benchmarks
         env:
           BENCH_QUEUES: ${{ inputs.queues }}
           BENCH_SCENARIOS: ${{ inputs.scenarios }}
+          PROCRASTINATE_URL: "postgresql://bench:bench@localhost:5432/bench"
         run: |
           QUEUES_ARG=""
           if [ -n "$BENCH_QUEUES" ]; then
