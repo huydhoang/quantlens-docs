@@ -218,7 +218,6 @@ Highest enqueue throughput among traditional Redis distributed queues (3,459 tas
 |---------|--------|
 | **No SQLite or file-system broker** | Requires Redis or RabbitMQ — mandates a running broker even for a single-machine dev environment with one backtest per day |
 | **Steepest learning curve** | Configuration complexity disproportionate for a single-machine app |
-| **No SQLite backend** | Requires Redis or RabbitMQ — infrastructure overhead for a queue that dispatches < 10 jobs/day |
 | **Canvas is overkill** | fetch → validate → run → metrics → store is a linear chain; no fan-out/fan-in needed |
 | **Flower is unnecessary** | Single-user local desktop app with one operator has no need for a fleet monitoring dashboard |
 | **Prefork is not unique** | Huey also supports `--worker-type process` with `--workers N` |
