@@ -1067,6 +1067,6 @@ The Monaco Strategy Editor + Pyodide integration provides a robust, real-time Py
 5. Monitor WebSocket reconnection rates and optimize reliability
 
 For additional context on related architectural decisions, see:
-- [System Design](system_design.md) — Full QuantLens architecture overview
+- [System Design](ARCHITECTURE.md) — Full QuantLens architecture overview
 - [Core Engine](core_engine.md) — NautilusTrader integration details
 - [Local Frontend](local_frontend.md) — Tauri + React stack rationale

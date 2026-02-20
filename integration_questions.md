@@ -1,10 +1,10 @@
 # Integration Questions
 
-Deep-dive cross-referencing of [system_design.md](system_design.md), [local_frontend.md](local_frontend.md), [asgi_web_server.md](asgi_web_server.md), and [core_engine.md](core_engine.md) against all other architecture documents surfaced the following integration questions, contradictions, and unresolved design decisions.
+Deep-dive cross-referencing of [ARCHITECTURE.md](ARCHITECTURE.md), [local_frontend.md](local_frontend.md), [asgi_web_server.md](asgi_web_server.md), and [core_engine.md](core_engine.md) against all other architecture documents surfaced the following integration questions, contradictions, and unresolved design decisions.
 
 ---
 
-## Cross-Review: system_design.md × local_frontend.md × asgi_web_server.md
+## Cross-Review: ARCHITECTURE.md × local_frontend.md × asgi_web_server.md
 
 ---
 
@@ -12,7 +12,7 @@ Deep-dive cross-referencing of [system_design.md](system_design.md), [local_fron
 
 ### 1.1 Who owns the API process — Tauri or Docker?
 
-`system_design.md` shows FastAPI inside the "Docker Compose (Local)" subgraph (Deployment Architecture diagram), implying it runs as a Docker container. But `local_frontend.md` shows a direct `Tauri (Rust Core) → FastAPI + Uvicorn (Localhost)` connection, which reads like FastAPI runs as a bare localhost process outside Docker.
+`ARCHITECTURE.md` shows FastAPI inside the "Docker Compose (Local)" subgraph (Deployment Architecture diagram), implying it runs as a Docker container. But `local_frontend.md` shows a direct `Tauri (Rust Core) → FastAPI + Uvicorn (Localhost)` connection, which reads like FastAPI runs as a bare localhost process outside Docker.
 
 **Question:** Does FastAPI run inside a Docker container (alongside PostgreSQL, QuestDB, Redis, etc.) or as a native process managed by Tauri's Rust backend? This affects:
 - Port binding and networking (container-to-container vs host-to-host)
@@ -43,7 +43,7 @@ Deep-dive cross-referencing of [system_design.md](system_design.md), [local_fron
 
 ### 2.1 Contradictory communication paths between frontend and backtest engine
 
-`system_design.md` (Local App diagram) shows: `Frontend → HTTP/WebSocket → API → Celery/Redis → Nautilus`. But the Deployment Architecture diagram in the same file shows: `Tauri Desktop App → Enqueue Jobs → Redis` (direct, bypassing FastAPI).
+`ARCHITECTURE.md` (Local App diagram) shows: `Frontend → HTTP/WebSocket → API → Celery/Redis → Nautilus`. But the Deployment Architecture diagram in the same file shows: `Tauri Desktop App → Enqueue Jobs → Redis` (direct, bypassing FastAPI).
 
 **Question:** Does the Tauri frontend enqueue Celery jobs directly to Redis, or does it go through FastAPI? Direct Redis access from the frontend:
 - Bypasses validation, auth, and rate limiting
@@ -52,10 +52,10 @@ Deep-dive cross-referencing of [system_design.md](system_design.md), [local_fron
 
 ### 2.2 WebSocket progress broadcasting — who pushes to the client?
 
-The Backtest Execution Flow in `system_design.md` shows: `Worker → Queue → API → UI (WebSocket)`. But `asgi_web_server.md` (Tier 2) shows a Redis pub/sub pattern where the vanilla ASGI gateway subscribes to Redis channels and forwards to WebSocket clients.
+The Backtest Execution Flow in `ARCHITECTURE.md` shows: `Worker → Queue → API → UI (WebSocket)`. But `asgi_web_server.md` (Tier 2) shows a Redis pub/sub pattern where the vanilla ASGI gateway subscribes to Redis channels and forwards to WebSocket clients.
 
 **Question:** Which service owns the backtest progress WebSocket?
-- **Tier 1 (FastAPI):** As shown in `system_design.md` — FastAPI manages WebSocket connections and receives progress from Celery/Redis
+- **Tier 1 (FastAPI):** As shown in `ARCHITECTURE.md` — FastAPI manages WebSocket connections and receives progress from Celery/Redis
 - **Tier 2 (Vanilla ASGI):** As shown in `asgi_web_server.md` — a separate process on port 8001 handles all WebSocket streaming
 
 If it's Tier 1, then backtest progress and market data WebSockets live on different services (FastAPI vs vanilla ASGI). How does the frontend manage two separate WebSocket connections to two different ports?
@@ -73,7 +73,7 @@ async def lifespan(app: FastAPI):
     await app.state.kernel.stop()
 ```
 
-But `core_engine.md` and `system_design.md` both state that NautilusTrader runs **in Celery workers**, not in the FastAPI process. The system_design.md explicitly says: "NautilusTrader is a **library, not a service** — the API layer enqueues jobs to Celery; workers import and call `nautilus_trader` directly in-process."
+But `core_engine.md` and `ARCHITECTURE.md` both state that NautilusTrader runs **in Celery workers**, not in the FastAPI process. The ARCHITECTURE.md explicitly says: "NautilusTrader is a **library, not a service** — the API layer enqueues jobs to Celery; workers import and call `nautilus_trader` directly in-process."
 
 **Question:** Is `NautilusKernel` in FastAPI's lifespan a mistake, or is it intentional for a different purpose (e.g., strategy validation, data catalog access)? If backtests run exclusively in Celery workers, what does the FastAPI-hosted kernel do?
 
@@ -105,7 +105,7 @@ Meanwhile, `task_queue.md` shows Celery handling all background work including o
 
 `asgi_web_server.md` presents the hybrid two-tier setup (FastAPI on 8000 + Vanilla ASGI on 8001) as the recommended production architecture. But the final verdict says: "start with **FastAPI on Uvicorn**. When live trading is added, extract real-time endpoints."
 
-The system_design.md and local_frontend.md show only a single API layer (FastAPI).
+The ARCHITECTURE.md and local_frontend.md show only a single API layer (FastAPI).
 
 **Question:** Is the local desktop app (MVP) single-tier or two-tier?
 - If single-tier, should `asgi_web_server.md`'s Tier 2 code be labeled as "future" to avoid confusion?
@@ -113,7 +113,7 @@ The system_design.md and local_frontend.md show only a single API layer (FastAPI
 
 ### 3.2 NautilusKernel shared between tiers
 
-The two-tier diagram in `asgi_web_server.md` shows both tiers connecting to a "Shared Layer" containing `NautilusTrader kernel`. But NautilusTrader enforces a **one-BacktestNode-per-process** constraint (documented in `system_design.md` and `core_engine.md`).
+The two-tier diagram in `asgi_web_server.md` shows both tiers connecting to a "Shared Layer" containing `NautilusTrader kernel`. But NautilusTrader enforces a **one-BacktestNode-per-process** constraint (documented in `ARCHITECTURE.md` and `core_engine.md`).
 
 **Question:** How do two separate Uvicorn processes (Tier 1 + Tier 2) share a NautilusTrader kernel?
 - Is the "shared" kernel a misconception? Each tier would need its own kernel instance
@@ -145,7 +145,7 @@ The `psycopg2` compatibility issues (no scrollable cursors) are not a concern be
 
 **Question:** Which write protocol is canonical for QuestDB in QuantLens?
 - ILP over HTTP (port 9000) — optimized for high-throughput ingestion
-- ILP over TCP (port 9009) — even higher throughput, documented in system_design.md
+- ILP over TCP (port 9009) — even higher throughput, documented in ARCHITECTURE.md
 - PGWire SQL INSERT (port 8812) — shown in Tier 2 code
 - Are different protocols used for different tiers (ILP for bulk ingestion, PGWire for individual tick writes)?
 
@@ -153,13 +153,13 @@ The `psycopg2` compatibility issues (no scrollable cursors) are not a concern be
 
 **RESOLVED:** MongoDB has been replaced by **DuckDB** (embedded, in-process) for fundamentals and economic indicators.
 
-MongoDB's official Docker image and the community server image both encountered persistent **connection errors** during local benchmarking — a common issue with Docker-containerized databases for desktop app use cases. DuckDB eliminates this class of problems entirely by running embedded in the Python process with zero configuration. See [nosql_database.md](nosql_database.md) for the full rationale.
+MongoDB's official Docker image and the community server image both encountered persistent **connection errors** during local benchmarking — a common issue with Docker-containerized databases for desktop app use cases. DuckDB eliminates this class of problems entirely by running embedded in the Python process with zero configuration. See [fundamentals_database.md](fundamentals_database.md) for the full rationale.
 
-The deployment architecture diagram in `system_design.md` has been updated to show DuckDB as an embedded database alongside LanceDB, separate from the Docker Compose services.
+The deployment architecture diagram in `ARCHITECTURE.md` has been updated to show DuckDB as an embedded database alongside LanceDB, separate from the Docker Compose services.
 
 ### 4.4 PostgreSQL — single instance or separate per concern?
 
-`system_design.md` shows a single PostgreSQL instance for Strategies, Backtest Results, and User Data. But Celery also uses Redis (not PostgreSQL) as its result backend (`task_queue.md`). Meanwhile, `asgi_web_server.md` references `asyncpg` connections to both PostgreSQL and QuestDB (PGWire).
+`ARCHITECTURE.md` shows a single PostgreSQL instance for Strategies, Backtest Results, and User Data. But Celery also uses Redis (not PostgreSQL) as its result backend (`task_queue.md`). Meanwhile, `asgi_web_server.md` references `asyncpg` connections to both PostgreSQL and QuestDB (PGWire).
 
 **Question:** How many PostgreSQL-compatible connections does the FastAPI app maintain?
 - One `asyncpg` pool for PostgreSQL (strategies, results, users)
@@ -172,7 +172,7 @@ The deployment architecture diagram in `system_design.md` has been updated to sh
 
 ### 5.1 WebSocket fan-in/fan-out architecture
 
-`asgi_web_server.md` Tier 2 shows individual WebSocket connections to Finnhub and Alpaca, with data published to Redis channels. But `system_design.md`'s Data Flow Architecture shows a separate "Data Ingestion Service" with a "Data Normalizer" component.
+`asgi_web_server.md` Tier 2 shows individual WebSocket connections to Finnhub and Alpaca, with data published to Redis channels. But `ARCHITECTURE.md`'s Data Flow Architecture shows a separate "Data Ingestion Service" with a "Data Normalizer" component.
 
 **Question:** Is the data ingestion service the same as the Tier 2 vanilla ASGI gateway, or is it a separate process?
 - If they're the same, the Tier 2 gateway handles both ingestion (Finnhub/Alpaca → QuestDB) and serving (QuestDB → React frontend)
@@ -189,10 +189,10 @@ The deployment architecture diagram in `system_design.md` has been updated to sh
 
 ### 5.3 Market data for the React frontend — REST or WebSocket?
 
-`system_design.md` Data Flow Architecture shows: `Tiingo/Finnhub/Alpaca → FastAPI WebSocket → Market Data Hook → Price Ticker Component`. But `local_frontend.md` shows TanStack Query handling REST data, with WebSocket pushing into TanStack Query cache.
+`ARCHITECTURE.md` Data Flow Architecture shows: `Tiingo/Finnhub/Alpaca → FastAPI WebSocket → Market Data Hook → Price Ticker Component`. But `local_frontend.md` shows TanStack Query handling REST data, with WebSocket pushing into TanStack Query cache.
 
 **Question:** Does the React frontend get live market data via:
-- A dedicated WebSocket connection (as shown in system_design.md)?
+- A dedicated WebSocket connection (as shown in ARCHITECTURE.md)?
 - REST polling with TanStack Query's `refetchInterval`?
 - WebSocket updates pushed into TanStack Query cache (as shown in local_frontend.md)?
 - All three, depending on the data type?
@@ -227,7 +227,7 @@ The user story says `docker compose up` starts all backend services. But Tauri i
 
 ### 7.1 Where is Python strategy code executed?
 
-`system_design.md` mentions "Sandbox Python execution (restricted environment, no network access)" under Security Considerations. The Monaco Editor flow shows strategy code sent to FastAPI for validation, then to NautilusTrader for execution.
+`ARCHITECTURE.md` mentions "Sandbox Python execution (restricted environment, no network access)" under Security Considerations. The Monaco Editor flow shows strategy code sent to FastAPI for validation, then to NautilusTrader for execution.
 
 **Question:** What sandboxing mechanism is used, and at which layer?
 - `todos.md` lists this as "Not Started" — is there an interim plan for MVP?
@@ -243,7 +243,7 @@ For a local-first single-user app, the threat model is arguably just accidental 
 
 ### 8.1 What data flows from local app to platform?
 
-`system_design.md` shows: `QuantLens Local App → Submit Results · Deploy Strategy → TanStack Start + React → Neon PostgreSQL`. But there's no specification of what "submit results" means.
+`ARCHITECTURE.md` shows: `QuantLens Local App → Submit Results · Deploy Strategy → TanStack Start + React → Neon PostgreSQL`. But there's no specification of what "submit results" means.
 
 **Question:**
 - Does the local app upload raw backtest results (trades, equity curves, metrics)?
@@ -257,7 +257,7 @@ For a local-first single-user app, the threat model is arguably just accidental 
 
 ### 9.1 Tiingo rate limits — inconsistent across docs
 
-`system_design.md` says "Tiingo limits are plan-dependent (hourly requests + daily requests + monthly bandwidth — see pricing page)." `data_providers.md` lists "50 requests/hour · 1,000 requests/day · 500 unique symbols/month." The `todos.md` completed item says "'50 req/hr' was incorrect."
+`ARCHITECTURE.md` says "Tiingo limits are plan-dependent (hourly requests + daily requests + monthly bandwidth — see pricing page)." `data_providers.md` lists "50 requests/hour · 1,000 requests/day · 500 unique symbols/month." The `todos.md` completed item says "'50 req/hr' was incorrect."
 
 **Question:** If `50 req/hr` is incorrect per todos.md, what's the actual Tiingo free-tier rate limit? And should `data_providers.md`'s table be corrected?
 
@@ -267,7 +267,7 @@ For a local-first single-user app, the threat model is arguably just accidental 
 
 ### 10.1 Custom dataset upload pipeline
 
-`user_stories.md` includes "bring-your-own data (custom datasets I upload via the app UI)." `todos.md` lists this as "Not Started." Neither `system_design.md` nor `asgi_web_server.md` specifies the upload flow.
+`user_stories.md` includes "bring-your-own data (custom datasets I upload via the app UI)." `todos.md` lists this as "Not Started." Neither `ARCHITECTURE.md` nor `asgi_web_server.md` specifies the upload flow.
 
 **Question:** What's the planned pipeline?
 - File format support (CSV, Parquet, Excel)?
@@ -277,7 +277,7 @@ For a local-first single-user app, the threat model is arguably just accidental 
 
 ### 10.2 Authentication and authorization
 
-`system_design.md` database schema includes a `USERS` table. `asgi_web_server.md`'s two-tier diagram mentions "JWT auth" for Tier 1. But for a local-first single-user desktop app:
+`ARCHITECTURE.md` database schema includes a `USERS` table. `asgi_web_server.md`'s two-tier diagram mentions "JWT auth" for Tier 1. But for a local-first single-user desktop app:
 
 **Question:** Is authentication needed for the local app?
 - If single-user, why is there a USERS table?
@@ -309,7 +309,7 @@ For a local-first single-user app, the threat model is arguably just accidental 
 - **`BacktestEngine`** (low-level) — for rapid research iteration with `engine.reset()` for tight loops without process restart
 - **`BacktestNode`** (high-level) — for production backtests via Celery workers, one per process
 
-But `system_design.md` Section 2 ("NautilusTrader Integration") only mentions `BacktestEngine` in the class diagram (`NautilusBacktestService` has a `+BacktestEngine engine` field), while the Key Implementation Recommendations say: "Use `BacktestEngine` (low-level, fine-grained control) **or** `BacktestNode` with `BacktestRunConfig` objects (high-level, recommended for production)."
+But `ARCHITECTURE.md` Section 2 ("NautilusTrader Integration") only mentions `BacktestEngine` in the class diagram (`NautilusBacktestService` has a `+BacktestEngine engine` field), while the Key Implementation Recommendations say: "Use `BacktestEngine` (low-level, fine-grained control) **or** `BacktestNode` with `BacktestRunConfig` objects (high-level, recommended for production)."
 
 Meanwhile, `task_queue.md` exclusively uses `BacktestNode` in its Celery integration example:
 
@@ -329,7 +329,7 @@ job = group(run_backtest.s(strategy_id, params) for params in param_grid)
 
 **Question:** Which API is used where?
 - Is `BacktestEngine` used in FastAPI's process for quick "validate strategy" dry runs, while `BacktestNode` is used in Celery workers for full backtests?
-- The `system_design.md` class diagram shows `BacktestEngine` in `NautilusBacktestService` — is this service instantiated in FastAPI or in Celery workers?
+- The `ARCHITECTURE.md` class diagram shows `BacktestEngine` in `NautilusBacktestService` — is this service instantiated in FastAPI or in Celery workers?
 - Can `BacktestEngine.reset()` be used inside a Celery prefork worker to reuse the engine across multiple tasks, or does `worker_max_tasks_per_child=50` (from `task_queue.md`) mean each worker gets a fresh `BacktestNode` per task?
 
 ---
@@ -393,11 +393,11 @@ But no document defines the template system:
 - Are templates pre-built `.py` files served by FastAPI (`GET /api/strategies/template`)?
 - Do templates include the full NautilusTrader boilerplate (`Strategy` base class, `on_start`, `on_bar`, `on_stop` methods), leaving the user to fill in logic?
 - Are there multiple templates (SMA crossover, momentum, mean reversion) or a single generic template?
-- How does the Monaco editor provide NautilusTrader-specific autocompletion? `system_design.md` mentions a custom `CompletionItemProvider` but doesn't specify what completions are offered.
+- How does the Monaco editor provide NautilusTrader-specific autocompletion? `ARCHITECTURE.md` mentions a custom `CompletionItemProvider` but doesn't specify what completions are offered.
 
 ### 14.2 Strategy validation — dry run vs AST parse
 
-`core_engine.md` says strategies are validated before execution. `system_design.md`'s Monaco Editor flow shows two validation stages:
+`core_engine.md` says strategies are validated before execution. `ARCHITECTURE.md`'s Monaco Editor flow shows two validation stages:
 1. Client-side: Pyodide WASM AST parsing for syntax errors
 2. Server-side: `POST /api/strategies/validate → FastAPI → Nautilus: Dry-run parse`
 
@@ -411,7 +411,7 @@ But no document defines the template system:
 `core_engine.md` shows strategies executed in Celery workers. `task_queue.md` configures `task_serializer="json"` and `accept_content=["json"]`. But a strategy is Python source code (a class definition), not a JSON-serializable object.
 
 **Question:** How does strategy code get from the Monaco editor to a Celery worker?
-- Is the Python source stored in PostgreSQL (`STRATEGIES.python_code` column in `system_design.md` schema), and the worker loads it by ID from the database?
+- Is the Python source stored in PostgreSQL (`STRATEGIES.python_code` column in `ARCHITECTURE.md` schema), and the worker loads it by ID from the database?
 - Or is the source code passed as a JSON string in the Celery task arguments?
 - If loaded from the database, the worker must `exec()` or `importlib` the code at runtime — how does this interact with NautilusTrader's strategy registration?
 
@@ -423,7 +423,7 @@ But no document defines the template system:
 
 `core_engine.md` integration table: "Single adapter pattern normalizing Tiingo/Alpaca/Finnhub data to NautilusTrader `Bar`/`QuoteTick` types."
 
-But the data flow in `system_design.md` and `data_providers.md` shows data going through multiple stages: Provider → Validation → QuestDB → Parquet → ParquetDataCatalog.
+But the data flow in `ARCHITECTURE.md` and `data_providers.md` shows data going through multiple stages: Provider → Validation → QuestDB → Parquet → ParquetDataCatalog.
 
 **Question:** At which stage does the conversion to NautilusTrader types happen?
 - During ingestion (provider response → NautilusTrader `Bar` objects → Parquet)?

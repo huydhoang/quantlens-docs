@@ -10,7 +10,7 @@ Proposed resolutions for each unresolved question in [integration_questions.md](
 
 **Recommendation: FastAPI runs inside Docker Compose, not managed by Tauri.**
 
-The `system_design.md` Deployment Architecture diagram is authoritative — FastAPI, Celery workers, PostgreSQL, QuestDB, and Redis all run as Docker Compose services. Tauri is a native desktop app that connects to these services over `localhost`.
+The `ARCHITECTURE.md` Deployment Architecture diagram is authoritative — FastAPI, Celery workers, PostgreSQL, QuestDB, and Redis all run as Docker Compose services. Tauri is a native desktop app that connects to these services over `localhost`.
 
 - **Port binding:** FastAPI exposes port 8000 on the host via Docker Compose `ports` mapping.
 - **Startup orchestration:** `docker compose up` starts all backend services. Tauri connects to them on launch.
@@ -61,13 +61,13 @@ All backtest requests must go through FastAPI for:
 - Job record creation in the database
 - Rate limiting and resource management
 
-The Deployment Architecture diagram in `system_design.md` (section "Local App (Docker Compose + Embedded)") has an `A -->|Enqueue Jobs| C` (Tauri → Redis) arrow that should be updated to `A -->|HTTP| API -->|Enqueue| C` to match the Backtest Execution Flow sequence diagram in the same document, which is the authoritative source.
+The Deployment Architecture diagram in `ARCHITECTURE.md` (section "Local App (Docker Compose + Embedded)") has an `A -->|Enqueue Jobs| C` (Tauri → Redis) arrow that should be updated to `A -->|HTTP| API -->|Enqueue| C` to match the Backtest Execution Flow sequence diagram in the same document, which is the authoritative source.
 
 ### 2.2 WebSocket progress ownership — 🟠
 
 **Recommendation: Tier 1 (FastAPI on port 8000) owns backtest progress WebSocket for MVP.**
 
-The Backtest Execution Flow sequence diagram in `system_design.md` shows `API → UI` via WebSocket, placing progress broadcasting in FastAPI. The pattern:
+The Backtest Execution Flow sequence diagram in `ARCHITECTURE.md` shows `API → UI` via WebSocket, placing progress broadcasting in FastAPI. The pattern:
 1. Celery worker publishes progress to a Redis channel (e.g., `backtest:{id}:progress`).
 2. FastAPI subscribes to that channel and forwards messages to the connected WebSocket client.
 
@@ -78,7 +78,7 @@ This keeps MVP single-tier. When Tier 2 is added for live trading, market data W
 **Recommendation: Remove `NautilusKernel` from FastAPI's lifespan. It conflicts with the established design patterns across all other architecture documents.**
 
 All docs agree: NautilusTrader is a library used in Celery workers, not in the API process. The `NautilusKernel` in `asgi_web_server.md`'s Tier 1 example is incorrect — it conflicts with:
-- `system_design.md`: "NautilusTrader is a library, not a service"
+- `ARCHITECTURE.md`: "NautilusTrader is a library, not a service"
 - `core_engine.md`: Backtests run in Celery prefork workers
 - The one-`BacktestNode`-per-process constraint
 
@@ -107,7 +107,7 @@ To avoid conflicts with `uvicorn --workers`, use `ProcessPoolExecutor(max_worker
 
 **Recommendation: MVP is single-tier (FastAPI on port 8000 only). Tier 2 is explicitly future scope, to be added when live trading features are implemented.**
 
-`asgi_web_server.md`'s own final verdict says: "start with FastAPI on Uvicorn. When live trading is added, extract real-time endpoints." Both `system_design.md` and `local_frontend.md` show only a single API layer. Label Tier 2 code in `asgi_web_server.md` as "Future — Live Trading" to avoid confusion.
+`asgi_web_server.md`'s own final verdict says: "start with FastAPI on Uvicorn. When live trading is added, extract real-time endpoints." Both `ARCHITECTURE.md` and `local_frontend.md` show only a single API layer. Label Tier 2 code in `asgi_web_server.md` as "Future — Live Trading" to avoid confusion.
 
 ### 3.2 Shared NautilusTrader kernel — 🟠
 
@@ -243,7 +243,7 @@ The threat model for a local-first single-user app is **accidental harm** (infin
 - `worker_max_tasks_per_child=50` to restart workers and reclaim leaked memory.
 - `resource.setrlimit()` in the Celery worker to cap memory usage per process.
 
-Full sandboxing (RestrictedPython, nsjail, Pyodide server-side) should be deferred to the platform app where multi-tenant execution requires stronger isolation. Label this as "Future — Platform" in `system_design.md`.
+Full sandboxing (RestrictedPython, nsjail, Pyodide server-side) should be deferred to the platform app where multi-tenant execution requires stronger isolation. Label this as "Future — Platform" in `ARCHITECTURE.md`.
 
 ---
 
@@ -269,14 +269,14 @@ This is explicitly future scope. Defer detailed API contract design until the pl
 
 **Recommendation: Update `data_providers.md` to state that Tiingo free-tier limits are plan-dependent and refer to the pricing page.**
 
-Tiingo's free-tier limits are not a simple "50 req/hr" — they vary based on the plan and endpoint. The `system_design.md` phrasing is more accurate: "Tiingo limits are plan-dependent (hourly requests + daily requests + monthly bandwidth — see pricing page)." The README already states "1,000 req/day" which aligns with the documented daily limit.
+Tiingo's free-tier limits are not a simple "50 req/hr" — they vary based on the plan and endpoint. The `ARCHITECTURE.md` phrasing is more accurate: "Tiingo limits are plan-dependent (hourly requests + daily requests + monthly bandwidth — see pricing page)." The README already states "1,000 req/day" which aligns with the documented daily limit.
 
 Correct the `data_providers.md` table row for Tiingo to:
 ```
 | Tiingo | Plan-dependent (see pricing page) · ~1,000 req/day (free) · 500 unique symbols/month | ...
 ```
 
-Remove the specific "50 requests/hour" claim, which was identified as incorrect in `todos.md`. Also update the `RateLimitedClient` example in `data_providers.md` (which references `max_per_hour=50`) to use `max_per_day=1000` instead, and cross-reference `system_design.md`'s data management section for consistency.
+Remove the specific "50 requests/hour" claim, which was identified as incorrect in `todos.md`. Also update the `RateLimitedClient` example in `data_providers.md` (which references `max_per_hour=50`) to use `max_per_day=1000` instead, and cross-reference `ARCHITECTURE.md`'s data management section for consistency.
 
 ---
 
@@ -323,7 +323,7 @@ Rationale:
 - `BacktestNode` with `BacktestRunConfig` is NautilusTrader's recommended production API.
 - `task_queue.md` and `core_engine.md` Celery examples both use `BacktestNode`.
 - `BacktestEngine.reset()` could theoretically reuse engines within prefork workers, but `worker_max_tasks_per_child=50` means workers restart frequently anyway. The complexity of engine reuse is not worth the marginal benefit.
-- Update `system_design.md`'s class diagram to show `BacktestNode` instead of `BacktestEngine` in `NautilusBacktestService`.
+- Update `ARCHITECTURE.md`'s class diagram to show `BacktestNode` instead of `BacktestEngine` in `NautilusBacktestService`.
 
 For strategy validation (dry-run), do **not** use `BacktestEngine` in FastAPI. Instead, validate in a short-lived Celery task that imports the user's strategy class and checks for required method signatures (`on_bar`, `on_start`, etc.) without running a simulation.
 

@@ -57,7 +57,7 @@ TanStack Start + React (Frontend + API)
 | **Time-series DB** | QuestDB | Native `SAMPLE BY`, `ASOF JOIN`, `LATEST ON`, 11M+ rows/sec ingestion — purpose-built for financial market data. Running locally in Docker removes the free-tier constraints that previously favored TimescaleDB |
 | **Frontend (local)** | Tauri + Vite + React | Desktop app with TanStack Query (REST caching), TanStack Router (type-safe routing), WebSocket streaming for backtest progress, Monaco Editor for strategy authoring |
 | **Frontend (platform)** | TanStack Start + React | Server functions, SSR for SEO, streaming, TanStack Query for data fetching |
-| **Fundamentals DB** | DuckDB (embedded) | Embedded columnar database for semi-structured fundamentals and economic data; SQL interface with zero-copy Pandas/Polars integration; no Docker networking overhead |
+| **Fundamentals DB** | DuckDB (embedded) | Benchmark winner: 34ms screening, 96ms complex queries. Top alternatives: SQLite (35ms, zero-config), PostgreSQL (38ms, already in stack), ClickHouse (45ms screening / 185ms complex). See [fundamentals_database.md](fundamentals_database.md). |
 | **Task queue** | Celery | Battle-tested reliability, canvas workflows for backtest pipelines, Redis broker (no new infrastructure), Flower monitoring |
 | **Platform DB** | Neon (managed PostgreSQL) | Serverless PostgreSQL for the deployed platform app — user profiles, submitted results, live strategy tracking |
 | **Deployment (local)** | Tauri desktop app + Docker Compose | Tauri app runs natively; backend services (FastAPI, databases, Redis, workers) start with `docker compose up` |
@@ -69,11 +69,11 @@ TanStack Start + React (Frontend + API)
 |----------|-------------|
 | [core_engine.md](core_engine.md) | Core engine decision analysis — why NautilusTrader alone (not a dual VectorBT + NautilusTrader stack), with ecosystem comparison, dual-engine trade-offs, and integration with QuantLens architecture |
 | [local_frontend.md](local_frontend.md) | Local desktop frontend tech stack decision — why Tauri + Vite + React + TanStack over Electron, Next.js, TanStack Start, and Astro, with architecture diagram and implementation details |
-| [system_design.md](system_design.md) | Full system architecture — frontend components, backtest execution flow, data flow, NautilusTrader integration, database schema, and deployment topology |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Full system architecture — frontend components, backtest execution flow, data flow, NautilusTrader integration, database schema, and deployment topology |
 | [python_rust_or_go.md](python_rust_or_go.md) | Server language decision analysis — why Python wins given NautilusTrader's hybrid Rust/Python architecture, with ecosystem comparisons across Python, Rust, and Go |
 | [data_providers.md](data_providers.md) | Multi-provider strategy for free-tier data — Tiingo, Alpaca, Finnhub, and Alpha Vantage compared on rate limits, data quality, and coverage, plus the validation pipeline |
 | [ohlcv_database.md](ohlcv_database.md) | Time-series database evaluation — QuestDB vs TimescaleDB vs InfluxDB vs MongoDB for OHLCV storage, with rationale for QuestDB as the local-first default |
-| [nosql_database.md](nosql_database.md) | Fundamentals database evaluation — DuckDB as embedded columnar database for stock fundamentals and economic indicators, replacing MongoDB to eliminate Docker networking complexity for local desktop deployment |
+| [fundamentals_database.md](fundamentals_database.md) | Fundamentals database evaluation — DuckDB as embedded columnar database for stock fundamentals and economic indicators, with full benchmark results (13 databases). Top alternatives: SQLite, PostgreSQL, ClickHouse. |
 | [task_queue.md](task_queue.md) | Task queue decision analysis — why Celery over Dramatiq, RQ, and Taskiq, with configuration for NautilusTrader backtest workers |
 | [asgi_rsgi_wsgi.md](asgi_rsgi_wsgi.md) | Web interface decision analysis — why ASGI over WSGI/RSGI for NautilusTrader real-time streaming + skfolio optimization workloads |
 | [asgi_web_server.md](asgi_web_server.md) | ASGI web server architecture decision — Gunicorn+Uvicorn Raw ASGI by default, with FastAPI on Gunicorn+Uvicorn only when WebSocket support is required; extended benchmark results comparing all six stacks |
