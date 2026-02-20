@@ -2,7 +2,7 @@
 
 ## Decision Summary
 
-**Huey** is the task queue for QuantLens. Benchmarks across 10 packages confirm it delivers the best combination of simplicity, backend flexibility, and throughput for a **local single-machine desktop app**. Huey's SQLite backend eliminates Redis as a hard dependency for the task queue (Redis remains in Docker Compose for cache and pub/sub). Its `immediate=True` mode removes the need for a separate worker process during development. Enqueue throughput is irrelevant — a NautilusTrader backtest takes 5–120 seconds to run; dispatch overhead is under 1 ms for every package tested.
+**Huey** is the task queue for QuantLens. Benchmarks across 10 packages confirm it delivers the best combination of simplicity, backend flexibility, and throughput for a **local single-machine desktop app**. Huey's SQLite backend eliminates Redis as a hard dependency for the task queue (Redis remains in Docker Compose for cache and pub/sub). Its `immediate=True` development mode removes the need for a separate worker process during development and testing. Enqueue throughput is irrelevant — a NautilusTrader backtest takes 5–120 seconds to run; dispatch overhead is under 1 ms for every package tested.
 
 **Dramatiq** is the second choice if pipeline chaining with a Redis broker is preferred.
 
@@ -73,7 +73,7 @@ flowchart LR
 
 ### Methodology
 
-> **Important:** The numbers in these tables are **not directly comparable across categories**. Huey (`immediate=True`) and APScheduler (in-process) execute tasks in-process — fundamentally different from dispatching to a Redis queue. Future benchmark runs use Huey with `immediate=False` to measure actual Redis write throughput for a fair apples-to-apples comparison. For the distributed queues (Celery, RQ, Dramatiq, etc.), workers were not started; these numbers measure **broker write throughput only** — how fast messages can be written to Redis or PostgreSQL. `completed=0` for Celery, RQ means enqueue was measured but execution was not tested.
+> **Important:** The numbers in these tables are **not directly comparable across categories**. Huey (`immediate=True`) and APScheduler (in-process) execute tasks in-process — fundamentally different from dispatching to a Redis queue. The benchmark script has been updated to use Huey with `immediate=False` to measure actual Redis write throughput for a fair apples-to-apples comparison; re-run benchmarks for updated Huey numbers. For the distributed queues (Celery, RQ, Dramatiq, etc.), workers were not started; these numbers measure **broker write throughput only** — how fast messages can be written to Redis or PostgreSQL. `completed=0` for Celery, RQ means enqueue was measured but execution was not tested.
 
 ### Burst Enqueue — 1,000 Tasks
 

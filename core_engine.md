@@ -178,6 +178,15 @@ VectorBT's killer feature is broadcasting parameter sweeps. NautilusTrader achie
 ```python
 # Parallel parameter sweep via Huey workers
 # Each worker runs an isolated BacktestNode (required by NautilusTrader's singleton constraint)
+from huey import RedisHuey
+
+huey = RedisHuey("quantlens", host="localhost", port=6379)
+
+@huey.task(retries=1, retry_delay=10)
+def run_backtest(strategy_id, params):
+    from nautilus_trader.backtest.node import BacktestNode
+    # ... configure and run backtest with params
+    pass
 
 param_grid = [
     {"fast": f, "slow": s}
@@ -186,6 +195,7 @@ param_grid = [
 ]
 
 # Fan out across Huey process workers — one BacktestNode per process
+# Calling a @huey.task function enqueues it to Redis; workers pick up jobs independently
 for params in param_grid:
     run_backtest(strategy_id, params)
 ```
