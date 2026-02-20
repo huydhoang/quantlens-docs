@@ -781,11 +781,13 @@ def generate_report(all_results: dict, queues_run: list) -> str:
         lines.append("")
 
     # ── Footnotes ────────────────────────────────────────────────────
+    _SUPERSCRIPTS = "¹²³⁴⁵⁶⁷⁸⁹"
     footnotes = [q.get("note") for q in QUEUES if q.get("note")]
     if footnotes:
         lines.append("---\n")
-        for idx, note in enumerate(footnotes, 1):
-            lines.append(f"¹ {note}\n" if idx == 1 else f"{'¹²³⁴⁵'[idx - 1]} {note}\n")
+        for idx, note in enumerate(footnotes):
+            marker = _SUPERSCRIPTS[idx] if idx < len(_SUPERSCRIPTS) else f"[{idx + 1}]"
+            lines.append(f"{marker} {note}\n")
 
     return "\n".join(lines)
 
