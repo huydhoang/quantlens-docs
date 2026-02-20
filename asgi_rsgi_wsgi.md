@@ -2,7 +2,7 @@
 
 ## Decision Summary
 
-**ASGI** is the web server interface for QuantLens backend services. The default server stack is **Gunicorn+Uvicorn · Raw ASGI**. **FastAPI** is only added as the ASGI framework when WebSocket support is explicitly required. See [asgi_web_server.md](asgi_web_server.md) for the extended benchmark results behind this decision.
+**ASGI** is the web server interface for QuantLens backend services. The default server stack is **Gunicorn+Uvicorn · Raw ASGI**. **FastAPI** is only added as the ASGI framework when WebSocket support is explicitly required. See [backend_server.md](backend_server.md) for the extended benchmark results behind this decision.
 
 ---
 

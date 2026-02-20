@@ -326,7 +326,7 @@ pip install granian
 granian --interface asgi --host 0.0.0.0 --port 8000 --workers 4 app.main:app
 ```
 
-Best for: cases requiring HTTP/2 or native Prometheus metrics. Granian is a Rust-based HTTP server supporting ASGI/WSGI/RSGI, HTTP/1 and HTTP/2, with built-in Prometheus metrics (`--metrics`). It replaces the Gunicorn+Uvicorn stack with a single dependency but requires manual tuning (e.g. `--backlog 2048`) and underperforms Gunicorn+Uvicorn on CPU-burst workloads. **Not the recommended default — use Gunicorn+Uvicorn instead.** See [asgi_web_server.md](asgi_web_server.md) for benchmark details.
+Best for: cases requiring HTTP/2 or native Prometheus metrics. Granian is a Rust-based HTTP server supporting ASGI/WSGI/RSGI, HTTP/1 and HTTP/2, with built-in Prometheus metrics (`--metrics`). It replaces the Gunicorn+Uvicorn stack with a single dependency but requires manual tuning (e.g. `--backlog 2048`) and underperforms Gunicorn+Uvicorn on CPU-burst workloads. **Not the recommended default — use Gunicorn+Uvicorn instead.** See [backend_server.md](backend_server.md) for benchmark details.
 
 ### Server Comparison for CI
 

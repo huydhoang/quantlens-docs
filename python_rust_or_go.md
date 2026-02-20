@@ -190,7 +190,7 @@ quadrantChart
 Performance is achieved through architecture choices, not language replacement:
 
 ### Gunicorn+Uvicorn Raw ASGI (over Granian)
-Use Gunicorn+Uvicorn Raw ASGI for HTTP handling. Extended benchmarks show Gunicorn+Uvicorn wins the critical CPU-burst portfolio optimization scenario and requires no non-obvious configuration. See [asgi_web_server.md](asgi_web_server.md) for the benchmark-driven rationale. FastAPI is only added when WebSocket support is explicitly required.
+Use Gunicorn+Uvicorn Raw ASGI for HTTP handling. Extended benchmarks show Gunicorn+Uvicorn wins the critical CPU-burst portfolio optimization scenario and requires no non-obvious configuration. See [backend_server.md](backend_server.md) for the benchmark-driven rationale. FastAPI is only added when WebSocket support is explicitly required.
 
 ### Streaming Data via BacktestNode
 Use NautilusTrader's `BacktestNode` with `ParquetDataCatalog` for memory-efficient streaming instead of loading entire datasets into RAM:
