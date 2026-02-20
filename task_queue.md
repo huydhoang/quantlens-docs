@@ -47,11 +47,11 @@ flowchart LR
 
 ## Benchmark Results
 
-**Environment:** GitHub Actions `ubuntu-latest`, Actions run 22230568964. Redis service container (localhost:6379), PostgreSQL service container (localhost:5432), Kafka service container (localhost:9092).
+**Environment:** GitHub Actions `ubuntu-latest` (2-core CPU, 7 GB RAM), Actions run 22230568964. Redis service container (localhost:6379), PostgreSQL service container (localhost:5432), Kafka service container (localhost:9092).
 
 ### Methodology
 
-> **Important:** Enqueue benchmarks measure **broker write throughput only** — how fast jobs can be dispatched, not executed. Workers were not started for Celery, RQ, ARQ, Dramatiq, TaskTiger, Taskiq, or Procrastinate; `completed=0` for those packages means execution was not tested. Huey was run with `immediate=True` (executes in-process synchronously) — high throughput reflects in-process dispatch, not distributed worker execution. APScheduler is in-process with no broker. Faust measures Kafka producer throughput (aiokafka), not task execution. Rocketry was not installed — incompatible with Pydantic v2 and unmaintained since December 2022.
+> **Important:** The numbers in these tables are **not directly comparable across categories**. Huey (`immediate=True`), APScheduler (in-process), and Faust (Kafka producer) execute in-process or measure network I/O to a local Kafka broker — fundamentally different from dispatching to a remote Redis queue. For the distributed queues (Celery, RQ, Dramatiq, etc.), workers were not started; these numbers measure **broker write throughput only** — how fast messages can be written to Redis or PostgreSQL. `completed=0` for Celery, RQ means enqueue was measured but execution was not tested. Rocketry was not installed — incompatible with Pydantic v2 and unmaintained since December 2022.
 
 ### Burst Enqueue — 1,000 Tasks
 
@@ -87,7 +87,7 @@ flowchart LR
 | Celery | Distributed Task Queue | 1,265 | 7.90 s | |
 | Rocketry | In-Process Scheduler | — | — | Not installed |
 
-† APScheduler is in-process; "in window" means the benchmark timed out after the fixed measurement window — APScheduler processed 8,286 of the 10,000 scheduled callbacks within the allotted time. This is a scheduler throughput ceiling, not a failure.
+† APScheduler is in-process; 356.8 ms is the time to *schedule* 10,000 jobs (add them to the scheduler). The scheduler then executed 8,286 callbacks before the benchmark's post-schedule wait window closed. This reflects execution concurrency limits, not scheduling throughput — scheduling itself succeeded for all 10,000 tasks.
 
 ### Round-Trip Latency — 100 Tasks
 
@@ -169,7 +169,7 @@ Workers not running for distributed queues — completed count reflects enqueue 
 
 ### Enqueue throughput is irrelevant for NautilusTrader
 
-Every package tested can dispatch a backtest job in under 1 ms. A NautilusTrader backtest takes 5–120 seconds to execute. The ranking of Dramatiq (3,459 tasks/s) over Celery (1,265 tasks/s) or Celery over Procrastinate (1,385 tasks/s) has zero practical effect on QuantLens. The bottleneck is CPU execution time, not broker write speed.
+The throughput gap between the fastest (Dramatiq, 3,459 tasks/s) and the slowest traditional distributed queue (Celery, 1,265 tasks/s) translates to a difference of ~0.6 ms per task (1,265 tasks/s → 0.79 ms; 3,459 tasks/s → 0.29 ms). A NautilusTrader backtest takes 5–120 seconds to execute. Neither 0.79 ms nor 0.29 ms is the bottleneck. The ranking of Dramatiq over Celery has zero practical effect on QuantLens. The bottleneck is CPU execution time, not broker write speed.
 
 ### QuantLens does NOT need
 
@@ -191,7 +191,7 @@ Every package tested can dispatch a backtest job in under 1 ms. A NautilusTrader
 
 ### Huey satisfies every requirement
 
-The benchmark exposes one critical advantage that raw throughput numbers do not capture: **backend flexibility**. Huey is the only distributed task queue tested that supports SQLite as a broker. This matters for a local desktop app — it means the task queue has zero infrastructure dependencies beyond a file on disk during development, and switches to Redis for production with a one-line config change.
+The benchmark exposes one critical advantage that raw throughput numbers do not capture: **backend flexibility**. Among the distributed task queues tested (those that can run workers in a separate process), Huey is the only one that supports SQLite as a broker. This matters for a local desktop app — it means the task queue has zero infrastructure dependencies beyond a file on disk during development, and switches to Redis for production with a one-line config change.
 
 ---
 
@@ -216,7 +216,7 @@ Highest enqueue throughput among traditional Redis distributed queues (3,459 tas
 
 | Problem | Detail |
 |---------|--------|
-| **Lowest throughput** | 1,199 tasks/s burst — last among distributed queues |
+| **No SQLite or file-system broker** | Requires Redis or RabbitMQ — mandates a running broker even for a single-machine dev environment with one backtest per day |
 | **Steepest learning curve** | Configuration complexity disproportionate for a single-machine app |
 | **No SQLite backend** | Requires Redis or RabbitMQ — infrastructure overhead for a queue that dispatches < 10 jobs/day |
 | **Canvas is overkill** | fetch → validate → run → metrics → store is a linear chain; no fan-out/fan-in needed |
@@ -328,10 +328,11 @@ def run_nautilus_backtest(backtest_id: str, strategy_id: str, config: dict):
         raise
 
 
-# Pipeline: chain fetch → validate → run → store using Huey's .then() chaining.
-# Calling a @huey.task function returns a Result object; .then() chains the next task,
-# passing the previous result as the first argument automatically.
-# @huey.task decorators on fetch_market_data, validate_data, store_results omitted for brevity.
+# Pipeline: chain fetch → validate → run → store.
+# In non-immediate (production) mode, calling a @huey.task function enqueues it
+# and returns a Result. The .then() method on a Result chains the next task,
+# passing the previous result as the first positional argument automatically.
+# In immediate=True (dev) mode, tasks execute synchronously and .then() is not used.
 def dispatch_backtest_pipeline(backtest_id: str, strategy_id: str, config: dict):
     result = (
         fetch_market_data(config["symbols"], config["start"], config["end"])
@@ -374,7 +375,7 @@ async def handle_backtest_request(scope, receive, send):
 |------|------------|
 | **Worker memory leaks from NautilusTrader** | `--worker-type process` spawns fresh processes; restart after N tasks via OS supervisor (systemd/Docker restart policy) |
 | **SQLite contention under concurrent writes** | Use Redis backend in production; SQLite backend is for dev only |
-| **Redis as single point of failure** | Redis is already required for cache and pub/sub — one Redis failure affects cache, pub/sub, and queue simultaneously; mitigate with Docker restart policy, health checks, and Redis persistence (`appendonly yes` in redis.conf for AOF) to recover enqueued-but-unexecuted tasks after crash |
+| **Broker failure** | **SQLite backend**: the queue persists to disk — no external SPOF; unexecuted tasks survive process restart. **Redis backend**: Redis is already required for cache and pub/sub; one Redis failure affects cache, pub/sub, and queue simultaneously. Mitigate with Docker restart policy, health checks, and Redis persistence (`appendonly yes` in redis.conf for AOF). |
 | **Long-running task blocks worker slot** | Set `task_time_limit` via `@huey.task(context=True)` + signal handler; use `--workers N` to avoid head-of-line blocking |
 | **Large result payloads** | Store results in PostgreSQL; publish only `backtest_id` and status through the task queue |
 | **Huey pipeline is linear only** | Backtest pipeline is always linear (fetch → validate → run → store); fan-out/fan-in is not a current requirement |
