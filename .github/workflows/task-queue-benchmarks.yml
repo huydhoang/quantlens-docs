@@ -70,11 +70,13 @@ jobs:
           KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
           KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
           KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+          KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
         options: >-
-          --health-cmd "kafka-broker-api-versions.sh --bootstrap-server 127.0.0.1:9092"
-          --health-interval 15s
+          --health-cmd "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092"
+          --health-interval 5s
           --health-timeout 10s
-          --health-retries 10
+          --health-retries 30
+          --health-start-period 30s
 
     steps:
       - name: Checkout repository
