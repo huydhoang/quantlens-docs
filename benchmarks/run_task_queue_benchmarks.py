@@ -2,7 +2,7 @@
 """
 Task Queue Benchmark Runner
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Benchmarks 12 task queue packages across throughput, latency, and reliability
+Benchmarks 11 task queue packages across throughput, latency, and reliability
 scenarios using a gunicorn+uvicorn FastAPI server to enqueue jobs.
 
 Packages under test:
@@ -20,8 +20,6 @@ Packages under test:
     10. APScheduler   — advanced scheduling, multiple backends
     11. Rocketry      — statement-based scheduling (excluded: incompatible
                        with Pydantic v2, unmaintained since Dec 2022)
-  Stream Processing:
-    12. Faust         — Kafka-based real-time streaming
 
 Usage:
     python benchmarks/run_task_queue_benchmarks.py
@@ -146,16 +144,6 @@ QUEUES = [
                "Pydantic v2 and has been unmaintained since its last release "
                "(v2.5.1, December 2022). See https://github.com/Miksus/rocketry/issues/210.",
     },
-    # ── Stream Processing ────────────────────────────────────────────
-    {
-        "id": "faust",
-        "name": "Faust",
-        "category": "Stream Processing",
-        "pip": "faust-streaming",
-        "import": "faust",
-        "broker": "kafka",
-        "description": "Kafka-based real-time streaming — not a traditional job queue",
-    },
 ]
 
 # ── Benchmark scenarios ──────────────────────────────────────────────
@@ -262,16 +250,6 @@ def _postgres_available() -> bool:
         return False
 
 
-def _kafka_available() -> bool:
-    """Quick check that Kafka is reachable on localhost:9092."""
-    try:
-        import socket
-        s = socket.create_connection(("127.0.0.1", 9092), timeout=1)
-        s.close()
-        return True
-    except OSError:
-        return False
-
 
 def _time_enqueue(fn, count: int) -> dict:
     """Run fn(count) and return timing metrics."""
@@ -364,7 +342,7 @@ def bench_rq(scenario: dict) -> dict:
 def bench_huey(scenario: dict) -> dict:
     from huey import RedisHuey
 
-    huey = RedisHuey("bench", host="localhost", port=6379, immediate=True)
+    huey = RedisHuey("bench", host="localhost", port=6379, immediate=False)
 
     @huey.task()
     def noop_task():
@@ -638,36 +616,6 @@ def bench_procrastinate(scenario: dict) -> dict:
     }
 
 
-# ── Faust ────────────────────────────────────────────────────────────
-
-def bench_faust(scenario: dict) -> dict:
-    # faust-streaming benchmarks Kafka producer throughput via aiokafka directly,
-    # since faust.App requires a running loop/worker to use topic.send reliably.
-    import asyncio
-    from aiokafka import AIOKafkaProducer
-
-    count = scenario["count"]
-
-    async def _run(n):
-        producer = AIOKafkaProducer(bootstrap_servers="localhost:9092")
-        await producer.start()
-        try:
-            start = time.perf_counter()
-            for _ in range(n):
-                await producer.send("bench-tasks", value=b"{}")
-            elapsed = time.perf_counter() - start
-        finally:
-            await producer.stop()
-        return elapsed
-
-    elapsed = asyncio.run(_run(count))
-    return {
-        "count": count,
-        "elapsed_s": round(elapsed, 4),
-        "tasks_per_sec": round(count / elapsed, 1) if elapsed > 0 else None,
-    }
-
-
 # ── Fallback: record unavailable packages ────────────────────────────
 
 def bench_unavailable(queue: dict, scenario: dict, reason: str) -> dict:
@@ -688,7 +636,6 @@ BENCH_FNS = {
     "procrastinate": bench_procrastinate,
     "apscheduler":   bench_apscheduler,
     "rocketry":      bench_rocketry,
-    "faust":         bench_faust,
 }
 
 
@@ -705,9 +652,6 @@ def run_queue_scenario(queue: dict, scenario: dict) -> dict:
 
     if broker == "postgresql" and not _postgres_available():
         return bench_unavailable(queue, scenario, "PostgreSQL not reachable on localhost:5432")
-
-    if broker == "kafka" and not _kafka_available():
-        return bench_unavailable(queue, scenario, "Kafka not reachable on localhost:9092")
 
     bench_fn = BENCH_FNS.get(qid)
     if bench_fn is None:
@@ -738,8 +682,7 @@ def generate_report(all_results: dict, queues_run: list) -> str:
         "# Task Queue Benchmark Results\n",
         "- **Runner**: `ubuntu-latest` (GitHub Actions)",
         "- **Redis**: service container (localhost:6379)",
-        "- **PostgreSQL**: service container (localhost:5432) — used by Procrastinate",
-        "- **Kafka**: service container (localhost:9092) — used by Faust\n",
+        "- **PostgreSQL**: service container (localhost:5432) — used by Procrastinate\n",
         "---\n",
         "## Package Overview\n",
         "| # | Package | Category | Broker | Notes |",
