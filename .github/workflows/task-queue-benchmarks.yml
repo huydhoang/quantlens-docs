@@ -116,7 +116,6 @@ jobs:
             "taskiq[redis]" taskiq-redis \
             "procrastinate[aiopg]" \
             apscheduler \
-            rocketry \
             faust-streaming \
             redis \
             psycopg2-binary \
@@ -186,7 +185,6 @@ jobs:
           python -c "import taskiq; print('taskiq', taskiq.__version__)" || true
           python -c "import procrastinate; print('procrastinate', procrastinate.__version__)" || true
           python -c "import apscheduler; print('apscheduler', apscheduler.__version__)" || true
-          python -c "import rocketry; print('rocketry OK')" || true
           python -c "import faust; print('faust', faust.__version__)" || true
 
       - name: Run task queue benchmarks

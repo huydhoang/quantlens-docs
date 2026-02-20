@@ -202,7 +202,10 @@ SCENARIOS = [
 
 def check_import(module_name: str) -> bool:
     """Return True if the package can be imported."""
-    return importlib.util.find_spec(module_name) is not None
+    try:
+        return importlib.util.find_spec(module_name) is not None
+    except (ValueError, ModuleNotFoundError):
+        return False
 
 
 # ── Benchmark implementations ────────────────────────────────────────
@@ -312,11 +315,13 @@ def bench_rq(scenario: dict) -> dict:
     def _cpu_work():
         return sum(i * i for i in range(10_000))
 
-    def _flaky():
-        pass  # RQ retry handled via job.retry
-
-    fn_map = {"noop": _noop, "cpu_work": _cpu_work, "flaky": _flaky}
+    fn_map = {"noop": _noop, "cpu_work": _cpu_work, "flaky": _noop}
     fn = fn_map[scenario["task"]]
+
+    # RQ rejects functions whose __module__ is '__main__' (cannot be found by workers)
+    if fn.__module__ == "__main__":
+        return {"skipped": True, "reason": "RQ cannot enqueue __main__ functions; run as a module for worker results"}
+
     count = scenario["count"]
 
     def enqueue(n):
@@ -533,6 +538,11 @@ def bench_tasktiger(scenario: dict) -> dict:
 
     fn_map = {"noop": noop, "cpu_work": cpu_work, "flaky": noop}
     fn = fn_map[scenario["task"]]
+
+    # TaskTiger rejects functions whose __module__ is '__main__'
+    if fn.__module__ == "__main__":
+        return {"skipped": True, "reason": "TaskTiger cannot enqueue __main__ functions; run as a module for worker results"}
+
     count = scenario["count"]
 
     def enqueue(n):
@@ -624,24 +634,23 @@ def bench_procrastinate(scenario: dict) -> dict:
 # ── Faust ────────────────────────────────────────────────────────────
 
 def bench_faust(scenario: dict) -> dict:
+    # faust-streaming benchmarks Kafka producer throughput via aiokafka directly,
+    # since faust.App requires a running loop/worker to use topic.send reliably.
     import asyncio
-    import faust
+    from aiokafka import AIOKafkaProducer
 
     count = scenario["count"]
-    app = faust.App(
-        "bench",
-        broker="kafka://localhost:9092",
-        store="memory://",
-        cache="memory://",
-    )
-    topic = app.topic("bench-tasks", value_type=bytes)
 
     async def _run(n):
-        async with app.Producer() as producer:
+        producer = AIOKafkaProducer(bootstrap_servers="localhost:9092")
+        await producer.start()
+        try:
             start = time.perf_counter()
             for _ in range(n):
-                await producer.send(topic, value=b"{}")
+                await producer.send("bench-tasks", value=b"{}")
             elapsed = time.perf_counter() - start
+        finally:
+            await producer.stop()
         return elapsed
 
     elapsed = asyncio.run(_run(count))
