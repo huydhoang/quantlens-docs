@@ -315,7 +315,9 @@ def _count_flaky_completions() -> int:
         import redis as _redis
         r = _redis.Redis(host="localhost", port=6379)
         keys = r.keys("bench:flaky:*")
-        count = sum(1 for k in keys if int(r.get(k) or 0) >= 2)
+        if keys:
+            values = r.mget(keys)
+            count = sum(1 for v in values if v and int(v) >= 2)
     except Exception:
         with _flaky_lock:
             count = sum(1 for v in _flaky_attempts.values() if v >= 2)
@@ -962,8 +964,8 @@ def bench_tasktiger(scenario: dict) -> dict:
                         retry_method=tasktiger.fixed(0, 1))
 
         start = time.perf_counter()
-        deadline = time.time() + 30
-        while time.time() < deadline:
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
             w = tasktiger.Worker(tiger)
             w.run(once=True)
             if _count_flaky_completions() >= count:
@@ -1031,7 +1033,7 @@ def bench_procrastinate(scenario: dict) -> dict:
                 worker_task.cancel()
                 try:
                     await worker_task
-                except (asyncio.CancelledError, Exception):
+                except asyncio.CancelledError:
                     pass
 
                 elapsed = time.perf_counter() - start
