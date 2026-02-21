@@ -257,17 +257,26 @@ _bench_backtest_sim.__module__ = _MODULE_PATH
 
 _flaky_attempts: dict = {}
 _flaky_lock = threading.Lock()
+_flaky_redis_client = None
+
+
+def _get_flaky_redis_client():
+    """Return a cached Redis client for flaky-task attempt tracking."""
+    global _flaky_redis_client
+    if _flaky_redis_client is None:
+        import redis as _redis
+        _flaky_redis_client = _redis.Redis(host="localhost", port=6379)
+    return _flaky_redis_client
 
 
 def _flaky_check(task_id: str) -> None:
     """Raise on the first call for *task_id*; succeed on subsequent calls."""
     try:
-        import redis as _redis
-        r = _redis.Redis(host="localhost", port=6379)
+        r = _get_flaky_redis_client()
         key = f"bench:flaky:{task_id}"
         attempt = r.incr(key)
         r.expire(key, 300)
-    except Exception:
+    except ImportError:
         # Fallback for non-Redis backends (Huey-SQLite)
         with _flaky_lock:
             _flaky_attempts[task_id] = _flaky_attempts.get(task_id, 0) + 1
@@ -291,12 +300,10 @@ _bench_flaky.__module__ = _MODULE_PATH
 def _cleanup_flaky_keys():
     """Remove flaky attempt-tracking keys before a retry-reliability run."""
     try:
-        import redis as _redis
-        r = _redis.Redis(host="localhost", port=6379)
-        keys = r.keys("bench:flaky:*")
-        if keys:
-            r.delete(*keys)
-    except Exception:
+        r = _get_flaky_redis_client()
+        for key in r.scan_iter("bench:flaky:*"):
+            r.delete(key)
+    except ImportError:
         pass
     with _flaky_lock:
         _flaky_attempts.clear()
@@ -312,13 +319,12 @@ def _count_flaky_completions() -> int:
     """
     count = 0
     try:
-        import redis as _redis
-        r = _redis.Redis(host="localhost", port=6379)
-        keys = r.keys("bench:flaky:*")
+        r = _get_flaky_redis_client()
+        keys = list(r.scan_iter("bench:flaky:*"))
         if keys:
             values = r.mget(keys)
             count = sum(1 for v in values if v and int(v) >= 2)
-    except Exception:
+    except ImportError:
         with _flaky_lock:
             count = sum(1 for v in _flaky_attempts.values() if v >= 2)
     return count
