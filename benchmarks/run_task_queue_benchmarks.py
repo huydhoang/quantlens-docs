@@ -29,14 +29,25 @@ Usage:
 """
 
 import argparse
+import asyncio
 import importlib.util
 import json
 import os
+import sys
+import threading
 import time
+import uuid
 from pathlib import Path
 
 # ── Project root ─────────────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+# Ensure the project root is on sys.path so that module-level task
+# functions (e.g. ``benchmarks.run_task_queue_benchmarks._bench_flaky``)
+# are importable by workers that resolve functions by dotted path (RQ
+# SimpleWorker, TaskTiger Worker).
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 # ── Queue package metadata ───────────────────────────────────────────
 
@@ -202,8 +213,11 @@ def check_import(module_name: str) -> bool:
 # Defining these at module level (rather than inside bench_*) and setting
 # __module__ to the package-relative name allows enqueue to succeed even
 # when the script is executed directly via ``python …/run_task_queue_benchmarks.py``.
-# Workers are not started during benchmarks, so only enqueue throughput
-# is measured; round-trip scenarios will time-out gracefully.
+# Workers are not started during most benchmarks, so only enqueue throughput
+# is measured; round-trip scenarios will time-out gracefully.  The
+# retry-reliability scenario is the exception: backends that support
+# in-process or burst-mode workers (Celery eager, RQ SimpleWorker,
+# Huey immediate) start a worker so that retry semantics are validated.
 
 _MODULE_PATH = "benchmarks.run_task_queue_benchmarks"
 
@@ -235,6 +249,110 @@ def _bench_backtest_sim():
 _bench_noop.__module__ = _MODULE_PATH
 _bench_cpu_work.__module__ = _MODULE_PATH
 _bench_backtest_sim.__module__ = _MODULE_PATH
+
+# ── Flaky task infrastructure ────────────────────────────────────────
+# Tracks per-task attempt counts in Redis (cross-process) so a flaky task
+# can fail on the first attempt and succeed on the retry.  A module-level
+# dict is the fallback when Redis is unavailable (e.g. Huey-SQLite).
+
+_flaky_attempts: dict = {}
+_flaky_lock = threading.Lock()
+_flaky_redis_client = None
+
+
+def _get_flaky_redis_client():
+    """Return a cached Redis client for flaky-task attempt tracking."""
+    global _flaky_redis_client
+    if _flaky_redis_client is None:
+        import redis as _redis
+        _flaky_redis_client = _redis.Redis(host="localhost", port=6379)
+    return _flaky_redis_client
+
+
+def _flaky_check(task_id: str) -> None:
+    """Raise on the first call for *task_id*; succeed on subsequent calls."""
+    try:
+        r = _get_flaky_redis_client()
+        key = f"bench:flaky:{task_id}"
+        attempt = r.incr(key)
+        r.expire(key, 300)
+    except ImportError:
+        # Fallback for non-Redis backends (Huey-SQLite)
+        with _flaky_lock:
+            _flaky_attempts[task_id] = _flaky_attempts.get(task_id, 0) + 1
+            attempt = _flaky_attempts[task_id]
+    if attempt == 1:
+        raise RuntimeError(f"transient benchmark failure (task_id={task_id})")
+
+
+def _bench_flaky(task_id: str):
+    """Module-level flaky task for RQ / TaskTiger.
+
+    Fails on first invocation for a given *task_id* and succeeds when
+    the queue backend retries it with the same arguments.
+    """
+    _flaky_check(task_id)
+
+
+_bench_flaky.__module__ = _MODULE_PATH
+
+
+def _cleanup_flaky_keys():
+    """Remove flaky attempt-tracking keys before a retry-reliability run."""
+    try:
+        r = _get_flaky_redis_client()
+        for key in r.scan_iter("bench:flaky:*"):
+            r.delete(key)
+    except ImportError:
+        pass
+    with _flaky_lock:
+        _flaky_attempts.clear()
+
+
+def _count_flaky_completions() -> int:
+    """Count flaky tasks that completed successfully (attempt >= 2 in Redis).
+
+    ``_flaky_check`` uses ``INCR`` on a per-task Redis key.  A value of 1
+    means the first (failing) attempt was recorded; a value >= 2 means the
+    retry succeeded.  Falls back to the in-memory dict for non-Redis
+    backends (e.g. Huey-SQLite).
+    """
+    count = 0
+    try:
+        r = _get_flaky_redis_client()
+        keys = list(r.scan_iter("bench:flaky:*"))
+        if keys:
+            values = r.mget(keys)
+            count = sum(1 for v in values if v and int(v) >= 2)
+    except ImportError:
+        with _flaky_lock:
+            count = sum(1 for v in _flaky_attempts.values() if v >= 2)
+    return count
+
+
+async def _poll_until_complete_or_timeout(
+    worker_task: "asyncio.Task",
+    target_count: int,
+    timeout: int = 60,
+) -> None:
+    """Poll completion count until *target_count* is reached or *timeout* seconds elapse.
+
+    After the poll loop, waits one second to allow the worker to finish
+    processing its current job, then cancels and awaits *worker_task*.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _count_flaky_completions() >= target_count:
+            break
+        await asyncio.sleep(0.5)
+
+    # Allow worker to finish processing current job before cancel.
+    await asyncio.sleep(1)
+    worker_task.cancel()
+    try:
+        await worker_task
+    except asyncio.CancelledError:
+        pass
 
 
 # ── Benchmark implementations ────────────────────────────────────────
@@ -291,11 +409,11 @@ def bench_celery(scenario: dict) -> dict:
         total = sum(i * i for i in range(10_000))
         return total
 
-    @app.task(bind=True, max_retries=1)
-    def flaky(self):
-        if not getattr(self, "_tried", False):
-            self._tried = True
-            raise ValueError("transient error")
+    @app.task(bind=True, max_retries=1, default_retry_delay=0)
+    def flaky(self, task_id):
+        if self.request.retries == 0:
+            raise self.retry(
+                exc=RuntimeError("transient benchmark failure"))
 
     @app.task
     def backtest_sim():
@@ -304,11 +422,32 @@ def bench_celery(scenario: dict) -> dict:
     task_fn = {"noop": noop, "cpu_work": cpu_work, "flaky": flaky,
                "backtest_sim": backtest_sim}[scenario["task"]]
     count = scenario["count"]
+    is_flaky = scenario["task"] == "flaky"
 
     if scenario.get("wait"):
+        # For retry-reliability, enable eager mode so retries execute
+        # in-process without requiring a separate Celery worker.
+        if is_flaky:
+            app.conf.task_always_eager = True
+            app.conf.task_eager_propagates = False
+            _cleanup_flaky_keys()
+
         start = time.perf_counter()
-        results = [task_fn.delay() for _ in range(count)]
+        results = [task_fn.delay(str(uuid.uuid4())) if is_flaky
+                   else task_fn.delay()
+                   for _ in range(count)]
         elapsed = time.perf_counter() - start
+
+        if is_flaky:
+            completed = sum(1 for r in results if r.successful())
+            return {
+                "count": count,
+                "elapsed_s": round(elapsed, 4),
+                "tasks_per_sec": round(count / elapsed, 1) if elapsed > 0 else None,
+                "completed": completed,
+                "timed_out": count - completed,
+            }
+
         deadline = time.time() + 60
         pending = list(results)
         while pending and time.time() < deadline:
@@ -324,7 +463,10 @@ def bench_celery(scenario: dict) -> dict:
 
     def enqueue(n):
         for _ in range(n):
-            task_fn.delay()
+            if is_flaky:
+                task_fn.delay(str(uuid.uuid4()))
+            else:
+                task_fn.delay()
 
     return _time_enqueue(enqueue, count)
 
@@ -333,19 +475,39 @@ def bench_celery(scenario: dict) -> dict:
 
 def bench_rq(scenario: dict) -> dict:
     import redis
-    from rq import Queue
+    from rq import Queue, Retry, SimpleWorker
 
     conn = redis.Redis(host="localhost", port=6379)
     q = Queue(connection=conn)
 
-    fn_map = {"noop": _bench_noop, "cpu_work": _bench_cpu_work, "flaky": _bench_noop,
+    fn_map = {"noop": _bench_noop, "cpu_work": _bench_cpu_work, "flaky": _bench_flaky,
               "backtest_sim": _bench_backtest_sim}
     fn = fn_map[scenario["task"]]
     count = scenario["count"]
+    is_flaky = scenario["task"] == "flaky"
 
     if scenario.get("wait"):
+        if is_flaky:
+            _cleanup_flaky_keys()
         start = time.perf_counter()
-        jobs = [q.enqueue(fn) for _ in range(count)]
+        jobs = []
+        for _ in range(count):
+            if is_flaky:
+                jobs.append(q.enqueue(fn, str(uuid.uuid4()),
+                                      retry=Retry(max=1, interval=0)))
+            else:
+                jobs.append(q.enqueue(fn))
+        # For retry-reliability, run an in-process SimpleWorker so tasks
+        # (including retries) actually execute.  Burst mode exits after one
+        # pass, so we loop until all retries have been processed.
+        if is_flaky:
+            w = SimpleWorker([q], connection=conn)
+            burst_deadline = time.monotonic() + 30
+            while time.monotonic() < burst_deadline:
+                w.work(burst=True)
+                if _count_flaky_completions() >= count:
+                    break
+                time.sleep(0.1)
         elapsed = time.perf_counter() - start
         deadline = time.time() + 60
         while any(not j.is_finished for j in jobs) and time.time() < deadline:
@@ -360,7 +522,10 @@ def bench_rq(scenario: dict) -> dict:
 
     def enqueue(n):
         for _ in range(n):
-            q.enqueue(fn)
+            if is_flaky:
+                q.enqueue(fn, str(uuid.uuid4()), retry=Retry(max=1, interval=0))
+            else:
+                q.enqueue(fn)
 
     return _time_enqueue(enqueue, count)
 
@@ -370,7 +535,11 @@ def bench_rq(scenario: dict) -> dict:
 def bench_huey(scenario: dict) -> dict:
     from huey import RedisHuey
 
-    huey = RedisHuey("bench", host="localhost", port=6379, immediate=False)
+    is_flaky = scenario["task"] == "flaky"
+    # For retry-reliability, use immediate mode so retries execute
+    # in-process without a separate huey_consumer.
+    huey = RedisHuey("bench", host="localhost", port=6379,
+                     immediate=is_flaky)
 
     @huey.task()
     def noop_task():
@@ -380,6 +549,10 @@ def bench_huey(scenario: dict) -> dict:
     def cpu_task():
         return sum(i * i for i in range(10_000))
 
+    @huey.task(retries=1, retry_delay=0)
+    def flaky_task(task_id):
+        _flaky_check(task_id)
+
     @huey.task()
     def backtest_sim_task():
         return _bench_backtest_sim()
@@ -387,11 +560,29 @@ def bench_huey(scenario: dict) -> dict:
     task_map = {
         "noop": noop_task,
         "cpu_work": cpu_task,
-        "flaky": noop_task,
+        "flaky": flaky_task,
         "backtest_sim": backtest_sim_task,
     }
     task_fn = task_map[scenario["task"]]
     count = scenario["count"]
+
+    if is_flaky:
+        _cleanup_flaky_keys()
+        start = time.perf_counter()
+        completed = 0
+        for _ in range(count):
+            try:
+                task_fn(str(uuid.uuid4()))
+                completed += 1
+            except Exception:
+                pass
+        elapsed = time.perf_counter() - start
+        return {
+            "count": count,
+            "elapsed_s": round(elapsed, 4),
+            "tasks_per_sec": round(count / elapsed, 1) if elapsed > 0 else None,
+            "completed": completed,
+        }
 
     def enqueue(n):
         for _ in range(n):
@@ -411,7 +602,9 @@ def bench_huey_sqlite(scenario: dict) -> dict:
     fd, db_path = tempfile.mkstemp(suffix=".db", prefix="huey_bench_")
     os.close(fd)
     try:
-        huey = SqliteHuey("bench-sqlite", filename=db_path, immediate=False)
+        is_flaky = scenario["task"] == "flaky"
+        huey = SqliteHuey("bench-sqlite", filename=db_path,
+                          immediate=is_flaky)
 
         @huey.task()
         def noop_task():
@@ -421,6 +614,10 @@ def bench_huey_sqlite(scenario: dict) -> dict:
         def cpu_task():
             return sum(i * i for i in range(10_000))
 
+        @huey.task(retries=1, retry_delay=0)
+        def flaky_task(task_id):
+            _flaky_check(task_id)
+
         @huey.task()
         def backtest_sim_task():
             return _bench_backtest_sim()
@@ -428,11 +625,29 @@ def bench_huey_sqlite(scenario: dict) -> dict:
         task_map = {
             "noop": noop_task,
             "cpu_work": cpu_task,
-            "flaky": noop_task,
+            "flaky": flaky_task,
             "backtest_sim": backtest_sim_task,
         }
         task_fn = task_map[scenario["task"]]
         count = scenario["count"]
+
+        if is_flaky:
+            _cleanup_flaky_keys()
+            start = time.perf_counter()
+            completed = 0
+            for _ in range(count):
+                try:
+                    task_fn(str(uuid.uuid4()))
+                    completed += 1
+                except Exception:
+                    pass
+            elapsed = time.perf_counter() - start
+            return {
+                "count": count,
+                "elapsed_s": round(elapsed, 4),
+                "tasks_per_sec": round(count / elapsed, 1) if elapsed > 0 else None,
+                "completed": completed,
+            }
 
         def enqueue(n):
             for _ in range(n):
@@ -451,6 +666,47 @@ def bench_huey_sqlite(scenario: dict) -> dict:
 
 def bench_dramatiq(scenario: dict) -> dict:
     import dramatiq
+
+    is_flaky = scenario["task"] == "flaky"
+    count = scenario["count"]
+
+    if is_flaky:
+        # Use StubBroker + Worker for retry-reliability so tasks execute
+        # in-process without a separate ``dramatiq`` worker process.
+        from dramatiq.brokers.stub import StubBroker as DramatiqStubBroker
+        from dramatiq.worker import Worker as DramatiqWorker
+
+        stub = DramatiqStubBroker()
+        dramatiq.set_broker(stub)
+
+        @dramatiq.actor(max_retries=1, min_backoff=0, max_backoff=0)
+        def flaky_stub(task_id):
+            _flaky_check(task_id)
+
+        _cleanup_flaky_keys()
+
+        worker = DramatiqWorker(stub, worker_threads=1)
+        worker.start()
+
+        start = time.perf_counter()
+        for _ in range(count):
+            flaky_stub.send(str(uuid.uuid4()))
+        try:
+            stub.join(flaky_stub.queue_name, fail_fast=False, timeout=30_000)
+            worker.join()
+        except Exception:
+            pass
+        elapsed = time.perf_counter() - start
+
+        worker.stop()
+        completed = _count_flaky_completions()
+        return {
+            "count": count,
+            "elapsed_s": round(elapsed, 4),
+            "tasks_per_sec": round(count / elapsed, 1) if elapsed > 0 else None,
+            "completed": completed,
+        }
+
     from dramatiq.brokers.redis import RedisBroker
 
     broker = RedisBroker(host="localhost", port=6379)
@@ -468,10 +724,9 @@ def bench_dramatiq(scenario: dict) -> dict:
     def backtest_sim_actor():
         return _bench_backtest_sim()
 
-    actor_map = {"noop": noop_actor, "cpu_work": cpu_actor, "flaky": noop_actor,
+    actor_map = {"noop": noop_actor, "cpu_work": cpu_actor,
                  "backtest_sim": backtest_sim_actor}
     actor = actor_map[scenario["task"]]
-    count = scenario["count"]
 
     def enqueue(n):
         for _ in range(n):
@@ -484,7 +739,6 @@ def bench_dramatiq(scenario: dict) -> dict:
 # ── ARQ ──────────────────────────────────────────────────────────────
 
 def bench_arq(scenario: dict) -> dict:
-    import asyncio
     import arq
 
     async def noop(ctx):
@@ -493,18 +747,64 @@ def bench_arq(scenario: dict) -> dict:
     async def cpu_work(ctx):
         return sum(i * i for i in range(10_000))
 
-    async def _run(count):
-        redis = await arq.create_pool(arq.connections.RedisSettings(host="localhost", port=6379))
-        fn_name = {"noop": "noop", "cpu_work": "cpu_work", "flaky": "noop",
+    async def flaky(ctx, task_id):
+        """Fail on first attempt; succeed on retry via ``_flaky_check``."""
+        _flaky_check(task_id)
+
+    is_flaky = scenario["task"] == "flaky"
+    count = scenario["count"]
+
+    if is_flaky:
+        _cleanup_flaky_keys()
+
+        async def _run_flaky(n):
+            from arq.worker import Worker as ArqWorker
+
+            redis_settings = arq.connections.RedisSettings(
+                host="localhost", port=6379)
+            redis = await arq.create_pool(redis_settings)
+
+            start = time.perf_counter()
+            for _ in range(n):
+                await redis.enqueue_job("flaky", str(uuid.uuid4()))
+
+            # Run an in-process ARQ worker to consume the flaky jobs.
+            # ``max_tries=2`` allows one retry after the first failure.
+            worker = ArqWorker(
+                functions=[flaky],
+                redis_settings=redis_settings,
+                max_tries=2,
+            )
+            worker_task = asyncio.ensure_future(worker.main())
+
+            # Poll until all tasks have completed or timeout.
+            await _poll_until_complete_or_timeout(worker_task, n)
+
+            elapsed = time.perf_counter() - start
+            await redis.aclose()
+            return elapsed
+
+        elapsed = asyncio.run(_run_flaky(count))
+        completed = _count_flaky_completions()
+        return {
+            "count": count,
+            "elapsed_s": round(elapsed, 4),
+            "tasks_per_sec": round(count / elapsed, 1) if elapsed > 0 else None,
+            "completed": completed,
+        }
+
+    async def _run(n):
+        redis = await arq.create_pool(
+            arq.connections.RedisSettings(host="localhost", port=6379))
+        fn_name = {"noop": "noop", "cpu_work": "cpu_work",
                    "backtest_sim": "backtest_sim"}[scenario["task"]]
         start = time.perf_counter()
-        for _ in range(count):
+        for _ in range(n):
             await redis.enqueue_job(fn_name)
         elapsed = time.perf_counter() - start
         await redis.aclose()
         return elapsed
 
-    count = scenario["count"]
     elapsed = asyncio.run(_run(count))
     return {
         "count": count,
@@ -516,7 +816,51 @@ def bench_arq(scenario: dict) -> dict:
 # ── Taskiq ───────────────────────────────────────────────────────────
 
 def bench_taskiq(scenario: dict) -> dict:
-    import asyncio
+    is_flaky = scenario["task"] == "flaky"
+    count = scenario["count"]
+
+    if is_flaky:
+        # Use InMemoryBroker so tasks execute in-process (no external
+        # worker).  Manual retry mirrors the ``retry_on_error`` semantics.
+        from taskiq import InMemoryBroker
+
+        mem_broker = InMemoryBroker()
+
+        @mem_broker.task
+        async def flaky_mem(task_id):
+            _flaky_check(task_id)
+
+        _cleanup_flaky_keys()
+
+        async def _run_flaky(n):
+            await mem_broker.startup()
+            start = time.perf_counter()
+            completed = 0
+            for _ in range(n):
+                tid = str(uuid.uuid4())
+                result = await flaky_mem.kiq(tid)
+                res = await result.wait_result(timeout=10)
+                if res.is_err:
+                    # Manual retry (mirrors max_retries=1)
+                    await asyncio.sleep(0.05)
+                    result2 = await flaky_mem.kiq(tid)
+                    res2 = await result2.wait_result(timeout=10)
+                    if not res2.is_err:
+                        completed += 1
+                else:
+                    completed += 1
+            elapsed = time.perf_counter() - start
+            await mem_broker.shutdown()
+            return elapsed, completed
+
+        elapsed, completed = asyncio.run(_run_flaky(count))
+        return {
+            "count": count,
+            "elapsed_s": round(elapsed, 4),
+            "tasks_per_sec": round(count / elapsed, 1) if elapsed > 0 else None,
+            "completed": completed,
+        }
+
     from taskiq_redis import ListQueueBroker
 
     broker = ListQueueBroker("redis://localhost:6379")
@@ -533,10 +877,9 @@ def bench_taskiq(scenario: dict) -> dict:
     async def backtest_sim_task():
         return _bench_backtest_sim()
 
-    task_map = {"noop": noop_task, "cpu_work": cpu_task, "flaky": noop_task,
+    task_map = {"noop": noop_task, "cpu_work": cpu_task,
                 "backtest_sim": backtest_sim_task}
     task_fn = task_map[scenario["task"]]
-    count = scenario["count"]
 
     async def _run(n):
         await broker.startup()
@@ -558,10 +901,54 @@ def bench_taskiq(scenario: dict) -> dict:
 # ── BullMQ ───────────────────────────────────────────────────────────
 
 def bench_bullmq(scenario: dict) -> dict:
-    import asyncio
     from bullmq import Queue as BullQueue
 
     count = scenario["count"]
+    is_flaky = scenario["task"] == "flaky"
+
+    if is_flaky:
+        from bullmq import Worker as BullWorker
+
+        _cleanup_flaky_keys()
+
+        async def _run_flaky(n):
+            conn_opts = {"host": "localhost", "port": 6379}
+            # Use a dedicated queue name to avoid interference with other
+            # scenarios that may still have pending jobs.
+            q = BullQueue("bench-flaky", {"connection": conn_opts})
+
+            async def process_job(job, token):
+                _flaky_check(job.data.get("task_id"))
+
+            worker = BullWorker("bench-flaky", process_job,
+                                {"connection": conn_opts})
+
+            start = time.perf_counter()
+            for _ in range(n):
+                await q.add("flaky", {"task_id": str(uuid.uuid4())},
+                            {"attempts": 2,
+                             "backoff": {"type": "fixed", "delay": 0}})
+
+            # Poll until all flaky tasks completed.
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                if _count_flaky_completions() >= n:
+                    break
+                await asyncio.sleep(0.1)
+
+            elapsed = time.perf_counter() - start
+            await worker.close()
+            await q.close()
+            return elapsed
+
+        elapsed = asyncio.run(_run_flaky(count))
+        completed = _count_flaky_completions()
+        return {
+            "count": count,
+            "elapsed_s": round(elapsed, 4),
+            "tasks_per_sec": round(count / elapsed, 1) if elapsed > 0 else None,
+            "completed": completed,
+        }
 
     async def _run(n):
         q = BullQueue("bench", {"connection": {"host": "localhost", "port": 6379}})
@@ -589,10 +976,41 @@ def bench_tasktiger(scenario: dict) -> dict:
     conn = redislib.Redis(host="localhost", port=6379)
     tiger = tasktiger.TaskTiger(connection=conn)
 
-    fn_map = {"noop": _bench_noop, "cpu_work": _bench_cpu_work, "flaky": _bench_noop,
+    fn_map = {"noop": _bench_noop, "cpu_work": _bench_cpu_work, "flaky": _bench_flaky,
               "backtest_sim": _bench_backtest_sim}
     fn = fn_map[scenario["task"]]
     count = scenario["count"]
+    is_flaky = scenario["task"] == "flaky"
+
+    if is_flaky:
+        _cleanup_flaky_keys()
+
+        # Enqueue flaky tasks then run the Tiger Worker in burst mode
+        # (``once=True``) until all retries complete.
+        for _ in range(count):
+            tiger.delay(fn, args=[str(uuid.uuid4())],
+                        retry_method=tasktiger.fixed(0, 1))
+
+        start = time.perf_counter()
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            w = tasktiger.Worker(tiger)
+            # Process multiple tasks per iteration to handle both
+            # initial failures and their retries in the same loop pass.
+            for _ in range(5):
+                w.run(once=True)
+            if _count_flaky_completions() >= count:
+                break
+            time.sleep(0.2)
+        elapsed = time.perf_counter() - start
+
+        completed = _count_flaky_completions()
+        return {
+            "count": count,
+            "elapsed_s": round(elapsed, 4),
+            "tasks_per_sec": round(count / elapsed, 1) if elapsed > 0 else None,
+            "completed": completed,
+        }
 
     def enqueue(n):
         for _ in range(n):
@@ -605,7 +1023,6 @@ def bench_tasktiger(scenario: dict) -> dict:
 # ── Procrastinate ────────────────────────────────────────────────────
 
 def bench_procrastinate(scenario: dict) -> dict:
-    import asyncio
     import procrastinate
     from procrastinate.contrib.aiopg import AiopgConnector
 
@@ -613,6 +1030,45 @@ def bench_procrastinate(scenario: dict) -> dict:
         "PROCRASTINATE_URL", "postgresql://bench:bench@localhost:5432/bench"
     )
     count = scenario["count"]
+    is_flaky = scenario["task"] == "flaky"
+
+    if is_flaky:
+        _cleanup_flaky_keys()
+
+        async def _run_flaky(n):
+            connector = AiopgConnector(dsn=dsn)
+            app = procrastinate.App(connector=connector)
+
+            @app.task(retry=1)
+            async def flaky_task(task_id):
+                _flaky_check(task_id)
+
+            async with app.open_async():
+                start = time.perf_counter()
+                for _ in range(n):
+                    await flaky_task.defer_async(task_id=str(uuid.uuid4()))
+
+                # Run an in-process worker to consume deferred jobs.
+                worker_task = asyncio.ensure_future(
+                    app.run_worker_async(
+                        queues=["default"],
+                        install_signal_handlers=False,
+                    )
+                )
+
+                await _poll_until_complete_or_timeout(worker_task, n)
+
+                elapsed = time.perf_counter() - start
+            return elapsed
+
+        elapsed = asyncio.run(_run_flaky(count))
+        completed = _count_flaky_completions()
+        return {
+            "count": count,
+            "elapsed_s": round(elapsed, 4),
+            "tasks_per_sec": round(count / elapsed, 1) if elapsed > 0 else None,
+            "completed": completed,
+        }
 
     async def _run(n):
         connector = AiopgConnector(dsn=dsn)
@@ -630,7 +1086,7 @@ def bench_procrastinate(scenario: dict) -> dict:
         async def backtest_sim_task():
             return _bench_backtest_sim()
 
-        task_map = {"noop": noop_task, "cpu_work": cpu_task, "flaky": noop_task,
+        task_map = {"noop": noop_task, "cpu_work": cpu_task,
                     "backtest_sim": backtest_sim_task}
         task_fn = task_map[scenario["task"]]
 
