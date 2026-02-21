@@ -92,7 +92,6 @@ jobs:
             tasktiger \
             "taskiq[redis]" taskiq-redis \
             "procrastinate[aiopg]" \
-            apscheduler \
             redis \
             psycopg2-binary \
             aiopg
@@ -136,7 +135,6 @@ jobs:
           python -c "import tasktiger; print('tasktiger OK')" || true
           python -c "import taskiq; print('taskiq', taskiq.__version__)" || true
           python -c "import procrastinate; print('procrastinate', procrastinate.__version__)" || true
-          python -c "import apscheduler; print('apscheduler', apscheduler.__version__)" || true
 
       - name: Run task queue benchmarks
         env:

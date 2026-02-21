@@ -2,7 +2,7 @@
 """
 Task Queue Benchmark Runner
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Benchmarks 11 task queue configurations across throughput, latency, reliability,
+Benchmarks 10 task queue configurations across throughput, latency, reliability,
 and long-running backtest simulation scenarios.
 
 Packages under test:
@@ -17,10 +17,9 @@ Packages under test:
     8.  TaskTiger      — Redis-based, Close.io origin
     9.  Taskiq         — Redis Streams, fastest performance
     10. Procrastinate  — PostgreSQL-based (no Redis required)
-  In-Process Schedulers:
-    11. APScheduler    — advanced scheduling, multiple backends
 
 Excluded:
+  - APScheduler — in-process scheduler, not a distributed task queue
   - Rocketry — unmaintained since December 2022, incompatible with Pydantic v2
 
 Usage:
@@ -132,16 +131,6 @@ QUEUES = [
         "import": "procrastinate",
         "broker": "postgresql",
         "description": "PostgreSQL-based — no Redis required",
-    },
-    # ── In-Process Schedulers ────────────────────────────────────────
-    {
-        "id": "apscheduler",
-        "name": "APScheduler",
-        "category": "In-Process Scheduler",
-        "pip": "apscheduler",
-        "import": "apscheduler",
-        "broker": "in-process",
-        "description": "Advanced scheduling — multiple backends, cron/interval/date",
     },
 ]
 
@@ -549,45 +538,6 @@ def bench_taskiq(scenario: dict) -> dict:
     }
 
 
-# ── APScheduler ──────────────────────────────────────────────────────
-
-def bench_apscheduler(scenario: dict) -> dict:
-    from apscheduler.schedulers.background import BackgroundScheduler
-
-    scheduler = BackgroundScheduler()
-    results = []
-
-    def noop_job():
-        results.append(1)
-
-    def backtest_job():
-        _bench_backtest_sim()
-        results.append(1)
-
-    job_fn = backtest_job if scenario["task"] == "backtest_sim" else noop_job
-    count = scenario["count"]
-    # For backtest sim, extend the deadline to accommodate ~5 s/task
-    wait_limit = max(10, count * 8) if scenario["task"] == "backtest_sim" else 10
-
-    start = time.perf_counter()
-    for i in range(count):
-        scheduler.add_job(job_fn, "date")
-    elapsed = time.perf_counter() - start
-
-    scheduler.start()
-    deadline = time.time() + wait_limit
-    while len(results) < count and time.time() < deadline:
-        time.sleep(0.05)
-    scheduler.shutdown(wait=False)
-
-    return {
-        "count": count,
-        "elapsed_s": round(elapsed, 4),
-        "tasks_per_sec": round(count / elapsed, 1) if elapsed > 0 else None,
-        "completed": len(results),
-    }
-
-
 # ── BullMQ ───────────────────────────────────────────────────────────
 
 def bench_bullmq(scenario: dict) -> dict:
@@ -701,7 +651,6 @@ BENCH_FNS = {
     "tasktiger":     bench_tasktiger,
     "taskiq":        bench_taskiq,
     "procrastinate": bench_procrastinate,
-    "apscheduler":   bench_apscheduler,
 }
 
 

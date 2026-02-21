@@ -2,7 +2,7 @@
 
 ## Decision Summary
 
-**Huey** is the task queue for QuantLens. Benchmarks across 11 configurations (10 packages, Huey tested with both Redis and SQLite backends) confirm it delivers the best combination of simplicity, backend flexibility, and throughput for a **local single-machine desktop app**. Huey's SQLite backend eliminates Redis as a hard dependency for the task queue (Redis remains in Docker Compose for cache and pub/sub). Its `immediate=True` development mode removes the need for a separate worker process during development and testing. A new **backtest simulation** scenario (~5 s CPU-bound tasks mimicking NautilusTrader) measures dispatch overhead for the primary QuantLens workload — enqueue overhead is noise relative to a multi-second backtest.
+**Huey** is the task queue for QuantLens. Benchmarks across 10 distributed task queue configurations (9 packages, Huey tested with both Redis and SQLite backends) confirm it delivers the best combination of simplicity, backend flexibility, and throughput for a **local single-machine desktop app**. Huey's SQLite backend eliminates Redis as a hard dependency for the task queue (Redis remains in Docker Compose for cache and pub/sub). Its `immediate=True` development mode removes the need for a separate worker process during development and testing. A new **backtest simulation** scenario (~5 s CPU-bound tasks mimicking NautilusTrader) measures dispatch overhead for the primary QuantLens workload — enqueue overhead is noise relative to a multi-second backtest.
 
 **Dramatiq** is the second choice if pipeline chaining with a Redis broker is preferred.
 
@@ -15,10 +15,10 @@ See the [Benchmark Results](#benchmark-results) section for the data behind this
 ## Clarifying Questions
 
 **Q1: Does QuantLens need event-driven job dispatch or time-based scheduling?**
-Both. Backtests are dispatched on-demand when the user clicks "Run" (event-driven). Data ingestion from Tiingo/Finnhub runs on a nightly/weekly cron (time-based). A distributed task queue with built-in scheduling (Huey's `crontab()`) covers both; a pure scheduler (APScheduler) cannot dispatch to separate worker processes.
+Both. Backtests are dispatched on-demand when the user clicks "Run" (event-driven). Data ingestion from Tiingo/Finnhub runs on a nightly/weekly cron (time-based). A distributed task queue with built-in scheduling (Huey's `crontab()`) covers both; a pure in-process scheduler cannot dispatch to separate worker processes.
 
 **Q2: How's a scheduler different from a distributed task queue?**
-A **scheduler** (APScheduler, cron) triggers tasks at specific times/intervals within the same process — no broker, no workers. A **distributed task queue** (Huey, Celery, Dramatiq) dispatches tasks via a message broker to separate worker processes. QuantLens needs process isolation because NautilusTrader enforces one `BacktestNode` per process (global singleton state). A scheduler alone would block the API process during a 5–120 second backtest. **Verdict: task queue.**
+A **scheduler** (cron, APScheduler) triggers tasks at specific times/intervals within the same process — no broker, no workers, no retries. A **distributed task queue** (Huey, Celery, Dramatiq) dispatches tasks via a message broker to separate worker processes. QuantLens needs process isolation because NautilusTrader enforces one `BacktestNode` per process (global singleton state). A scheduler alone would block the API process during a 5–120 second backtest. **Verdict: task queue.** APScheduler is excluded from benchmarks — it is not a distributed task queue.
 
 **Q3: Is Kafka appropriate for QuantLens's backtest dispatch?**
 No. Kafka is a distributed streaming platform for high-throughput event pipelines (log aggregation, ETL, real-time analytics). It lacks native task semantics: no per-task ACK/retry, no result backend, partition-based parallelism that doesn't map to "worker picks up next job." QuantLens dispatches ~1–10 backtests at a time on a single machine — Kafka's partition model, broker overhead (JVM, ZooKeeper/KRaft), and operational complexity are entirely disproportionate. Faust (the Python Kafka library benchmarked) measured Kafka *producer write throughput*, not job execution — an apples-to-oranges comparison with task queues. **Kafka removed from benchmarks.**
@@ -73,7 +73,7 @@ flowchart LR
 
 ### Methodology
 
-> **Important:** The benchmark script now tests Huey with **both Redis and SQLite backends** using `immediate=False` (actual broker I/O). A new **backtest simulation** scenario enqueues 3 tasks that each run ~5 s of CPU work, mimicking a real NautilusTrader backtest — the primary QuantLens workload. APScheduler (in-process) executes in the same process and is not directly comparable to distributed queues. For all distributed queues (Celery, RQ, Dramatiq, etc.), workers were not started; numbers measure **broker write throughput only**. `completed=0` means enqueue was measured but execution was not tested. Re-run benchmarks for updated numbers with the new scenarios.
+> **Important:** The benchmark script now tests Huey with **both Redis and SQLite backends** using `immediate=False` (actual broker I/O). A new **backtest simulation** scenario enqueues 3 tasks that each run ~5 s of CPU work, mimicking a real NautilusTrader backtest — the primary QuantLens workload. APScheduler has been removed — it is an in-process scheduler with no queueing, persistence, or automatic retries, and is not comparable to distributed task queues. For all distributed queues (Celery, RQ, Dramatiq, etc.), workers were not started; numbers measure **broker write throughput only**. `completed=0` means enqueue was measured but execution was not tested. Re-run benchmarks for updated numbers with the new scenarios.
 
 > The tables below reflect results from the previous benchmark run (Huey `immediate=True`, no SQLite backend, no backtest simulation). They are retained for reference but should be superseded by the next CI run.
 
@@ -82,7 +82,6 @@ flowchart LR
 | Package | Category | Tasks/s | Elapsed | Notes |
 |---------|----------|--------:|--------:|-------|
 | Huey | Distributed Task Queue | 65,800 | 15.2 ms | `immediate=True` (in-process) † |
-| APScheduler | In-Process Scheduler | 27,320 | 36.6 ms | In-process only |
 | BullMQ | Distributed Task Queue | 3,043 | 328.6 ms | |
 | Dramatiq | Distributed Task Queue | 3,038 | 329.1 ms | |
 | Taskiq | Distributed Task Queue | 2,768 | 361.3 ms | |
@@ -99,7 +98,6 @@ flowchart LR
 | Package | Category | Tasks/s | Elapsed | Notes |
 |---------|----------|--------:|--------:|-------|
 | Huey | Distributed Task Queue | 68,127 | 146.8 ms | `immediate=True` (in-process) † |
-| APScheduler | In-Process Scheduler | 28,028 | 356.8 ms | 8,286/10,000 completed in window‡ |
 | Dramatiq | Distributed Task Queue | 3,459 | 2.89 s | |
 | BullMQ | Distributed Task Queue | 3,116 | 3.21 s | |
 | Taskiq | Distributed Task Queue | 2,753 | 3.63 s | |
@@ -109,8 +107,6 @@ flowchart LR
 | Procrastinate | Distributed Task Queue | 1,385 | 7.22 s | PostgreSQL-based |
 | Celery | Distributed Task Queue | 1,265 | 7.90 s | |
 
-‡ APScheduler is in-process; 356.8 ms is the time to *schedule* 10,000 jobs (add them to the scheduler). The scheduler then executed 8,286 callbacks before the benchmark's post-schedule wait window closed. This reflects execution concurrency limits, not scheduling throughput — scheduling itself succeeded for all 10,000 tasks.
-
 ### Round-Trip Latency — 100 Tasks
 
 Workers not running for distributed queues — completed count reflects enqueue only where `completed=100`.
@@ -118,7 +114,6 @@ Workers not running for distributed queues — completed count reflects enqueue 
 | Package | Category | Tasks/s | Elapsed | Completed | Notes |
 |---------|----------|--------:|--------:|----------:|-------|
 | Huey | Distributed Task Queue | 58,363 | 1.7 ms | 100 | `immediate=True` (in-process) † |
-| APScheduler | In-Process Scheduler | 20,202 | 5.0 ms | 100 | In-process |
 | Dramatiq | Distributed Task Queue | 3,820 | 26.2 ms | 100 | No workers — enqueue only |
 | BullMQ | Distributed Task Queue | 3,056 | 32.7 ms | 100 | |
 | Taskiq | Distributed Task Queue | 2,592 | 38.6 ms | 100 | |
@@ -132,7 +127,6 @@ Workers not running for distributed queues — completed count reflects enqueue 
 
 | Package | Category | Tasks/s | Elapsed | Completed | Notes |
 |---------|----------|--------:|--------:|----------:|-------|
-| APScheduler | In-Process Scheduler | 24,329 | 2.1 ms | 50 | In-process |
 | Dramatiq | Distributed Task Queue | 3,724 | 13.4 ms | 50 | |
 | BullMQ | Distributed Task Queue | 2,931 | 17.1 ms | 50 | |
 | Taskiq | Distributed Task Queue | 2,499 | 20.0 ms | 50 | |
@@ -148,7 +142,6 @@ Workers not running for distributed queues — completed count reflects enqueue 
 | Package | Category | Tasks/s | Elapsed | Completed | Notes |
 |---------|----------|--------:|--------:|----------:|-------|
 | Huey | Distributed Task Queue | 38,198 | 0.5 ms | 20 | `immediate=True` (in-process) † |
-| APScheduler | In-Process Scheduler | 19,965 | 1.0 ms | 20 | In-process |
 | Dramatiq | Distributed Task Queue | 3,183 | 6.3 ms | 20 | |
 | BullMQ | Distributed Task Queue | 2,775 | 7.2 ms | 20 | |
 | Taskiq | Distributed Task Queue | 2,379 | 8.4 ms | 20 | |
@@ -179,7 +172,6 @@ Workers not running for distributed queues — completed count reflects enqueue 
 | ARQ | 2,800+ | Redis only | ✅ native | ❌ | ✅ | ✅ | **Maintenance only** |
 | Procrastinate | 2,200+ | PostgreSQL only | ✅ | ❌ | ✅ | ✅ | Active |
 | BullMQ | 3,000+† | Redis only | Node.js native | ❌ | ✅ | ✅ | Active |
-| APScheduler | — | In-process | ✅ | ✅ | ✅ cron/interval | N/A | Active |
 
 † Python bindings (`bullmq` package) for the Node.js library.
 
