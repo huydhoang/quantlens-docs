@@ -2,11 +2,13 @@
 
 ## Decision Summary
 
-**Huey** is the task queue for QuantLens. Benchmarks across 10 distributed task queue configurations (9 packages, Huey tested with both Redis and SQLite backends) confirm it delivers the best combination of simplicity, backend flexibility, and throughput for a **local single-machine desktop app**. Huey's SQLite backend eliminates Redis as a hard dependency for the task queue (Redis remains in Docker Compose for cache and pub/sub). Its `immediate=True` development mode removes the need for a separate worker process during development and testing. A new **backtest simulation** scenario (~5 s CPU-bound tasks mimicking NautilusTrader) measures dispatch overhead for the primary QuantLens workload — enqueue overhead is noise relative to a multi-second backtest.
+**Huey (SQLite backend)** is the task queue for QuantLens. Benchmarks across 10 distributed task queue configurations (9 packages, Huey tested with both Redis and SQLite backends) from Actions run [22262734321](https://github.com/huydhoang/quantlens-docs/actions/runs/22262734321) confirm it delivers the best combination of simplicity, backend flexibility, and throughput for a **local single-machine desktop app**. Huey's SQLite backend eliminates Redis as a hard dependency for the task queue (Redis remains in Docker Compose for cache and pub/sub). Its `immediate=True` development mode removes the need for a separate worker process during development and testing. A **backtest simulation** scenario (~5 s CPU-bound tasks mimicking NautilusTrader) confirms that enqueue overhead (0.5 ms for 3 tasks on SQLite) is noise relative to the multi-second job execution time.
 
-**Dramatiq** is the second choice if pipeline chaining with a Redis broker is preferred.
+**Huey (Redis backend)** is the production configuration when Redis is already running (e.g., Docker Compose with cache + pub/sub).
 
-**Celery is no longer recommended** for a local desktop app: it has the lowest enqueue throughput of all tested distributed queues, the steepest learning curve, and no SQLite backend — disproportionate complexity for a single-machine deployment.
+**Dramatiq** is the second choice if pipeline chaining with a Redis broker is preferred over Huey's decorator API.
+
+**Celery is not recommended** for a local desktop app: it has the lowest enqueue throughput of all tested distributed queues, the steepest learning curve, and no SQLite backend — disproportionate complexity for a single-machine deployment.
 
 See the [Benchmark Results](#benchmark-results) section for the data behind this decision.
 
@@ -69,93 +71,105 @@ flowchart LR
 
 ## Benchmark Results
 
-**Environment:** GitHub Actions `ubuntu-latest` (2-core CPU, 7 GB RAM), Actions run 22230568964. Redis service container (localhost:6379), PostgreSQL service container (localhost:5432).
+**Environment:** GitHub Actions `ubuntu-latest` (2-core CPU, 7 GB RAM), Actions run [22262734321](https://github.com/huydhoang/quantlens-docs/actions/runs/22262734321). Redis service container (localhost:6379), PostgreSQL service container (localhost:5432).
 
 ### Methodology
 
-> **Important:** The benchmark script now tests Huey with **both Redis and SQLite backends** using `immediate=False` (actual broker I/O). A new **backtest simulation** scenario enqueues 3 tasks that each run ~5 s of CPU work, mimicking a real NautilusTrader backtest — the primary QuantLens workload. APScheduler has been removed — it is an in-process scheduler with no queueing, persistence, or automatic retries, and is not comparable to distributed task queues. For all distributed queues (Celery, RQ, Dramatiq, etc.), workers were not started; numbers measure **broker write throughput only**. `completed=0` means enqueue was measured but execution was not tested. Re-run benchmarks for updated numbers with the new scenarios.
-
-> The tables below reflect results from the previous benchmark run (Huey `immediate=True`, no SQLite backend, no backtest simulation). They are retained for reference but should be superseded by the next CI run.
+> Workers were **not** started for any distributed queue — numbers measure **broker write throughput only** (`immediate=False`). For `wait=True` scenarios, the queue waited for job handles to report finished; queues that don't expose completion handles are marked `completed=—` (enqueue-only). Huey is tested with **both Redis and SQLite backends**. A new **backtest simulation** scenario enqueues 3 tasks that each simulate a ~5 s NautilusTrader backtest — the primary QuantLens workload.
 
 ### Burst Enqueue — 1,000 Tasks
 
-| Package | Category | Tasks/s | Elapsed | Notes |
-|---------|----------|--------:|--------:|-------|
-| Huey | Distributed Task Queue | 65,800 | 15.2 ms | `immediate=True` (in-process) † |
-| BullMQ | Distributed Task Queue | 3,043 | 328.6 ms | |
-| Dramatiq | Distributed Task Queue | 3,038 | 329.1 ms | |
-| Taskiq | Distributed Task Queue | 2,768 | 361.3 ms | |
-| TaskTiger | Distributed Task Queue | 2,388 | 418.8 ms | |
-| RQ | Distributed Task Queue | 1,949 | 513.2 ms | |
-| ARQ | Distributed Task Queue | 1,591 | 628.7 ms | |
-| Procrastinate | Distributed Task Queue | 1,211 | 825.6 ms | PostgreSQL-based |
-| Celery | Distributed Task Queue | 1,199 | 833.7 ms | |
-
-† Huey was benchmarked with `immediate=True` (in-process execution, no broker I/O). The benchmark script now tests Huey with both Redis and SQLite backends using `immediate=False`, plus a new backtest simulation scenario. Re-run benchmarks for updated numbers.
+| Package | Tasks/s | Elapsed |
+|---------|--------:|--------:|
+| **Huey (SQLite)** | **19,074** | **52.4 ms** |
+| Huey (Redis) | 5,333 | 187.5 ms |
+| Dramatiq | 3,830 | 261.1 ms |
+| BullMQ | 3,271 | 305.7 ms |
+| Taskiq | 2,520 | 396.9 ms |
+| TaskTiger | 2,553 | 391.6 ms |
+| RQ | 2,010 | 497.4 ms |
+| ARQ | 1,697 | 589.4 ms |
+| Procrastinate | 1,241 | 806.1 ms |
+| Celery | 1,175 | 851.2 ms |
 
 ### Heavy Enqueue — 10,000 Tasks
 
-| Package | Category | Tasks/s | Elapsed | Notes |
-|---------|----------|--------:|--------:|-------|
-| Huey | Distributed Task Queue | 68,127 | 146.8 ms | `immediate=True` (in-process) † |
-| Dramatiq | Distributed Task Queue | 3,459 | 2.89 s | |
-| BullMQ | Distributed Task Queue | 3,116 | 3.21 s | |
-| Taskiq | Distributed Task Queue | 2,753 | 3.63 s | |
-| TaskTiger | Distributed Task Queue | 2,259 | 4.43 s | |
-| RQ | Distributed Task Queue | 1,973 | 5.07 s | |
-| ARQ | Distributed Task Queue | 1,485 | 6.73 s | |
-| Procrastinate | Distributed Task Queue | 1,385 | 7.22 s | PostgreSQL-based |
-| Celery | Distributed Task Queue | 1,265 | 7.90 s | |
+| Package | Tasks/s | Elapsed |
+|---------|--------:|--------:|
+| **Huey (SQLite)** | **21,323** | **469.0 ms** |
+| Huey (Redis) | 5,281 | 1.89 s |
+| Dramatiq | 3,929 | 2.55 s |
+| BullMQ | 3,269 | 3.06 s |
+| TaskTiger | 2,553 | 3.92 s |
+| Taskiq | 2,467 | 4.05 s |
+| RQ | 2,091 | 4.78 s |
+| ARQ | 1,685 | 5.93 s |
+| Procrastinate | 1,261 | 7.93 s |
+| Celery | 1,338 | 7.47 s |
 
-### Round-Trip Latency — 100 Tasks
+### Round-Trip Latency — 100 Tasks (enqueue-only; no workers)
 
-Workers not running for distributed queues — completed count reflects enqueue only where `completed=100`.
+| Package | Tasks/s | Elapsed | Notes |
+|---------|--------:|--------:|-------|
+| **Huey (SQLite)** | **16,620** | **6.0 ms** | enqueue-only |
+| Huey (Redis) | 5,134 | 19.5 ms | enqueue-only |
+| Dramatiq | 3,942 | 25.4 ms | enqueue-only |
+| BullMQ | 3,023 | 33.1 ms | enqueue-only |
+| TaskTiger | 2,578 | 38.8 ms | enqueue-only |
+| Taskiq | 2,424 | 41.3 ms | enqueue-only |
+| RQ | 2,054 | 48.7 ms | completed=0 (no workers) |
+| ARQ | 1,690 | 59.2 ms | enqueue-only |
+| Procrastinate | 1,194 | 83.8 ms | enqueue-only |
+| Celery | 1,311 | 76.3 ms | completed=0 (no workers) |
 
-| Package | Category | Tasks/s | Elapsed | Completed | Notes |
-|---------|----------|--------:|--------:|----------:|-------|
-| Huey | Distributed Task Queue | 58,363 | 1.7 ms | 100 | `immediate=True` (in-process) † |
-| Dramatiq | Distributed Task Queue | 3,820 | 26.2 ms | 100 | No workers — enqueue only |
-| BullMQ | Distributed Task Queue | 3,056 | 32.7 ms | 100 | |
-| Taskiq | Distributed Task Queue | 2,592 | 38.6 ms | 100 | |
-| TaskTiger | Distributed Task Queue | 2,293 | 43.6 ms | 100 | |
-| ARQ | Distributed Task Queue | 1,540 | 64.9 ms | 100 | |
-| RQ | Distributed Task Queue | 1,699 | 58.9 ms | 0 | No workers |
-| Procrastinate | Distributed Task Queue | 1,071 | 93.4 ms | 100 | |
-| Celery | Distributed Task Queue | 975 | 102.5 ms | 0 | No workers |
+### Round-Trip CPU — 50 Tasks (enqueue-only; no workers)
 
-### Round-Trip CPU — 50 Tasks
-
-| Package | Category | Tasks/s | Elapsed | Completed | Notes |
-|---------|----------|--------:|--------:|----------:|-------|
-| Dramatiq | Distributed Task Queue | 3,724 | 13.4 ms | 50 | |
-| BullMQ | Distributed Task Queue | 2,931 | 17.1 ms | 50 | |
-| Taskiq | Distributed Task Queue | 2,499 | 20.0 ms | 50 | |
-| TaskTiger | Distributed Task Queue | 2,278 | 21.9 ms | 50 | |
-| ARQ | Distributed Task Queue | 1,534 | 32.6 ms | 50 | |
-| RQ | Distributed Task Queue | 1,436 | 34.8 ms | 0 | No workers |
-| Huey | Distributed Task Queue | 1,416 | 35.3 ms | 50 | `immediate=True` (in-process) † |
-| Procrastinate | Distributed Task Queue | 1,101 | 45.4 ms | 50 | |
-| Celery | Distributed Task Queue | 853 | 58.6 ms | 0 | No workers |
+| Package | Tasks/s | Elapsed | Notes |
+|---------|--------:|--------:|-------|
+| **Huey (SQLite)** | **15,481** | **3.2 ms** | enqueue-only |
+| Huey (Redis) | 4,804 | 10.4 ms | enqueue-only |
+| Dramatiq | 3,455 | 14.5 ms | enqueue-only |
+| BullMQ | 3,064 | 16.3 ms | enqueue-only |
+| TaskTiger | 2,545 | 19.6 ms | enqueue-only |
+| Taskiq | 2,375 | 21.1 ms | enqueue-only |
+| RQ | 1,976 | 25.3 ms | completed=0 (no workers) |
+| ARQ | 1,711 | 29.2 ms | enqueue-only |
+| Procrastinate | 906 | 55.2 ms | enqueue-only |
+| Celery | 1,205 | 41.5 ms | completed=0 (no workers) |
 
 ### Retry Reliability — 20 Failing Tasks
 
-| Package | Category | Tasks/s | Elapsed | Completed | Notes |
-|---------|----------|--------:|--------:|----------:|-------|
-| Huey | Distributed Task Queue | 38,198 | 0.5 ms | 20 | `immediate=True` (in-process) † |
-| Dramatiq | Distributed Task Queue | 3,183 | 6.3 ms | 20 | |
-| BullMQ | Distributed Task Queue | 2,775 | 7.2 ms | 20 | |
-| Taskiq | Distributed Task Queue | 2,379 | 8.4 ms | 20 | |
-| TaskTiger | Distributed Task Queue | 2,139 | 9.4 ms | 20 | |
-| ARQ | Distributed Task Queue | 1,586 | 12.6 ms | 20 | |
-| RQ | Distributed Task Queue | 1,792 | 11.2 ms | 0 | No workers |
-| Procrastinate | Distributed Task Queue | 756 | 26.5 ms | 20 | |
-| Celery | Distributed Task Queue | 516 | 38.7 ms | 0 | No workers |
+Workers **were** started for this scenario via `immediate=False`; tasks fail once then succeed.
 
-### Backtest Simulation — 3 Long-Running Tasks *(new)*
+| Package | Tasks/s | Elapsed | Completed | Notes |
+|---------|--------:|--------:|----------:|-------|
+| **Huey (SQLite)** | **785** | **25.5 ms** | **20** | |
+| Huey (Redis) | 779 | 25.7 ms | 20 | |
+| Celery | 670 | 29.9 ms | 20 | |
+| Dramatiq | 518 | 38.6 ms | 20 | |
+| BullMQ | 17 | 1.18 s | 20 | |
+| Taskiq | 2 | 9.04 s | 20 | |
+| RQ | 0 | 46.79 s | 20 | |
+| Procrastinate | 0 | 61.09 s | 0 | TaskNotFound (task not importable from __main__) |
+| ARQ | 0 | 62.12 s | 0 | timed out |
+| TaskTiger | ERR | — | — | error |
 
-> Enqueue 3 tasks that each simulate a ~5 s NautilusTrader backtest (CPU-bound). Measures dispatch overhead for long-running jobs — the primary QuantLens workload. Huey tested with both Redis and SQLite backends.
+### Backtest Simulation — 3 Long-Running Tasks (enqueue-only; no workers)
 
-*Awaiting first CI run with updated benchmark script. Re-run `task-queue-benchmarks` workflow to populate.*
+> Enqueue 3 tasks each simulating a ~5 s NautilusTrader backtest (CPU-bound). Measures dispatch overhead for the primary QuantLens workload. Even at 0.5 ms total enqueue time, dispatch overhead is noise relative to a 5–120 second backtest.
+
+| Package | Tasks/s | Elapsed | Notes |
+|---------|--------:|--------:|-------|
+| **Huey (SQLite)** | **5,644** | **0.5 ms** | enqueue-only |
+| Huey (Redis) | 1,225 | 2.4 ms | enqueue-only |
+| BullMQ | 1,512 | 2.0 ms | enqueue-only |
+| Dramatiq | 1,955 | 1.5 ms | enqueue-only |
+| ARQ | 1,679 | 1.8 ms | enqueue-only |
+| TaskTiger | 1,705 | 1.8 ms | enqueue-only |
+| RQ | 475 | 6.3 ms | completed=0 (no workers) |
+| Taskiq | 675 | 4.4 ms | enqueue-only |
+| Procrastinate | 341 | 8.8 ms | enqueue-only |
+| Celery | 292 | 10.3 ms | completed=0 (no workers) |
 
 ---
 
@@ -181,7 +195,9 @@ Workers not running for distributed queues — completed count reflects enqueue 
 
 ### Enqueue throughput is irrelevant for NautilusTrader
 
-The throughput gap between the fastest (Dramatiq, 3,459 tasks/s) and the slowest traditional distributed queue (Celery, 1,265 tasks/s) translates to a difference of ~0.6 ms per task (1,265 tasks/s → 0.79 ms; 3,459 tasks/s → 0.29 ms). A NautilusTrader backtest takes 5–120 seconds to execute. Neither 0.79 ms nor 0.29 ms is the bottleneck. The ranking of Dramatiq over Celery has zero practical effect on QuantLens. The bottleneck is CPU execution time, not broker write speed.
+Huey (SQLite) enqueued 3 backtest tasks in **0.5 ms**. A NautilusTrader backtest takes 5–120 seconds to execute. Dispatch overhead is less than 0.01% of job runtime — the choice of task queue has zero practical impact on QuantLens throughput. The decision hinges on **backend flexibility** (SQLite dev mode, no external process) and **operational simplicity**, not raw throughput.
+
+Among Redis-backed queues, Dramatiq leads at 3,929 tasks/s vs Celery's 1,338 tasks/s for 10,000 tasks — a difference of 0.5 ms per task. Irrelevant for workloads measured in seconds.
 
 ### QuantLens does NOT need
 
@@ -197,28 +213,46 @@ The throughput gap between the fastest (Dramatiq, 3,459 tasks/s) and the slowest
 - Progress streaming to the React UI via Redis pub/sub
 - Retry on failure
 - `immediate=True` for dev/test (no separate worker process)
-- SQLite backend option (no Redis required for the queue itself)
+- **SQLite backend option** (no Redis required for the queue itself)
 - macOS + Linux (developer workstations)
 - Simple, readable configuration
 
-### Huey satisfies every requirement
+### Huey (SQLite) satisfies every requirement
 
-The benchmark exposes one critical advantage that raw throughput numbers do not capture: **backend flexibility**. Among the distributed task queues tested (those that can run workers in a separate process), Huey is the only one that supports SQLite as a broker. This matters for a local desktop app — it means the task queue has zero infrastructure dependencies beyond a file on disk during development, and switches to Redis for production with a one-line config change.
+The benchmark exposes one critical advantage that raw throughput numbers do not capture: **backend flexibility**. Among the distributed task queues tested, Huey is the only one that supports SQLite as a broker. This matters for a local desktop app:
+
+- **Development**: zero external dependencies — task queue is a file on disk
+- **Production**: switch to Redis with a one-line config change
+- **Retry**: `@huey.task(retries=2, retry_delay=30)` — fastest retry completion of all tested queues (25.5 ms for 20 tasks)
+- **`immediate=True`**: tests run without starting a worker process
 
 ---
 
 ## Per-Package Analysis
 
-### Huey — Recommended ✅
+### Huey (SQLite backend) — **Top Choice** ✅
 
-- **SQLite backend**: task queue with no external service dependency in dev
+Benchmark results from run [22262734321](https://github.com/huydhoang/quantlens-docs/actions/runs/22262734321):
+
+| Scenario | Tasks/s | vs next-best Redis queue |
+|----------|--------:|--------------------------|
+| Burst enqueue (1k) | 19,074 | 3.6× faster than Huey Redis |
+| Heavy enqueue (10k) | 21,323 | 4× faster than Huey Redis |
+| Retry reliability (20 tasks) | 785 (25.5 ms) | Fastest retry completion |
+| Backtest enqueue (3 tasks) | 5,644 (0.5 ms) | 4.6× faster than Huey Redis |
+
+- **SQLite backend**: task queue with zero external service dependency in dev
 - **`immediate=True`**: synchronous in-process execution for tests and local dev
 - **Pipeline API**: `huey.pipeline()` chains tasks without canvas complexity
-- **Retry**: `@huey.task(retries=2, retry_delay=30)`
+- **Retry**: `@huey.task(retries=2, retry_delay=30)` — fastest retry completion tested
 - **Scheduling**: built-in crontab and periodic tasks, no separate Beat process
 - **Multi-process workers**: `huey_consumer --workers 4 --worker-type process`
 - **macOS + Linux**: fully cross-platform
 - **5,900+ stars**, actively maintained
+
+### Huey (Redis backend) — Production Configuration
+
+Same API, switches to Redis for production. 5,333 tasks/s burst (19k for SQLite). Use Redis when the deployment already runs Redis for cache and pub/sub — no additional service overhead.
 
 ### Dramatiq — Second Choice
 
@@ -264,30 +298,33 @@ Incompatible with Pydantic v2. Unmaintained since December 2022.
 
 ## Recommended Configuration
 
-### Huey Setup
+### Huey (SQLite) — Primary Setup
 
 ```python
-# tasks.py
+# tasks.py — SQLite backend for development and single-machine production
 
-# Development / testing — immediate mode, no worker process required
 from huey import SqliteHuey
+
+# Development / testing — immediate=True: tasks run synchronously, no worker needed
 huey = SqliteHuey("quantlens", filename="quantlens_tasks.db", immediate=True)
 
-# Production — Docker Compose Redis backend
-from huey import RedisHuey
-huey = RedisHuey("quantlens", host="localhost", port=6379)
+# Single-machine production — immediate=False: tasks queued to SQLite, worker picks up
+huey = SqliteHuey("quantlens", filename="quantlens_tasks.db", immediate=False)
 ```
 
-Switch between modes via an environment variable:
+Switch between development and production modes via an environment variable:
 
 ```python
 import os
 from huey import RedisHuey, SqliteHuey
 
-if os.getenv("QUANTLENS_ENV") == "production":
+env = os.getenv("QUANTLENS_ENV", "development")
+if env == "production":
+    # Redis backend when the Docker Compose stack is running Redis for cache/pub/sub
     huey = RedisHuey("quantlens", host=os.getenv("REDIS_HOST", "localhost"), port=6379)
 else:
-    huey = SqliteHuey("quantlens", filename="quantlens_tasks.db", immediate=True)
+    # SQLite backend — no external service required
+    huey = SqliteHuey("quantlens", filename="quantlens_tasks.db", immediate=(env == "test"))
 ```
 
 ### Worker Deployment
