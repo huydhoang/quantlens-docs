@@ -467,10 +467,16 @@ def bench_rq(scenario: dict) -> dict:
             else:
                 jobs.append(q.enqueue(fn))
         # For retry-reliability, run an in-process SimpleWorker so tasks
-        # (including retries) actually execute.
+        # (including retries) actually execute.  Burst mode exits after one
+        # pass, so we loop until all retries have been processed.
         if is_flaky:
             w = SimpleWorker([q], connection=conn)
-            w.work(burst=True)
+            burst_deadline = time.monotonic() + 30
+            while time.monotonic() < burst_deadline:
+                w.work(burst=True)
+                if _count_flaky_completions() >= count:
+                    break
+                time.sleep(0.1)
         elapsed = time.perf_counter() - start
         deadline = time.time() + 60
         while any(not j.is_finished for j in jobs) and time.time() < deadline:
@@ -741,12 +747,14 @@ def bench_arq(scenario: dict) -> dict:
             worker_task = asyncio.ensure_future(worker.main())
 
             # Poll until all tasks have completed or timeout.
-            deadline = time.monotonic() + 30
+            deadline = time.monotonic() + 60
             while time.monotonic() < deadline:
                 if _count_flaky_completions() >= n:
                     break
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(0.5)
 
+            # Allow worker to finish processing current job before cancel.
+            await asyncio.sleep(1)
             worker_task.cancel()
             try:
                 await worker_task
@@ -812,11 +820,12 @@ def bench_taskiq(scenario: dict) -> dict:
             for _ in range(n):
                 tid = str(uuid.uuid4())
                 result = await flaky_mem.kiq(tid)
-                res = await result.wait_result(timeout=5)
+                res = await result.wait_result(timeout=10)
                 if res.is_err:
                     # Manual retry (mirrors max_retries=1)
+                    await asyncio.sleep(0.05)
                     result2 = await flaky_mem.kiq(tid)
-                    res2 = await result2.wait_result(timeout=5)
+                    res2 = await result2.wait_result(timeout=10)
                     if not res2.is_err:
                         completed += 1
                 else:
@@ -967,9 +976,13 @@ def bench_tasktiger(scenario: dict) -> dict:
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
             w = tasktiger.Worker(tiger)
-            w.run(once=True)
+            # Process multiple tasks per iteration to handle both
+            # initial failures and their retries in the same loop pass.
+            for _ in range(5):
+                w.run(once=True)
             if _count_flaky_completions() >= count:
                 break
+            time.sleep(0.2)
         elapsed = time.perf_counter() - start
 
         completed = _count_flaky_completions()
@@ -1024,12 +1037,14 @@ def bench_procrastinate(scenario: dict) -> dict:
                     )
                 )
 
-                deadline = time.monotonic() + 30
+                deadline = time.monotonic() + 60
                 while time.monotonic() < deadline:
                     if _count_flaky_completions() >= n:
                         break
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.5)
 
+                # Allow worker to finish processing current job before cancel.
+                await asyncio.sleep(1)
                 worker_task.cancel()
                 try:
                     await worker_task
