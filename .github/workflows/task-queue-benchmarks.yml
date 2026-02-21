@@ -78,23 +78,21 @@ jobs:
         run: |
           pip install --upgrade pip
           # Server stack — same gunicorn+uvicorn setup as extended-server-benchmarks
-          pip install \
-            uvicorn[standard] gunicorn uvicorn-worker \
-            fastapi pydantic
-          # Distributed task queues
-          pip install \
-            "celery[redis]" \
-            rq \
-            bullmq \
-            huey \
-            "dramatiq[redis]" \
-            arq \
-            tasktiger \
-            "taskiq[redis]" taskiq-redis \
-            "procrastinate[aiopg]" \
-            redis \
-            psycopg2-binary \
-            aiopg
+          pip install uvicorn[standard] gunicorn uvicorn-worker fastapi pydantic
+          # Install each task queue package individually; log failures but don't abort
+          install_pkg() {
+            pip install "$@" && echo "OK: $*" || echo "FAILED: $*"
+          }
+          install_pkg "celery[redis]"
+          install_pkg rq
+          install_pkg bullmq
+          install_pkg huey
+          install_pkg "dramatiq[redis]"
+          install_pkg arq
+          install_pkg tasktiger
+          install_pkg "taskiq[redis]" taskiq-redis
+          install_pkg "procrastinate[aiopg]"
+          install_pkg redis psycopg2-binary aiopg
 
       - name: Install hey
         run: |

@@ -305,23 +305,28 @@ def bench_celery(scenario: dict) -> dict:
                "backtest_sim": backtest_sim}[scenario["task"]]
     count = scenario["count"]
 
-    def enqueue(n):
-        for _ in range(n):
-            task_fn.delay()
-
-    metrics = _time_enqueue(enqueue, count)
-
     if scenario.get("wait"):
+        start = time.perf_counter()
         results = [task_fn.delay() for _ in range(count)]
+        elapsed = time.perf_counter() - start
         deadline = time.time() + 60
         pending = list(results)
         while pending and time.time() < deadline:
             pending = [r for r in pending if not r.ready()]
             time.sleep(0.05)
-        metrics["completed"] = count - len(pending)
-        metrics["timed_out"] = len(pending)
+        return {
+            "count": count,
+            "elapsed_s": round(elapsed, 4),
+            "tasks_per_sec": round(count / elapsed, 1) if elapsed > 0 else None,
+            "completed": count - len(pending),
+            "timed_out": len(pending),
+        }
 
-    return metrics
+    def enqueue(n):
+        for _ in range(n):
+            task_fn.delay()
+
+    return _time_enqueue(enqueue, count)
 
 
 # ── RQ ───────────────────────────────────────────────────────────────
@@ -338,21 +343,26 @@ def bench_rq(scenario: dict) -> dict:
     fn = fn_map[scenario["task"]]
     count = scenario["count"]
 
+    if scenario.get("wait"):
+        start = time.perf_counter()
+        jobs = [q.enqueue(fn) for _ in range(count)]
+        elapsed = time.perf_counter() - start
+        deadline = time.time() + 60
+        while any(not j.is_finished for j in jobs) and time.time() < deadline:
+            time.sleep(0.05)
+        return {
+            "count": count,
+            "elapsed_s": round(elapsed, 4),
+            "tasks_per_sec": round(count / elapsed, 1) if elapsed > 0 else None,
+            "completed": sum(1 for j in jobs if j.is_finished),
+            "timed_out": sum(1 for j in jobs if not j.is_finished),
+        }
+
     def enqueue(n):
         for _ in range(n):
             q.enqueue(fn)
 
-    metrics = _time_enqueue(enqueue, count)
-
-    if scenario.get("wait"):
-        jobs = [q.enqueue(fn) for _ in range(count)]
-        deadline = time.time() + 60
-        while any(not j.is_finished for j in jobs) and time.time() < deadline:
-            time.sleep(0.05)
-        metrics["completed"] = sum(1 for j in jobs if j.is_finished)
-        metrics["timed_out"] = sum(1 for j in jobs if not j.is_finished)
-
-    return metrics
+    return _time_enqueue(enqueue, count)
 
 
 # ── Huey (Redis) ─────────────────────────────────────────────────────
@@ -397,37 +407,44 @@ def bench_huey_sqlite(scenario: dict) -> dict:
     import tempfile
     from huey import SqliteHuey
 
-    # Use a temp file so benchmarks don't leave artifacts in the repo
-    db_path = os.path.join(tempfile.gettempdir(), "huey_bench.db")
-    huey = SqliteHuey("bench-sqlite", filename=db_path, immediate=False)
+    # Use a unique temp file per run to avoid cross-run state contamination
+    fd, db_path = tempfile.mkstemp(suffix=".db", prefix="huey_bench_")
+    os.close(fd)
+    try:
+        huey = SqliteHuey("bench-sqlite", filename=db_path, immediate=False)
 
-    @huey.task()
-    def noop_task():
-        pass
+        @huey.task()
+        def noop_task():
+            pass
 
-    @huey.task()
-    def cpu_task():
-        return sum(i * i for i in range(10_000))
+        @huey.task()
+        def cpu_task():
+            return sum(i * i for i in range(10_000))
 
-    @huey.task()
-    def backtest_sim_task():
-        return _bench_backtest_sim()
+        @huey.task()
+        def backtest_sim_task():
+            return _bench_backtest_sim()
 
-    task_map = {
-        "noop": noop_task,
-        "cpu_work": cpu_task,
-        "flaky": noop_task,
-        "backtest_sim": backtest_sim_task,
-    }
-    task_fn = task_map[scenario["task"]]
-    count = scenario["count"]
+        task_map = {
+            "noop": noop_task,
+            "cpu_work": cpu_task,
+            "flaky": noop_task,
+            "backtest_sim": backtest_sim_task,
+        }
+        task_fn = task_map[scenario["task"]]
+        count = scenario["count"]
 
-    def enqueue(n):
-        for _ in range(n):
-            task_fn()
+        def enqueue(n):
+            for _ in range(n):
+                task_fn()
 
-    metrics = _time_enqueue(enqueue, count)
-    return metrics
+        metrics = _time_enqueue(enqueue, count)
+        return metrics
+    finally:
+        try:
+            os.unlink(db_path)
+        except OSError:
+            pass
 
 
 # ── Dramatiq ─────────────────────────────────────────────────────────
@@ -673,7 +690,13 @@ def run_queue_scenario(queue: dict, scenario: dict) -> dict:
         return bench_unavailable(queue, scenario, f"no benchmark implementation for '{qid}'")
 
     try:
-        return bench_fn(scenario)
+        result = bench_fn(scenario)
+        # If the scenario expects completion tracking but the backend only measures
+        # enqueue (no workers running), annotate the result so the report is accurate.
+        if (scenario.get("wait") and "completed" not in result
+                and not result.get("skipped") and "error" not in result):
+            result["notes"] = "enqueue-only"
+        return result
     except Exception as exc:
         return {"error": str(exc), "skipped": False}
 
@@ -731,8 +754,8 @@ def generate_report(all_results: dict, queues_run: list) -> str:
             else:
                 tps = fmt_tps(r.get("tasks_per_sec"))
                 elapsed = fmt_dur(r.get("elapsed_s"))
-                completed = str(r.get("completed", r.get("count", "—")))
-                notes = ""
+                completed = str(r["completed"]) if "completed" in r else "—"
+                notes = r.get("notes", "")
             lines.append(
                 f'| {q["name"]} | {q["category"]} | {tps} | {elapsed} | {completed} | {notes} |'
             )
@@ -794,8 +817,9 @@ def main():
             else:
                 tps = fmt_tps(result.get("tasks_per_sec"))
                 elapsed = fmt_dur(result.get("elapsed_s"))
-                completed = result.get("completed", result.get("count", "?"))
-                print(f'{tps} tasks/s  elapsed={elapsed}  completed={completed}')
+                completed = result["completed"] if "completed" in result else "—"
+                notes = f'  [{result["notes"]}]' if result.get("notes") else ""
+                print(f'{tps} tasks/s  elapsed={elapsed}  completed={completed}{notes}')
 
     # ── Save reports ──────────────────────────────────────────────────
     report = generate_report(all_results, queues_to_run)
