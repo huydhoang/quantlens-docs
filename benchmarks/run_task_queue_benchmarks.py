@@ -330,6 +330,31 @@ def _count_flaky_completions() -> int:
     return count
 
 
+async def _poll_until_complete_or_timeout(
+    worker_task: "asyncio.Task",
+    target_count: int,
+    timeout: int = 60,
+) -> None:
+    """Poll completion count until *target_count* is reached or *timeout* seconds elapse.
+
+    After the poll loop, waits one second to allow the worker to finish
+    processing its current job, then cancels and awaits *worker_task*.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _count_flaky_completions() >= target_count:
+            break
+        await asyncio.sleep(0.5)
+
+    # Allow worker to finish processing current job before cancel.
+    await asyncio.sleep(1)
+    worker_task.cancel()
+    try:
+        await worker_task
+    except asyncio.CancelledError:
+        pass
+
+
 # ── Benchmark implementations ────────────────────────────────────────
 
 
@@ -753,19 +778,7 @@ def bench_arq(scenario: dict) -> dict:
             worker_task = asyncio.ensure_future(worker.main())
 
             # Poll until all tasks have completed or timeout.
-            deadline = time.monotonic() + 60
-            while time.monotonic() < deadline:
-                if _count_flaky_completions() >= n:
-                    break
-                await asyncio.sleep(0.5)
-
-            # Allow worker to finish processing current job before cancel.
-            await asyncio.sleep(1)
-            worker_task.cancel()
-            try:
-                await worker_task
-            except asyncio.CancelledError:
-                pass
+            await _poll_until_complete_or_timeout(worker_task, n)
 
             elapsed = time.perf_counter() - start
             await redis.aclose()
@@ -1043,19 +1056,7 @@ def bench_procrastinate(scenario: dict) -> dict:
                     )
                 )
 
-                deadline = time.monotonic() + 60
-                while time.monotonic() < deadline:
-                    if _count_flaky_completions() >= n:
-                        break
-                    await asyncio.sleep(0.5)
-
-                # Allow worker to finish processing current job before cancel.
-                await asyncio.sleep(1)
-                worker_task.cancel()
-                try:
-                    await worker_task
-                except asyncio.CancelledError:
-                    pass
+                await _poll_until_complete_or_timeout(worker_task, n)
 
                 elapsed = time.perf_counter() - start
             return elapsed
