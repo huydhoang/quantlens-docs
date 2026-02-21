@@ -2,26 +2,25 @@
 """
 Task Queue Benchmark Runner
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Benchmarks 12 task queue packages across throughput, latency, and reliability
-scenarios using a gunicorn+uvicorn FastAPI server to enqueue jobs.
+Benchmarks 10 task queue configurations across throughput, latency, reliability,
+and long-running backtest simulation scenarios.
 
 Packages under test:
   Distributed Task Queues:
-    1.  Celery        — enterprise standard
-    2.  RQ            — simple Redis-only queue
-    3.  BullMQ        — cross-platform (Node.js/Python), high performance
-    4.  Huey          — lightweight, multi-backend
-    5.  Dramatiq      — modern, middleware-based
-    6.  ARQ           — async-first, type-hinted
-    7.  TaskTiger     — Redis-based, Close.io origin
-    8.  Taskiq        — Redis Streams, fastest performance
-    9.  Procrastinate — PostgreSQL-based (no Redis required)
-  In-Process Schedulers:
-    10. APScheduler   — advanced scheduling, multiple backends
-    11. Rocketry      — statement-based scheduling (excluded: incompatible
-                       with Pydantic v2, unmaintained since Dec 2022)
-  Stream Processing:
-    12. Faust         — Kafka-based real-time streaming
+    1.  Celery         — enterprise standard (Redis broker)
+    2.  RQ             — simple Redis-only queue
+    3.  BullMQ         — cross-platform (Node.js/Python), high performance
+    4.  Huey (Redis)   — lightweight, Redis backend
+    5.  Huey (SQLite)  — lightweight, SQLite backend (no Redis required)
+    6.  Dramatiq       — modern, middleware-based
+    7.  ARQ            — async-first, type-hinted
+    8.  TaskTiger      — Redis-based, Close.io origin
+    9.  Taskiq         — Redis Streams, fastest performance
+    10. Procrastinate  — PostgreSQL-based (no Redis required)
+
+Excluded:
+  - APScheduler — in-process scheduler, not a distributed task queue
+  - Rocketry — unmaintained since December 2022, incompatible with Pydantic v2
 
 Usage:
     python benchmarks/run_task_queue_benchmarks.py
@@ -72,12 +71,21 @@ QUEUES = [
     },
     {
         "id": "huey",
-        "name": "Huey",
+        "name": "Huey (Redis)",
         "category": "Distributed Task Queue",
         "pip": "huey",
         "import": "huey",
         "broker": "redis",
-        "description": "Lightweight — Redis, SQLite, file-system backends",
+        "description": "Lightweight — Redis backend",
+    },
+    {
+        "id": "huey-sqlite",
+        "name": "Huey (SQLite)",
+        "category": "Distributed Task Queue",
+        "pip": "huey",
+        "import": "huey",
+        "broker": "sqlite",
+        "description": "Lightweight — SQLite backend, no external broker required",
     },
     {
         "id": "dramatiq",
@@ -124,38 +132,6 @@ QUEUES = [
         "broker": "postgresql",
         "description": "PostgreSQL-based — no Redis required",
     },
-    # ── In-Process Schedulers ────────────────────────────────────────
-    {
-        "id": "apscheduler",
-        "name": "APScheduler",
-        "category": "In-Process Scheduler",
-        "pip": "apscheduler",
-        "import": "apscheduler",
-        "broker": "in-process",
-        "description": "Advanced scheduling — multiple backends, cron/interval/date",
-    },
-    {
-        "id": "rocketry",
-        "name": "Rocketry",
-        "category": "In-Process Scheduler",
-        "pip": "rocketry",
-        "import": "rocketry",
-        "broker": "in-process",
-        "description": "Statement-based scheduling — powerful conditions ¹",
-        "note": "Rocketry is excluded from benchmarks: it is incompatible with "
-               "Pydantic v2 and has been unmaintained since its last release "
-               "(v2.5.1, December 2022). See https://github.com/Miksus/rocketry/issues/210.",
-    },
-    # ── Stream Processing ────────────────────────────────────────────
-    {
-        "id": "faust",
-        "name": "Faust",
-        "category": "Stream Processing",
-        "pip": "faust-streaming",
-        "import": "faust",
-        "broker": "kafka",
-        "description": "Kafka-based real-time streaming — not a traditional job queue",
-    },
 ]
 
 # ── Benchmark scenarios ──────────────────────────────────────────────
@@ -199,6 +175,15 @@ SCENARIOS = [
         "count": 20,
         "wait": True,
     },
+    {
+        "name": "backtest-sim",
+        "label": "Backtest simulation — 3 long-running tasks",
+        "desc": "Enqueue 3 tasks that each simulate a ~5 s NautilusTrader backtest (CPU-bound). "
+                "Measures dispatch overhead for long-running jobs — the primary QuantLens workload.",
+        "task": "backtest_sim",
+        "count": 3,
+        "wait": True,
+    },
 ]
 
 # ── Import availability check ────────────────────────────────────────
@@ -233,8 +218,23 @@ def _bench_cpu_work():
     return sum(i * i for i in range(10_000))
 
 
+def _bench_backtest_sim():
+    """Simulate a NautilusTrader backtest (~5 s of CPU work).
+
+    Uses iterative floating-point math to approximate the CPU profile of a
+    real backtest: indicator calculation, order matching, and portfolio
+    accounting.  The loop count is calibrated to run ~5 s on a 2-core
+    GitHub Actions runner.
+    """
+    total = 0.0
+    for i in range(25_000_000):
+        total += (i * 0.0001) ** 0.5
+    return total
+
+
 _bench_noop.__module__ = _MODULE_PATH
 _bench_cpu_work.__module__ = _MODULE_PATH
+_bench_backtest_sim.__module__ = _MODULE_PATH
 
 
 # ── Benchmark implementations ────────────────────────────────────────
@@ -261,16 +261,6 @@ def _postgres_available() -> bool:
     except OSError:
         return False
 
-
-def _kafka_available() -> bool:
-    """Quick check that Kafka is reachable on localhost:9092."""
-    try:
-        import socket
-        s = socket.create_connection(("127.0.0.1", 9092), timeout=1)
-        s.close()
-        return True
-    except OSError:
-        return False
 
 
 def _time_enqueue(fn, count: int) -> dict:
@@ -307,7 +297,12 @@ def bench_celery(scenario: dict) -> dict:
             self._tried = True
             raise ValueError("transient error")
 
-    task_fn = {"noop": noop, "cpu_work": cpu_work, "flaky": flaky}[scenario["task"]]
+    @app.task
+    def backtest_sim():
+        return _bench_backtest_sim()
+
+    task_fn = {"noop": noop, "cpu_work": cpu_work, "flaky": flaky,
+               "backtest_sim": backtest_sim}[scenario["task"]]
     count = scenario["count"]
 
     def enqueue(n):
@@ -338,7 +333,8 @@ def bench_rq(scenario: dict) -> dict:
     conn = redis.Redis(host="localhost", port=6379)
     q = Queue(connection=conn)
 
-    fn_map = {"noop": _bench_noop, "cpu_work": _bench_cpu_work, "flaky": _bench_noop}
+    fn_map = {"noop": _bench_noop, "cpu_work": _bench_cpu_work, "flaky": _bench_noop,
+              "backtest_sim": _bench_backtest_sim}
     fn = fn_map[scenario["task"]]
     count = scenario["count"]
 
@@ -359,12 +355,12 @@ def bench_rq(scenario: dict) -> dict:
     return metrics
 
 
-# ── Huey ─────────────────────────────────────────────────────────────
+# ── Huey (Redis) ─────────────────────────────────────────────────────
 
 def bench_huey(scenario: dict) -> dict:
     from huey import RedisHuey
 
-    huey = RedisHuey("bench", host="localhost", port=6379, immediate=True)
+    huey = RedisHuey("bench", host="localhost", port=6379, immediate=False)
 
     @huey.task()
     def noop_task():
@@ -374,7 +370,55 @@ def bench_huey(scenario: dict) -> dict:
     def cpu_task():
         return sum(i * i for i in range(10_000))
 
-    task_map = {"noop": noop_task, "cpu_work": cpu_task, "flaky": noop_task}
+    @huey.task()
+    def backtest_sim_task():
+        return _bench_backtest_sim()
+
+    task_map = {
+        "noop": noop_task,
+        "cpu_work": cpu_task,
+        "flaky": noop_task,
+        "backtest_sim": backtest_sim_task,
+    }
+    task_fn = task_map[scenario["task"]]
+    count = scenario["count"]
+
+    def enqueue(n):
+        for _ in range(n):
+            task_fn()
+
+    metrics = _time_enqueue(enqueue, count)
+    return metrics
+
+
+# ── Huey (SQLite) ────────────────────────────────────────────────────
+
+def bench_huey_sqlite(scenario: dict) -> dict:
+    import tempfile
+    from huey import SqliteHuey
+
+    # Use a temp file so benchmarks don't leave artifacts in the repo
+    db_path = os.path.join(tempfile.gettempdir(), "huey_bench.db")
+    huey = SqliteHuey("bench-sqlite", filename=db_path, immediate=False)
+
+    @huey.task()
+    def noop_task():
+        pass
+
+    @huey.task()
+    def cpu_task():
+        return sum(i * i for i in range(10_000))
+
+    @huey.task()
+    def backtest_sim_task():
+        return _bench_backtest_sim()
+
+    task_map = {
+        "noop": noop_task,
+        "cpu_work": cpu_task,
+        "flaky": noop_task,
+        "backtest_sim": backtest_sim_task,
+    }
     task_fn = task_map[scenario["task"]]
     count = scenario["count"]
 
@@ -403,7 +447,12 @@ def bench_dramatiq(scenario: dict) -> dict:
     def cpu_actor():
         return sum(i * i for i in range(10_000))
 
-    actor_map = {"noop": noop_actor, "cpu_work": cpu_actor, "flaky": noop_actor}
+    @dramatiq.actor
+    def backtest_sim_actor():
+        return _bench_backtest_sim()
+
+    actor_map = {"noop": noop_actor, "cpu_work": cpu_actor, "flaky": noop_actor,
+                 "backtest_sim": backtest_sim_actor}
     actor = actor_map[scenario["task"]]
     count = scenario["count"]
 
@@ -429,7 +478,8 @@ def bench_arq(scenario: dict) -> dict:
 
     async def _run(count):
         redis = await arq.create_pool(arq.connections.RedisSettings(host="localhost", port=6379))
-        fn_name = {"noop": "noop", "cpu_work": "cpu_work", "flaky": "noop"}[scenario["task"]]
+        fn_name = {"noop": "noop", "cpu_work": "cpu_work", "flaky": "noop",
+                   "backtest_sim": "backtest_sim"}[scenario["task"]]
         start = time.perf_counter()
         for _ in range(count):
             await redis.enqueue_job(fn_name)
@@ -462,7 +512,12 @@ def bench_taskiq(scenario: dict) -> dict:
     async def cpu_task():
         return sum(i * i for i in range(10_000))
 
-    task_map = {"noop": noop_task, "cpu_work": cpu_task, "flaky": noop_task}
+    @broker.task
+    async def backtest_sim_task():
+        return _bench_backtest_sim()
+
+    task_map = {"noop": noop_task, "cpu_work": cpu_task, "flaky": noop_task,
+                "backtest_sim": backtest_sim_task}
     task_fn = task_map[scenario["task"]]
     count = scenario["count"]
 
@@ -480,37 +535,6 @@ def bench_taskiq(scenario: dict) -> dict:
         "count": count,
         "elapsed_s": round(elapsed, 4),
         "tasks_per_sec": round(count / elapsed, 1) if elapsed > 0 else None,
-    }
-
-
-# ── APScheduler ──────────────────────────────────────────────────────
-
-def bench_apscheduler(scenario: dict) -> dict:
-    from apscheduler.schedulers.background import BackgroundScheduler
-
-    scheduler = BackgroundScheduler()
-    results = []
-
-    def noop_job():
-        results.append(1)
-
-    count = scenario["count"]
-    start = time.perf_counter()
-    for i in range(count):
-        scheduler.add_job(noop_job, "date")
-    elapsed = time.perf_counter() - start
-
-    scheduler.start()
-    deadline = time.time() + 10
-    while len(results) < count and time.time() < deadline:
-        time.sleep(0.05)
-    scheduler.shutdown(wait=False)
-
-    return {
-        "count": count,
-        "elapsed_s": round(elapsed, 4),
-        "tasks_per_sec": round(count / elapsed, 1) if elapsed > 0 else None,
-        "completed": len(results),
     }
 
 
@@ -548,7 +572,8 @@ def bench_tasktiger(scenario: dict) -> dict:
     conn = redislib.Redis(host="localhost", port=6379)
     tiger = tasktiger.TaskTiger(connection=conn)
 
-    fn_map = {"noop": _bench_noop, "cpu_work": _bench_cpu_work, "flaky": _bench_noop}
+    fn_map = {"noop": _bench_noop, "cpu_work": _bench_cpu_work, "flaky": _bench_noop,
+              "backtest_sim": _bench_backtest_sim}
     fn = fn_map[scenario["task"]]
     count = scenario["count"]
 
@@ -558,42 +583,6 @@ def bench_tasktiger(scenario: dict) -> dict:
 
     metrics = _time_enqueue(enqueue, count)
     return metrics
-
-
-# ── Rocketry ─────────────────────────────────────────────────────────
-
-def bench_rocketry(scenario: dict) -> dict:
-    import threading
-    from rocketry import Rocketry
-    from rocketry.conds import every
-
-    count = scenario["count"]
-    # Rocketry is an in-process scheduler; benchmark measures execution
-    # throughput by running the scheduler for a fixed window.
-    counter = [0]
-    app = Rocketry(config={"execution": "thread"})
-
-    @app.task(every("0.001 seconds"))
-    def noop_task():
-        counter[0] += 1
-
-    thread = threading.Thread(target=app.run, daemon=True)
-    start = time.perf_counter()
-    thread.start()
-
-    deadline = time.time() + max(10, count * 0.05)
-    while counter[0] < count and time.time() < deadline:
-        time.sleep(0.01)
-
-    elapsed = time.perf_counter() - start
-    app.session.shut_down()
-
-    return {
-        "count": count,
-        "elapsed_s": round(elapsed, 4),
-        "tasks_per_sec": round(counter[0] / elapsed, 1) if elapsed > 0 else None,
-        "completed": counter[0],
-    }
 
 
 # ── Procrastinate ────────────────────────────────────────────────────
@@ -620,7 +609,12 @@ def bench_procrastinate(scenario: dict) -> dict:
         async def cpu_task():
             return sum(i * i for i in range(10_000))
 
-        task_map = {"noop": noop_task, "cpu_work": cpu_task, "flaky": noop_task}
+        @app.task
+        async def backtest_sim_task():
+            return _bench_backtest_sim()
+
+        task_map = {"noop": noop_task, "cpu_work": cpu_task, "flaky": noop_task,
+                    "backtest_sim": backtest_sim_task}
         task_fn = task_map[scenario["task"]]
 
         async with app.open_async():
@@ -628,36 +622,6 @@ def bench_procrastinate(scenario: dict) -> dict:
             for _ in range(n):
                 await task_fn.defer_async()
             elapsed = time.perf_counter() - start
-        return elapsed
-
-    elapsed = asyncio.run(_run(count))
-    return {
-        "count": count,
-        "elapsed_s": round(elapsed, 4),
-        "tasks_per_sec": round(count / elapsed, 1) if elapsed > 0 else None,
-    }
-
-
-# ── Faust ────────────────────────────────────────────────────────────
-
-def bench_faust(scenario: dict) -> dict:
-    # faust-streaming benchmarks Kafka producer throughput via aiokafka directly,
-    # since faust.App requires a running loop/worker to use topic.send reliably.
-    import asyncio
-    from aiokafka import AIOKafkaProducer
-
-    count = scenario["count"]
-
-    async def _run(n):
-        producer = AIOKafkaProducer(bootstrap_servers="localhost:9092")
-        await producer.start()
-        try:
-            start = time.perf_counter()
-            for _ in range(n):
-                await producer.send("bench-tasks", value=b"{}")
-            elapsed = time.perf_counter() - start
-        finally:
-            await producer.stop()
         return elapsed
 
     elapsed = asyncio.run(_run(count))
@@ -681,14 +645,12 @@ BENCH_FNS = {
     "rq":            bench_rq,
     "bullmq":        bench_bullmq,
     "huey":          bench_huey,
+    "huey-sqlite":   bench_huey_sqlite,
     "dramatiq":      bench_dramatiq,
     "arq":           bench_arq,
     "tasktiger":     bench_tasktiger,
     "taskiq":        bench_taskiq,
     "procrastinate": bench_procrastinate,
-    "apscheduler":   bench_apscheduler,
-    "rocketry":      bench_rocketry,
-    "faust":         bench_faust,
 }
 
 
@@ -705,9 +667,6 @@ def run_queue_scenario(queue: dict, scenario: dict) -> dict:
 
     if broker == "postgresql" and not _postgres_available():
         return bench_unavailable(queue, scenario, "PostgreSQL not reachable on localhost:5432")
-
-    if broker == "kafka" and not _kafka_available():
-        return bench_unavailable(queue, scenario, "Kafka not reachable on localhost:9092")
 
     bench_fn = BENCH_FNS.get(qid)
     if bench_fn is None:
@@ -738,8 +697,7 @@ def generate_report(all_results: dict, queues_run: list) -> str:
         "# Task Queue Benchmark Results\n",
         "- **Runner**: `ubuntu-latest` (GitHub Actions)",
         "- **Redis**: service container (localhost:6379)",
-        "- **PostgreSQL**: service container (localhost:5432) — used by Procrastinate",
-        "- **Kafka**: service container (localhost:9092) — used by Faust\n",
+        "- **PostgreSQL**: service container (localhost:5432) — used by Procrastinate\n",
         "---\n",
         "## Package Overview\n",
         "| # | Package | Category | Broker | Notes |",
