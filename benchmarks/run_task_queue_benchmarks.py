@@ -32,7 +32,6 @@ import argparse
 import importlib.util
 import json
 import os
-import subprocess
 import threading
 import time
 import uuid
@@ -294,18 +293,6 @@ def _cleanup_flaky_keys():
         _flaky_attempts.clear()
 
 
-def _stop_worker(proc):
-    """Gracefully stop a worker subprocess."""
-    if proc is None or proc.poll() is not None:
-        return
-    proc.terminate()
-    try:
-        proc.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
-
-
 # ── Benchmark implementations ────────────────────────────────────────
 
 
@@ -362,10 +349,9 @@ def bench_celery(scenario: dict) -> dict:
 
     @app.task(bind=True, max_retries=1, default_retry_delay=0)
     def flaky(self, task_id):
-        try:
-            _flaky_check(task_id)
-        except Exception as exc:
-            raise self.retry(exc=exc)
+        if self.request.retries == 0:
+            raise self.retry(
+                exc=RuntimeError("transient benchmark failure"))
 
     @app.task
     def backtest_sim():
@@ -515,9 +501,14 @@ def bench_huey(scenario: dict) -> dict:
     if is_flaky:
         _cleanup_flaky_keys()
         start = time.perf_counter()
-        results = [task_fn(str(uuid.uuid4())) for _ in range(count)]
+        completed = 0
+        for _ in range(count):
+            try:
+                task_fn(str(uuid.uuid4()))
+                completed += 1
+            except Exception:
+                pass
         elapsed = time.perf_counter() - start
-        completed = sum(1 for r in results if r is not None)
         return {
             "count": count,
             "elapsed_s": round(elapsed, 4),
@@ -575,9 +566,14 @@ def bench_huey_sqlite(scenario: dict) -> dict:
         if is_flaky:
             _cleanup_flaky_keys()
             start = time.perf_counter()
-            results = [task_fn(str(uuid.uuid4())) for _ in range(count)]
+            completed = 0
+            for _ in range(count):
+                try:
+                    task_fn(str(uuid.uuid4()))
+                    completed += 1
+                except Exception:
+                    pass
             elapsed = time.perf_counter() - start
-            completed = sum(1 for r in results if r is not None)
             return {
                 "count": count,
                 "elapsed_s": round(elapsed, 4),
@@ -748,7 +744,7 @@ def bench_bullmq(scenario: dict) -> dict:
     async def _run(n):
         q = BullQueue("bench", {"connection": {"host": "localhost", "port": 6379}})
         start = time.perf_counter()
-        for i in range(n):
+        for _ in range(n):
             if is_flaky:
                 # Configure the job for 2 attempts so the BullMQ worker
                 # will retry after the first failure.
