@@ -149,13 +149,13 @@ def run_nautilus_backtest(data, strategy_id, config):
 And `core_engine.md`'s own Huey example uses `BacktestNode`:
 
 ```python
-results = [run_backtest(strategy_id, params) for params in param_grid]  # Huey parallel dispatch
+results = [run_backtest(strategy_id, params) for params in param_grid]  # each call enqueues a Huey task
 ```
 
 **Question:** Which API is used where?
 - Is `BacktestEngine` used in the API process for quick "validate strategy" dry runs, while `BacktestNode` is used in Huey workers for full backtests?
 - The `ARCHITECTURE.md` class diagram shows `BacktestEngine` in `NautilusBacktestService` — is this service instantiated in the API process or in Huey workers?
-- Can `BacktestEngine.reset()` be used inside a Huey process worker to reuse the engine across multiple tasks, or does `worker_max_tasks_per_child=50` (from `task_queue.md`) mean each worker gets a fresh `BacktestNode` per task?
+- Can `BacktestEngine.reset()` be used inside a Huey process worker to reuse the engine across multiple tasks, or does restarting workers after N tasks (via OS supervisor, as `task_queue.md` recommends) mean each worker gets a fresh `BacktestNode` per task?
 
 ---
 
@@ -202,7 +202,7 @@ But no document specifies **how** data moves from QuestDB to Parquet files:
 **Question:** With 4 Huey process workers, each loading a full `ParquetDataCatalog` for the same universe of symbols:
 - Does each worker load a separate copy of the data into memory, or does NautilusTrader use memory-mapped files?
 - For a 500-symbol × 20-year daily OHLCV catalog (~36M rows), what's the per-worker memory footprint?
-- `task_queue.md` sets `worker_max_tasks_per_child=50` to mitigate memory leaks — does this force a full data reload every 50 tasks?
+- Huey workers can be restarted after N tasks via an OS supervisor (e.g., systemd, supervisord) to mitigate memory leaks — does this force a full data reload on each restart?
 
 ---
 

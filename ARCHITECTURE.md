@@ -2,7 +2,7 @@
 
 QuantLens is a **local-first** desktop application for alpha research, strategy backtesting, and portfolio optimization — powered by a **Tauri** shell wrapping a **Vite + React** SPA, with backend services Dockerized for easy setup. A future **platform app** (deployed **TanStack Start + React** app on Neon) will allow quants to submit backtesting results and deploy strategies live to track and showcase real-world performance.
 
-### Local App (Dockerized)
+### Local App (Dockerized + Embedded)
 
 ```mermaid
 flowchart TD
@@ -51,12 +51,19 @@ flowchart TD
         N2[Tick Data]
     end
 
+    subgraph Embedded["Embedded (In-Process)"]
+        direction LR
+        O1["DuckDB<br/>Fundamentals · Economic Indicators"]
+        O2["LanceDB<br/>Vector Embeddings · RAG"]
+    end
+
     Frontend -.->|HTTP / WebSocket| API
     API -.->|Huey / Redis| Nautilus
     API -.->|REST| DataProv
     Nautilus -.->|psycopg / asyncpg| PG
     DataProv -.->|Write| TSDB
     Nautilus -.->|Read| TSDB
+    API -.->|Read/Write| Embedded
 ```
 
 ## Frontend Component Architecture
@@ -332,6 +339,22 @@ erDiagram
         string source
     }
 ```
+
+## Database Architecture Rationale
+
+QuantLens uses a three-database architecture, each purpose-built for a distinct workload:
+
+| Database | Role | Workload | Why Not Consolidate |
+|----------|------|----------|---------------------|
+| **PostgreSQL** (Docker) | Strategies, backtest results, user data | OLTP — concurrent reads/writes from API + Huey workers | DuckDB is single-writer only; QuestDB is append-only with no UPDATE/DELETE |
+| **QuestDB** (Docker) | OHLCV market data, tick data | Time-series — high-throughput ingestion, `SAMPLE BY`, `ASOF JOIN`, `LATEST ON` | Purpose-built for financial time-series; PostgreSQL aggregation is 4.7× slower |
+| **DuckDB** (Embedded) | Fundamentals, economic indicators | OLAP — screening queries, cross-sectional analysis, window functions | Benchmark winner (34ms screening, 96ms complex); zero Docker overhead |
+
+**Why PostgreSQL is still needed alongside QuestDB and DuckDB:**
+
+PostgreSQL handles the **transactional core** where concurrent writes and relational integrity matter. DuckDB cannot replace it because DuckDB is single-writer only (multiple Huey workers + the API process all write concurrently to strategies/results), is not optimized for small frequent OLTP transactions, and has no connection pooling for shared access. QuestDB cannot replace it because QuestDB is append-only with no UPDATE/DELETE support — strategy edits and backtest status updates require in-place mutations. PostgreSQL also provides the migration path to the deployed platform (Neon PostgreSQL).
+
+**Embedded databases** (DuckDB, LanceDB) run in the Python process — no Docker containers, no networking, no port conflicts. This aligns with QuantLens's local-first philosophy and eliminates the Docker connectivity issues encountered with MongoDB. See [fundamentals_database.md](fundamentals_database.md) for the full benchmark-driven rationale.
 
 ## Deployment Architecture
 
