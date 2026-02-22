@@ -17,22 +17,22 @@ See the [Benchmark Results](#benchmark-results) section for the data behind this
 ## Clarifying Questions
 
 **Q1: Does QuantLens need event-driven job dispatch or time-based scheduling?**
-Both. Backtests are dispatched on-demand when the user clicks "Run" (event-driven). Data ingestion from Tiingo/Finnhub runs on a nightly/weekly cron (time-based). A distributed task queue with built-in scheduling (Huey's `crontab()`) covers both; a pure in-process scheduler cannot dispatch to separate worker processes.
+Both. Backtests fire on-demand (event-driven); data ingestion runs on a nightly cron (time-based). Huey's built-in `crontab()` covers both without a separate Beat process.
 
-**Q2: How's a scheduler different from a distributed task queue?**
-A **scheduler** (cron, APScheduler) triggers tasks at specific times/intervals within the same process — no broker, no workers, no retries. A **distributed task queue** (Huey, Celery, Dramatiq) dispatches tasks via a message broker to separate worker processes. QuantLens needs process isolation because NautilusTrader enforces one `BacktestNode` per process (global singleton state). A scheduler alone would block the API process during a 5–120 second backtest. **Verdict: task queue.** APScheduler is excluded from benchmarks — it is not a distributed task queue.
+**Q2: Why not an in-process scheduler (APScheduler, Rocketry)?**
+A scheduler runs tasks inside the same process — no broker, no workers, no retries. NautilusTrader requires one `BacktestNode` per process (global singleton state), so backtests must run in isolated worker processes. An in-process scheduler would block the API for the full duration of the backtest. See [Why a Task Queue](#why-a-task-queue).
 
-**Q3: Is Kafka appropriate for QuantLens's backtest dispatch?**
-No. Kafka is a distributed streaming platform for high-throughput event pipelines (log aggregation, ETL, real-time analytics). It lacks native task semantics: no per-task ACK/retry, no result backend, partition-based parallelism that doesn't map to "worker picks up next job." QuantLens dispatches ~1–10 backtests at a time on a single machine — Kafka's partition model, broker overhead (JVM, ZooKeeper/KRaft), and operational complexity are entirely disproportionate. Faust (the Python Kafka library benchmarked) measured Kafka *producer write throughput*, not job execution — an apples-to-oranges comparison with task queues. **Kafka removed from benchmarks.**
+**Q3: Is Kafka appropriate for backtest dispatch?**
+No. Kafka is a streaming platform, not a job queue — no per-task ACK/retry, no result backend, and JVM/KRaft operational overhead disproportionate for a single-machine desktop app. Excluded from benchmarks.
 
-**Q4: Why not Celery — isn't it the industry standard?**
-Celery is the standard for *distributed multi-machine deployments*. For a local desktop app: no SQLite backend (mandates Redis/RabbitMQ even in dev), steepest learning curve, lowest enqueue throughput of all tested queues, and features QuantLens doesn't need (Canvas chords, Flower monitoring, SQS broker). Revisit if QuantLens becomes a cloud-deployed multi-tenant SaaS.
+**Q4: Why not Celery?**
+Celery targets multi-machine deployments. For a local desktop app it has the steepest learning curve, no SQLite backend, and the lowest enqueue throughput of all tested queues — see [Benchmark Results](#benchmark-results). Revisit if QuantLens becomes a cloud-deployed multi-tenant SaaS.
 
 **Q5: Is Huey's throughput sufficient for NautilusTrader backtests?**
-Yes. The throughput gap between the fastest (Dramatiq, 3,459 tasks/s) and slowest (Celery, 1,265 tasks/s) distributed queue translates to <1 ms per task. A single backtest takes 5–120 seconds. Dispatch overhead is noise. The decision hinges on backend flexibility (SQLite) and dev ergonomics (`immediate=True`), not raw throughput.
+Yes. A backtest takes seconds to minutes to execute; enqueue overhead is negligible by comparison. The decision is about backend flexibility (SQLite, no external service) and dev ergonomics (`immediate=True`), not raw throughput. See [Benchmark Results](#benchmark-results).
 
 **Q6: Can Huey handle parallel parameter sweeps?**
-Yes. `huey_consumer --workers 4 --worker-type process` runs 4 isolated worker processes. Each picks up a backtest job and runs its own `BacktestNode`. For 100–1,000 parameter combinations, this is sufficient. VectorBT's in-process broadcasting is faster for 100,000+ combinations, but that scale is outside QuantLens's target use case.
+Yes. `huey_consumer --workers 4 --worker-type process` runs isolated worker processes; each picks up one backtest job and runs its own `BacktestNode`. Sufficient for the typical QuantLens use case.
 
 ---
 
