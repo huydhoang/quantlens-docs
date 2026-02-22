@@ -6,15 +6,15 @@ Deep-dive cross-referencing of [ARCHITECTURE.md](ARCHITECTURE.md), [local_fronte
 
 ## Backend
 
-### Backtest Execution: API Layer ↔ Celery ↔ NautilusTrader
+### Backtest Execution: API Layer ↔ Huey ↔ NautilusTrader
 
 #### 2.1 Contradictory communication paths between frontend and backtest engine
 
-`ARCHITECTURE.md` (Local App diagram) shows: `Frontend → HTTP/WebSocket → API → Celery/Redis → Nautilus`. But the Deployment Architecture diagram in the same file shows: `Tauri Desktop App → Enqueue Jobs → Redis` (direct, bypassing the API layer).
+`ARCHITECTURE.md` (Local App diagram) shows: `Frontend → HTTP/WebSocket → API → Huey/Redis → Nautilus`. But the Deployment Architecture diagram in the same file shows: `Tauri Desktop App → Enqueue Jobs → Redis` (direct, bypassing the API layer).
 
-**Question:** Does the Tauri frontend enqueue Celery jobs directly to Redis, or does it go through the Raw ASGI API? Direct Redis access from the frontend:
+**Question:** Does the Tauri frontend enqueue Huey tasks directly to Redis, or does it go through the Raw ASGI API? Direct Redis access from the frontend:
 - Bypasses validation, auth, and rate limiting
-- Requires the Tauri Rust backend to speak the Celery protocol
+- Requires the Tauri Rust backend to speak the Huey protocol
 - Contradicts the API-as-proxy pattern shown in the Backtest Execution Flow sequence diagram
 
 #### 2.2 WebSocket progress broadcasting — who pushes to the client?
@@ -23,22 +23,22 @@ The Backtest Execution Flow in `ARCHITECTURE.md` shows: `Worker → Queue → AP
 
 **Question:** Specifically, how does the Raw ASGI API manage the WebSocket lifecycle for backtest progress?
 - Does a long-lived Redis subscription run per connected client, or does the Raw ASGI handler poll a Redis key?
-- How does the API route progress messages from a Celery worker back to the specific WebSocket client that initiated the backtest?
+- How does the API route progress messages from a Huey worker back to the specific WebSocket client that initiated the backtest?
 
 #### 2.3 NautilusTrader lifespan management in the API process
 
-Some earlier API examples show a `NautilusKernel` initialized in the application's lifespan context. But `core_engine.md` and `ARCHITECTURE.md` both state that NautilusTrader runs **in Celery workers**, not in the API process. `ARCHITECTURE.md` explicitly says: "NautilusTrader is a **library, not a service** — the API layer enqueues jobs to Celery; workers import and call `nautilus_trader` directly in-process."
+Some earlier API examples show a `NautilusKernel` initialized in the application's lifespan context. But `core_engine.md` and `ARCHITECTURE.md` both state that NautilusTrader runs **in Huey workers**, not in the API process. `ARCHITECTURE.md` explicitly says: "NautilusTrader is a **library, not a service** — the API layer enqueues jobs to Huey; workers import and call `nautilus_trader` directly in-process."
 
 **Question:** Should any NautilusTrader component be initialized in the Raw ASGI API lifespan?
-- If backtests run exclusively in Celery workers, what purpose does an API-hosted kernel serve?
-- Is it needed for strategy validation (dry-run) or data catalog access, or should validation also run in a Celery task?
+- If backtests run exclusively in Huey workers, what purpose does an API-hosted kernel serve?
+- Is it needed for strategy validation (dry-run) or data catalog access, or should validation also run in a Huey task?
 
-#### 2.4 ProcessPoolExecutor vs Celery for CPU-bound work
+#### 2.4 ProcessPoolExecutor vs Huey for CPU-bound work
 
-`backend_server.md` shows skfolio portfolio optimization dispatched via `ProcessPoolExecutor` in the Raw ASGI handler. Meanwhile, `task_queue.md` shows Celery handling all background work including optimization.
+`backend_server.md` shows skfolio portfolio optimization dispatched via `ProcessPoolExecutor` in the Raw ASGI handler. Meanwhile, `task_queue.md` shows Huey handling all background work including optimization.
 
-**Question:** Which CPU-bound tasks use `ProcessPoolExecutor` (in-process) vs Celery (distributed)?
-- Are skfolio optimizations always synchronous (ProcessPoolExecutor) while backtests are always async (Celery)?
+**Question:** Which CPU-bound tasks use `ProcessPoolExecutor` (in-process) vs Huey (distributed)?
+- Are skfolio optimizations always synchronous (ProcessPoolExecutor) while backtests are always async (Huey)?
 - If both are used, what's the decision boundary? Latency tolerance? Expected runtime?
 - Does the `ProcessPoolExecutor` conflict with Gunicorn's `--workers 4` flag (both forking processes)?
 
@@ -80,7 +80,7 @@ The deployment architecture diagram in `ARCHITECTURE.md` has been updated to sho
 
 #### 4.4 PostgreSQL — single instance or separate per concern?
 
-`ARCHITECTURE.md` shows a single PostgreSQL instance for Strategies, Backtest Results, and User Data. But Celery also uses Redis (not PostgreSQL) as its result backend (`task_queue.md`). Meanwhile, `backend_server.md` references `asyncpg` connections to both PostgreSQL and QuestDB (PGWire).
+`ARCHITECTURE.md` shows a single PostgreSQL instance for Strategies, Backtest Results, and User Data. But Huey also uses Redis (not PostgreSQL) as its result backend (`task_queue.md`). Meanwhile, `backend_server.md` references `asyncpg` connections to both PostgreSQL and QuestDB (PGWire).
 
 **Question:** How many PostgreSQL-compatible connections does the Raw ASGI app maintain?
 - One `asyncpg` pool for PostgreSQL (strategies, results, users)
@@ -96,7 +96,7 @@ The deployment architecture diagram in `ARCHITECTURE.md` has been updated to sho
 `ARCHITECTURE.md`'s Data Flow Architecture shows a "Data Ingestion Service" with a "Data Normalizer" component connecting Tiingo/Finnhub/Alpaca WebSocket streams to QuestDB and Redis. This service needs to simultaneously serve real-time data to the React frontend via WebSocket.
 
 **Question:** Is the data ingestion service a separate process from the Raw ASGI API, or is it part of the same Gunicorn+Uvicorn server?
-- If separate, where does it run? Another Docker container? A Celery worker?
+- If separate, where does it run? Another Docker container? A Huey worker?
 - If co-located with the Raw ASGI API, how does it manage long-lived outbound WebSocket connections (to Finnhub/Alpaca) alongside inbound HTTP requests?
 
 #### 5.2 Finnhub WebSocket data type mismatch
@@ -118,8 +118,8 @@ The data ingestion service would subscribe to `"BINANCE:BTCUSDT"` on Finnhub's W
 
 **Question:** What sandboxing mechanism is used, and at which layer?
 - `todos.md` lists this as "Not Started" — is there an interim plan for MVP?
-- Does the Celery worker run user code in an unrestricted Python process?
-- If strategies run inside Docker containers (Celery workers), does Docker provide sufficient isolation, or is additional sandboxing (RestrictedPython, nsjail, Pyodide server-side) needed?
+- Does the Huey worker run user code in an unrestricted Python process?
+- If strategies run inside Docker containers (Huey workers), does Docker provide sufficient isolation, or is additional sandboxing (RestrictedPython, nsjail, Pyodide server-side) needed?
 - Is the threat model "malicious user code" (multi-tenant) or "accidental harmful code" (single-user local app)?
 
 For a local-first single-user app, the threat model is arguably just accidental harm (infinite loops, excessive memory). Full sandboxing may be overengineered for MVP.
@@ -132,30 +132,30 @@ For a local-first single-user app, the threat model is arguably just accidental 
 
 `core_engine.md` presents two NautilusTrader APIs for different workflows:
 - **`BacktestEngine`** (low-level) — for rapid research iteration with `engine.reset()` for tight loops without process restart
-- **`BacktestNode`** (high-level) — for production backtests via Celery workers, one per process
+- **`BacktestNode`** (high-level) — for production backtests via Huey workers, one per process
 
 But `ARCHITECTURE.md` Section 2 ("NautilusTrader Integration") only mentions `BacktestEngine` in the class diagram (`NautilusBacktestService` has a `+BacktestEngine engine` field), while the Key Implementation Recommendations say: "Use `BacktestEngine` (low-level, fine-grained control) **or** `BacktestNode` with `BacktestRunConfig` objects (high-level, recommended for production)."
 
-Meanwhile, `task_queue.md` exclusively uses `BacktestNode` in its Celery integration example:
+Meanwhile, `task_queue.md` exclusively uses `BacktestNode` in its Huey integration example:
 
 ```python
-@shared_task(bind=True, max_retries=2)
-def run_nautilus_backtest(self, data, strategy_id, config):
+@huey.task(retries=2)
+def run_nautilus_backtest(data, strategy_id, config):
     node = BacktestNode(configs=config)
     node.run()
     return node.get_results()
 ```
 
-And `core_engine.md`'s own Celery example uses `BacktestNode`:
+And `core_engine.md`'s own Huey example uses `BacktestNode`:
 
 ```python
-job = group(run_backtest.s(strategy_id, params) for params in param_grid)
+results = [run_backtest(strategy_id, params) for params in param_grid]  # Huey parallel dispatch
 ```
 
 **Question:** Which API is used where?
-- Is `BacktestEngine` used in the API process for quick "validate strategy" dry runs, while `BacktestNode` is used in Celery workers for full backtests?
-- The `ARCHITECTURE.md` class diagram shows `BacktestEngine` in `NautilusBacktestService` — is this service instantiated in the API process or in Celery workers?
-- Can `BacktestEngine.reset()` be used inside a Celery prefork worker to reuse the engine across multiple tasks, or does `worker_max_tasks_per_child=50` (from `task_queue.md`) mean each worker gets a fresh `BacktestNode` per task?
+- Is `BacktestEngine` used in the API process for quick "validate strategy" dry runs, while `BacktestNode` is used in Huey workers for full backtests?
+- The `ARCHITECTURE.md` class diagram shows `BacktestEngine` in `NautilusBacktestService` — is this service instantiated in the API process or in Huey workers?
+- Can `BacktestEngine.reset()` be used inside a Huey process worker to reuse the engine across multiple tasks, or does `worker_max_tasks_per_child=50` (from `task_queue.md`) mean each worker gets a fresh `BacktestNode` per task?
 
 ---
 
@@ -169,37 +169,37 @@ But no document specifies **how** data moves from QuestDB to Parquet files:
 
 **Question:** What is the QuestDB → Parquet export mechanism?
 - QuestDB supports native Parquet export via `COPY` SQL command — is this used?
-- Is there a scheduled Celery Beat task that periodically exports from QuestDB to Parquet?
+- Is there a scheduled Huey crontab task that periodically exports from QuestDB to Parquet? (Huey has built-in `crontab()` — no separate scheduler process needed.)
 - Or does a data ingestion service write to both QuestDB and Parquet simultaneously (dual-write)?
 - If the export is periodic, how does the system ensure Parquet files are up-to-date when a backtest starts? Does the backtest task trigger an export before running?
 
 #### 12.2 Parquet catalog path and Docker volume mapping
 
-`data_providers.md` shows `ParquetDataCatalog(path="/data/validated")` as the catalog path. But NautilusTrader runs inside Celery workers, which run in Docker containers.
+`data_providers.md` shows `ParquetDataCatalog(path="/data/validated")` as the catalog path. But NautilusTrader runs inside Huey workers, which run in Docker containers.
 
 **Question:** How does the Parquet catalog path map to Docker volumes?
-- Is `/data/validated` a Docker volume shared between the data ingestion service and Celery workers?
-- If QuestDB runs in one container and Celery workers in another, how does the export + catalog read work across containers?
+- Is `/data/validated` a Docker volume shared between the data ingestion service and Huey workers?
+- If QuestDB runs in one container and Huey workers in another, how does the export + catalog read work across containers?
 - Does `docker compose` define a shared volume for the Parquet catalog?
 
 ---
 
 ### Parameter Sweep Scalability
 
-#### 13.1 Celery worker count vs parameter grid size
+#### 13.1 Huey worker count vs parameter grid size
 
-`core_engine.md` claims: "QuantLens's target users run hundreds to low thousands of combinations — well within Celery worker parallelism." The Celery config in `task_queue.md` sets `worker_concurrency=4`.
+`core_engine.md` claims: "QuantLens's target users run hundreds to low thousands of combinations — well within Huey worker parallelism." The Huey config in `task_queue.md` sets `--workers 4 --worker-type process`.
 
 **Question:** With 4 concurrent workers and "hundreds to low thousands" of parameter combinations, what's the expected sweep duration?
 - A 500-combination sweep with 4 workers = 125 sequential batches. If each backtest takes 5 seconds, that's ~10 minutes. Is this acceptable for research iteration?
-- Does the system provide sweep progress in the UI (e.g., "234/500 complete, ~4 min remaining")?
+- Does the system provide sweep progress in the UI (e.g., "234/500 complete, ~4 min remaining")? Progress can be tracked via Redis pub/sub.
 - Is there a UI for configuring the parameter grid, or does the user write the grid in Python code in the Monaco editor?
 
 #### 13.2 Memory pressure from parallel BacktestNodes
 
 `core_engine.md` notes VectorBT's limitation: "Large parameter grids over many assets can exceed available RAM." NautilusTrader's BacktestNode loads the `ParquetDataCatalog` per process.
 
-**Question:** With 4 Celery prefork workers, each loading a full `ParquetDataCatalog` for the same universe of symbols:
+**Question:** With 4 Huey process workers, each loading a full `ParquetDataCatalog` for the same universe of symbols:
 - Does each worker load a separate copy of the data into memory, or does NautilusTrader use memory-mapped files?
 - For a 500-symbol × 20-year daily OHLCV catalog (~36M rows), what's the per-worker memory footprint?
 - `task_queue.md` sets `worker_max_tasks_per_child=50` to mitigate memory leaks — does this force a full data reload every 50 tasks?
@@ -231,13 +231,13 @@ But no document defines the template system:
 - Does the dry-run actually instantiate a `BacktestEngine` with no data, or is it purely a Python import + introspection?
 - If the dry-run imports user code, this executes arbitrary Python in the API process. Does this conflict with the sandboxing concern (question 7.1)?
 
-#### 14.3 Strategy code serialization for Celery
+#### 14.3 Strategy code serialization for Huey
 
-`core_engine.md` shows strategies executed in Celery workers. `task_queue.md` configures `task_serializer="json"` and `accept_content=["json"]`. But a strategy is Python source code (a class definition), not a JSON-serializable object.
+`core_engine.md` shows strategies executed in Huey workers. Huey uses pickle serialization by default, but for simplicity and security, strategy IDs (not code) should be passed as task arguments.
 
-**Question:** How does strategy code get from the Monaco editor to a Celery worker?
+**Question:** How does strategy code get from the Monaco editor to a Huey worker?
 - Is the Python source stored in PostgreSQL (`STRATEGIES.python_code` column in `ARCHITECTURE.md` schema), and the worker loads it by ID from the database?
-- Or is the source code passed as a JSON string in the Celery task arguments?
+- Or is the source code passed directly in the Huey task arguments?
 - If loaded from the database, the worker must `exec()` or `importlib` the code at runtime — how does this interact with NautilusTrader's strategy registration?
 
 ---
@@ -270,7 +270,7 @@ But no document specifies the data contract between NautilusTrader results and s
 - skfolio's `MeanRisk` optimizer expects a DataFrame of asset returns (rows = time observations, columns = assets). NautilusTrader produces per-strategy trade results and equity curves.
 - Who converts NautilusTrader's trade-level results into asset-level return series for skfolio?
 - If a user runs 5 strategies on different asset universes, does skfolio optimize across all 5 strategies (strategy-level allocation) or across underlying assets (asset-level allocation)?
-- Is the conversion logic in the Raw ASGI backend, in a Celery task, or in the React frontend?
+- Is the conversion logic in the Raw ASGI backend, in a Huey task, or in the React frontend?
 
 ---
 
@@ -417,7 +417,7 @@ The user story says `docker compose up` starts all backend services. But Tauri i
 
 #### 10.3 Error handling and retry strategy
 
-`backend_server.md`'s database patterns show direct `asyncpg` usage without explicit retry logic. `task_queue.md` shows Celery retry with `max_retries=2` and `countdown=30`.
+`backend_server.md`'s database patterns show direct `asyncpg` usage without explicit retry logic. `task_queue.md` shows Huey retry with `@huey.task(retries=2, retry_delay=30)`.
 
 **Question:** What's the unified error handling strategy?
 - Data provider connection failures: exponential backoff? circuit breaker?
