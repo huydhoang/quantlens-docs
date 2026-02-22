@@ -2,7 +2,7 @@
 
 QuantLens is a **local-first** desktop application for alpha research, strategy backtesting, and portfolio optimization — powered by a **Tauri** shell wrapping a **Vite + React** SPA, with backend services Dockerized for easy setup. A future **platform app** (deployed **TanStack Start + React** app on Neon) will allow quants to submit backtesting results and deploy strategies live to track and showcase real-world performance.
 
-### Local App (Dockerized + Embedded)
+### Local App (Docker Compose + Embedded)
 
 ```mermaid
 flowchart TD

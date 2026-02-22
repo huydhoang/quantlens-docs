@@ -97,7 +97,7 @@ Each pool is configured independently (different pool sizes, timeouts). No abstr
 **Recommendation: For MVP, data ingestion is a Huey crontab scheduled task running within the unified Gunicorn+Uvicorn stack.**
 
 MVP data flow:
-1. Huey's built-in crontab triggers periodic data ingestion tasks — nightly Tiingo EOD, weekly Alpaca intraday backfill. No separate Beat process is needed.
+1. Huey's built-in crontab triggers periodic data ingestion tasks — nightly Tiingo EOD, weekly Alpaca intraday backfill. No separate Beat process is needed (e.g., `@huey.crontab(hour=0, minute=0)` for nightly ingestion).
 2. Ingestion tasks write to QuestDB via ILP over TCP.
 3. No real-time streaming ingestion in MVP — backtest data is batch-loaded.
 
