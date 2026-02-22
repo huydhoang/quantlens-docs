@@ -120,7 +120,7 @@ Hybrid Rust/Python with an event-driven core. The Rust layer (via PyO3) handles 
 | Limitation | Impact on QuantLens |
 |------------|---------------------|
 | **Steeper learning curve** | More boilerplate than VectorBT for simple strategies — mitigated by QuantLens's strategy templates and Monaco editor |
-| **No built-in parameter optimization** | Must build parameter sweep infrastructure — addressed by QuantLens's Celery workers running parallel `BacktestNode` instances |
+| **No built-in parameter optimization** | Must build parameter sweep infrastructure — addressed by QuantLens's Huey workers running parallel `BacktestNode` instances |
 | **Event-driven overhead for trivial strategies** | Simple SMA crossover requires more code than VectorBT — acceptable trade-off for execution realism |
 
 ---
@@ -176,9 +176,17 @@ NautilusTrader's Rust core processes >100,000 events/second. For QuantLens's wor
 VectorBT's killer feature is broadcasting parameter sweeps. NautilusTrader achieves equivalent functionality through parallelization:
 
 ```python
-# Parallel parameter sweep via Celery workers
+# Parallel parameter sweep via Huey workers
 # Each worker runs an isolated BacktestNode (required by NautilusTrader's singleton constraint)
-from celery import group
+from huey import RedisHuey
+
+huey = RedisHuey("quantlens", host="localhost", port=6379)
+
+@huey.task(retries=1, retry_delay=10)
+def run_backtest(strategy_id, params):
+    from nautilus_trader.backtest.node import BacktestNode
+    # ... configure and run backtest with params
+    pass
 
 param_grid = [
     {"fast": f, "slow": s}
@@ -186,13 +194,14 @@ param_grid = [
     for s in range(20, 200, 10)
 ]
 
-# Fan out across Celery prefork workers — one BacktestNode per process
-job = group(run_backtest.s(strategy_id, params) for params in param_grid)
-results = job.apply_async()
+# Fan out across Huey process workers — one BacktestNode per process
+# Calling a @huey.task function enqueues it to Redis; workers pick up jobs independently
+for params in param_grid:
+    run_backtest(strategy_id, params)
 ```
 
 This approach:
-- Leverages the existing Celery infrastructure (already chosen for backtest execution — see [task_queue.md](task_queue.md))
+- Leverages the existing Huey infrastructure (already chosen for backtest execution — see [task_queue.md](task_queue.md))
 - Runs each backtest with NautilusTrader's realistic execution model, not VectorBT's simplified fills
 - Scales horizontally across workers rather than vertically in memory
 - Produces results that are directly comparable to production behavior
@@ -232,8 +241,8 @@ NautilusTrader as the sole engine aligns cleanly with every existing architectur
 
 | Component | Integration |
 |-----------|-------------|
-| **Celery workers** ([task_queue.md](task_queue.md)) | One `BacktestNode` per prefork worker process — NautilusTrader's singleton constraint matches Celery's process isolation model |
-| **FastAPI on Uvicorn** ([backend_server.md](backend_server.md)) | API layer enqueues backtest jobs; NautilusTrader runs in workers, not in the web process — clean separation |
+| **Huey workers** ([task_queue.md](task_queue.md)) | One `BacktestNode` per process worker — NautilusTrader's singleton constraint matches Huey's `--worker-type process` isolation model |
+| **Gunicorn+Uvicorn · Raw ASGI** ([backend_server.md](backend_server.md)) | API layer enqueues backtest jobs; NautilusTrader runs in workers, not in the web process — clean separation |
 | **QuestDB → ParquetDataCatalog** ([ohlcv_database.md](ohlcv_database.md)) | Historical OHLCV stored in QuestDB (local Docker), exported to Parquet for NautilusTrader's native data catalog |
 | **skfolio** ([portfolio_opt.md](portfolio_opt.md)) | Portfolio optimization runs independently of the backtest engine — NautilusTrader produces trade results, skfolio optimizes allocations |
 | **Monaco Editor** ([ARCHITECTURE.md](ARCHITECTURE.md)) | Strategy templates target NautilusTrader's `TradingStrategy` API exclusively — one template system, one validation path |
@@ -250,7 +259,7 @@ flowchart LR
     end
 
     subgraph Optimization["Parameter Optimization"]
-        D[Define Grid] --> E[Fan Out<br/>Celery Workers]
+        D[Define Grid] --> E[Fan Out<br/>Huey Workers]
         E --> F[Parallel Backtests<br/>BacktestNode × N]
         F --> G[Aggregate Results<br/>Best Parameters]
     end
@@ -301,13 +310,13 @@ flowchart LR
 
 3. **Architectural simplicity.** One data pipeline (QuestDB → Parquet → `ParquetDataCatalog`), one strategy API (`TradingStrategy`), one results schema, one set of templates, one validation path. Every additional engine multiplies integration and maintenance cost.
 
-4. **Parameter sweeps are solved by infrastructure, not by the engine.** Celery's prefork pool parallelizes NautilusTrader backtests across workers. The speed difference versus VectorBT's in-process broadcasting is marginal for QuantLens's scale (hundreds of parameter combinations, not millions).
+4. **Parameter sweeps are solved by infrastructure, not by the engine.** Huey's process pool parallelizes NautilusTrader backtests across workers. The speed difference versus VectorBT's in-process broadcasting is marginal for QuantLens's scale (hundreds of parameter combinations, not millions).
 
 5. **VectorBT's advantage is narrowing.** NautilusTrader's Rust core continues to close the raw performance gap. The `BacktestEngine.reset()` API enables tight research loops without process restart overhead.
 
 ### Trade-offs Accepted
 
-- **VectorBT's broadcasting is faster for extreme parameter grids** (100,000+ combinations). Accepted because QuantLens's target users run hundreds to low thousands of combinations — well within Celery worker parallelism.
+- **VectorBT's broadcasting is faster for extreme parameter grids** (100,000+ combinations). Accepted because QuantLens's target users run hundreds to low thousands of combinations — well within Huey worker parallelism.
 - **VectorBT's API is simpler for trivial strategies.** Accepted because QuantLens provides strategy templates and Monaco editor autocompletion to reduce NautilusTrader's boilerplate.
 - **VectorBT has better built-in visualization.** Accepted because QuantLens builds its own React-based visualization layer (Recharts/D3) from NautilusTrader results — engine-provided charts are not used.
 

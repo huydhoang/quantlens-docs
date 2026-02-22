@@ -1,0 +1,168 @@
+name: Task Queue Benchmarks
+
+on:
+  push:
+    paths:
+      - "benchmarks/run_task_queue_benchmarks.py"
+      - ".github/workflows/task-queue-benchmarks.yml"
+  workflow_dispatch:
+    inputs:
+      queues:
+        description: "Space-separated queue IDs to benchmark (empty = all)"
+        required: false
+        default: ""
+        type: string
+      scenarios:
+        description: "Space-separated scenario names to run (empty = all)"
+        required: false
+        default: ""
+        type: string
+
+# Cancel previous runs on re-push / re-dispatch
+concurrency:
+  group: task-queue-benchmarks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      postgres:
+        image: postgres:16-alpine
+        ports:
+          - 5432:5432
+        env:
+          POSTGRES_USER: bench
+          POSTGRES_PASSWORD: bench
+          POSTGRES_DB: bench
+        options: >-
+          --health-cmd "pg_isready -U bench"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Go (for hey HTTP load tool)
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Install system libraries
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q libpq-dev redis-tools postgresql-client
+
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          # Server stack — same gunicorn+uvicorn setup as extended-server-benchmarks
+          pip install uvicorn[standard] gunicorn uvicorn-worker fastapi pydantic
+          # Install each task queue package individually; log failures but don't abort
+          install_pkg() {
+            pip install "$@" && echo "OK: $*" || echo "FAILED: $*"
+          }
+          install_pkg "celery[redis]"
+          install_pkg rq
+          install_pkg bullmq
+          install_pkg huey
+          install_pkg "dramatiq[redis]"
+          install_pkg arq
+          install_pkg tasktiger
+          install_pkg "taskiq[redis]" taskiq-redis
+          install_pkg "procrastinate[aiopg]"
+          install_pkg redis psycopg2-binary aiopg
+
+      - name: Install hey
+        run: |
+          go install github.com/rakyll/hey@latest
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+
+      - name: Apply Procrastinate schema
+        continue-on-error: true
+        run: |
+          python - << 'EOF'
+          import asyncio
+          import procrastinate
+          from procrastinate.contrib.aiopg import AiopgConnector
+
+          async def _apply():
+              connector = AiopgConnector(dsn="postgresql://bench:bench@localhost:5432/bench")
+              app = procrastinate.App(connector=connector)
+              async with app.open_async():
+                  await app.schema_manager.apply_schema_async()
+
+          asyncio.run(_apply())
+          EOF
+
+      - name: Verify tools and services
+        continue-on-error: true
+        run: |
+          python --version
+          redis-cli -h 127.0.0.1 ping
+          psql "postgresql://bench:bench@localhost:5432/bench" -c "SELECT 1" -q
+          pip show gunicorn | grep Version
+          uvicorn --version
+          python -c "import celery; print('celery', celery.__version__)" || true
+          python -c "import rq; print('rq', rq.__version__)" || true
+          python -c "import bullmq; print('bullmq', bullmq.__version__)" || true
+          python -c "import huey; print('huey', huey.__version__)" || true
+          python -c "import dramatiq; print('dramatiq', dramatiq.__version__)" || true
+          python -c "import arq; print('arq', arq.__version__)" || true
+          python -c "import tasktiger; print('tasktiger OK')" || true
+          python -c "import taskiq; print('taskiq', taskiq.__version__)" || true
+          python -c "import procrastinate; print('procrastinate', procrastinate.__version__)" || true
+
+      - name: Run task queue benchmarks
+        env:
+          BENCH_QUEUES: ${{ inputs.queues }}
+          BENCH_SCENARIOS: ${{ inputs.scenarios }}
+          PROCRASTINATE_URL: "postgresql://bench:bench@localhost:5432/bench"
+        run: |
+          QUEUES_ARG=""
+          if [ -n "$BENCH_QUEUES" ]; then
+            QUEUES_ARG="--queues $BENCH_QUEUES"
+          fi
+          SCENARIOS_ARG=""
+          if [ -n "$BENCH_SCENARIOS" ]; then
+            SCENARIOS_ARG="--scenarios $BENCH_SCENARIOS"
+          fi
+          python benchmarks/run_task_queue_benchmarks.py \
+            $QUEUES_ARG \
+            $SCENARIOS_ARG
+
+      - name: Post summary
+        if: always()
+        run: |
+          if [ -f benchmarks/results/task_queue_summary.md ]; then
+            cat benchmarks/results/task_queue_summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: task-queue-benchmark-results
+          path: benchmarks/results/task_queue*
+          retention-days: 90
