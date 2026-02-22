@@ -12,11 +12,11 @@ Cross-referencing [ARCHITECTURE.md](ARCHITECTURE.md), [local_frontend.md](local_
 
 ## Backend
 
-### Backtest Execution: API Layer ↔ Celery ↔ NautilusTrader
-- [ ] 🔴 **2.1 Frontend → backtest path** — Contradictory diagrams: one shows `Frontend → Raw ASGI API → Celery`, another shows `Tauri → Redis` directly. Which is canonical?
+### Backtest Execution: API Layer ↔ Huey ↔ NautilusTrader
+- [ ] 🔴 **2.1 Frontend → backtest path** — Contradictory diagrams: one shows `Frontend → Raw ASGI API → Huey`, another shows `Tauri → Redis` directly. Which is canonical?
 - [ ] 🟠 **2.2 WebSocket progress ownership** — How does the Raw ASGI API manage per-client Redis pub/sub subscriptions for backtest progress forwarding over WebSocket?
-- [ ] 🔴 **2.3 NautilusTrader in API lifespan** — Earlier examples show a NautilusKernel initialized in the API lifespan, but all docs say backtests run in Celery workers. Should any NautilusTrader component live in the Raw ASGI API process?
-- [ ] 🟠 **2.4 ProcessPoolExecutor vs Celery** — Both are used for CPU-bound work. What's the decision boundary (skfolio in-process vs backtests in Celery)? Does `ProcessPoolExecutor` conflict with Gunicorn `--workers 4`?
+- [ ] 🔴 **2.3 NautilusTrader in API lifespan** — Earlier examples show a NautilusKernel initialized in the API lifespan, but all docs say backtests run in Huey workers. Should any NautilusTrader component live in the Raw ASGI API process?
+- [ ] 🟠 **2.4 ProcessPoolExecutor vs Huey** — Both are used for CPU-bound work. What's the decision boundary (skfolio in-process vs backtests in Huey)? Does `ProcessPoolExecutor` conflict with Gunicorn `--workers 4`?
 
 ### Data Layer
 - [x] 🔴 **4.1 QuestDB vs TimescaleDB** — `ARCHITECTURE.md` uses QuestDB; `ohlcv_database.md` recommends TimescaleDB for Phase 1. Which ships in Docker Compose? **RESOLVED: QuestDB** (see ohlcv_database.md for benchmark-driven decision)
@@ -32,20 +32,20 @@ Cross-referencing [ARCHITECTURE.md](ARCHITECTURE.md), [local_frontend.md](local_
 - [ ] 🟡 **7.1 Sandboxing mechanism** — `ARCHITECTURE.md` says "restricted environment, no network access" but specifies no mechanism. What's the interim plan for MVP? For a single-user local app, is the threat model accidental harm (infinite loops) rather than malicious code?
 
 ### BacktestEngine vs BacktestNode
-- [ ] 🔴 **11.1 BacktestEngine vs BacktestNode API assignment** — `ARCHITECTURE.md` class diagram uses `BacktestEngine`; `task_queue.md` uses `BacktestNode` in Celery. Which API is used where (API process validation vs Celery execution)? Can `BacktestEngine.reset()` reuse engines within prefork workers?
+- [ ] 🔴 **11.1 BacktestEngine vs BacktestNode API assignment** — `ARCHITECTURE.md` class diagram uses `BacktestEngine`; `task_queue.md` uses `BacktestNode` in Huey. Which API is used where (API process validation vs Huey execution)? Can `BacktestEngine.reset()` reuse engines within process workers?
 
 ### Data Pipeline: QuestDB → Parquet → ParquetDataCatalog
-- [ ] 🔴 **12.1 QuestDB → Parquet export mechanism** — `core_engine.md` assumes a QuestDB → Parquet → ParquetDataCatalog pipeline but no doc specifies how data moves from QuestDB to Parquet files (COPY command, Celery Beat job, or dual-write).
-- [ ] 🟠 **12.2 Parquet catalog Docker volume** — Celery workers and the data ingestion service need shared access to `/data/validated`. How is this mapped in Docker Compose?
+- [ ] 🔴 **12.1 QuestDB → Parquet export mechanism** — `core_engine.md` assumes a QuestDB → Parquet → ParquetDataCatalog pipeline but no doc specifies how data moves from QuestDB to Parquet files (COPY command, Huey crontab job, or dual-write).
+- [ ] 🟠 **12.2 Parquet catalog Docker volume** — Huey workers and the data ingestion service need shared access to `/data/validated`. How is this mapped in Docker Compose?
 
 ### Parameter Sweep Scalability
-- [ ] 🟡 **13.1 Parameter sweep duration** — With 4 Celery workers and hundreds of combinations, what's the expected sweep time? Is there UI progress for sweeps?
-- [ ] 🟡 **13.2 Memory pressure from parallel BacktestNodes** — 4 prefork workers each loading a full ParquetDataCatalog. Does NautilusTrader use memory-mapped files, or does each worker hold a separate copy?
+- [ ] 🟡 **13.1 Parameter sweep duration** — With 4 Huey workers and hundreds of combinations, what's the expected sweep time? Is there UI progress for sweeps?
+- [ ] 🟡 **13.2 Memory pressure from parallel BacktestNodes** — 4 process workers each loading a full ParquetDataCatalog. Does NautilusTrader use memory-mapped files, or does each worker hold a separate copy?
 
 ### Strategy Code: Authoring, Validation, and Execution
 - [ ] 🟠 **14.1 Strategy template system** — Referenced in `core_engine.md` and `ARCHITECTURE.md` but never defined. What templates exist? What Monaco completions are offered?
 - [ ] 🟠 **14.2 Strategy dry-run validation** — What does NautilusTrader "dry-run parse" mean? Does it execute user code in the Raw ASGI API process, conflicting with sandboxing (7.1)?
-- [ ] 🔴 **14.3 Strategy code serialization** — Celery uses JSON serialization, but strategies are Python classes. How does code travel from Monaco → PostgreSQL → Celery worker → NautilusTrader?
+- [ ] 🔴 **14.3 Strategy code serialization** — Huey uses pickle serialization by default, but strategy code should travel as IDs not source. How does code travel from Monaco → PostgreSQL → Huey worker → NautilusTrader?
 
 ### NautilusTrader Data Types vs Provider Data
 - [ ] 🟠 **15.1 Data type conversion stage** — At which pipeline stage are provider responses converted to NautilusTrader `Bar`/`QuoteTick` types (ingestion time vs catalog read time)?
@@ -89,4 +89,4 @@ Cross-referencing [ARCHITECTURE.md](ARCHITECTURE.md), [local_frontend.md](local_
 - [ ] 🟡 **10.2 Authentication model** — Is auth needed for the local app? The USERS table and JWT auth are mentioned, but a single-user desktop app may not need them.
 
 ### Error Handling and Retry Strategy
-- [ ] 🟡 **10.3 Error handling / retry strategy** — Define unified approach for data provider failures, backtest failures, QuestDB write failures, and frontend WebSocket reconnection.
+- [ ] 🟡 **10.3 Error handling / retry strategy** — Define unified approach for data provider failures, backtest failures, QuestDB write failures, and frontend WebSocket reconnection. Huey supports `@huey.task(retries=2, retry_delay=30)` for task retries.
