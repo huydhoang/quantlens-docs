@@ -6,11 +6,11 @@ Proposed resolutions for each unresolved question in [integration_questions.md](
 
 ## Backend
 
-### Backtest Execution: API Layer ↔ Celery ↔ NautilusTrader
+### Backtest Execution: API Layer ↔ Huey ↔ NautilusTrader
 
 #### 2.1 Frontend → backtest path — 🔴
 
-**Recommendation: `Frontend → Raw ASGI API → Celery → Redis` is the canonical path. The `Tauri → Redis` arrow in the Deployment Architecture diagram is a diagram error.**
+**Recommendation: `Frontend → Raw ASGI API → Huey → Redis` is the canonical path. The `Tauri → Redis` arrow in the Deployment Architecture diagram is a diagram error.**
 
 All backtest requests must go through the Raw ASGI API for:
 - Input validation (using Pydantic directly, even without FastAPI's automatic request parsing)
@@ -25,36 +25,36 @@ The Deployment Architecture diagram in `ARCHITECTURE.md` (section "Local App (Do
 **Recommendation: The Raw ASGI API (Gunicorn+Uvicorn, port 8000) owns all WebSocket connections — both backtest progress and market data.**
 
 The Backtest Execution Flow sequence diagram in `ARCHITECTURE.md` shows `API → UI` via WebSocket, placing progress broadcasting in the main API process. The pattern:
-1. Celery worker publishes progress to a Redis channel (e.g., `backtest:{id}:progress`).
+1. Huey worker publishes progress to a Redis channel (e.g., `backtest:{id}:progress`).
 2. The Raw ASGI API subscribes to that channel and forwards messages to the connected WebSocket client.
 
 All WebSocket traffic (backtest progress, market data, live signals) flows through the single Gunicorn+Uvicorn endpoint — there is no separate port or process for real-time data.
 
 #### 2.3 NautilusTrader lifespan management in the API process — 🔴
 
-**Recommendation: Do not initialize any NautilusTrader component in the Raw ASGI API lifespan. All NautilusTrader usage belongs in Celery workers.**
+**Recommendation: Do not initialize any NautilusTrader component in the Raw ASGI API lifespan. All NautilusTrader usage belongs in Huey workers.**
 
-All docs agree: NautilusTrader is a library used in Celery workers, not in the API process. Any legacy examples showing a `NautilusKernel` in the API's lifespan context should be removed — they conflict with:
+All docs agree: NautilusTrader is a library used in Huey workers, not in the API process. Any legacy examples showing a `NautilusKernel` in the API's lifespan context should be removed — they conflict with:
 - `ARCHITECTURE.md`: "NautilusTrader is a library, not a service"
-- `core_engine.md`: Backtests run in Celery prefork workers
+- `core_engine.md`: Backtests run in Huey process workers
 - The one-`BacktestNode`-per-process constraint
 
-The Raw ASGI API lifespan should initialize database pools (`asyncpg` for PostgreSQL/QuestDB), Redis connections, and DuckDB — not a NautilusTrader kernel. Strategy validation (dry-run) should also happen in a Celery task or subprocess, not in the API process.
+The Raw ASGI API lifespan should initialize database pools (`asyncpg` for PostgreSQL/QuestDB), Redis connections, and DuckDB — not a NautilusTrader kernel. Strategy validation (dry-run) should also happen in a Huey task or subprocess, not in the API process.
 
-#### 2.4 ProcessPoolExecutor vs Celery — 🟠
+#### 2.4 ProcessPoolExecutor vs Huey — 🟠
 
-**Recommendation: Use `ProcessPoolExecutor` for short-lived CPU work (<5s) like skfolio optimization. Use Celery for long-running jobs (backtests, parameter sweeps, data ingestion).**
+**Recommendation: Use `ProcessPoolExecutor` for short-lived CPU work (<5s) like skfolio optimization. Use Huey for long-running jobs (backtests, parameter sweeps, data ingestion).**
 
 Decision boundary:
 
 | Task | Executor | Rationale |
 |------|----------|-----------|
 | skfolio optimization | `ProcessPoolExecutor` | Completes in <5s, user expects synchronous response |
-| Single backtest | Celery | Seconds to minutes, needs progress tracking |
-| Parameter sweep | Celery (`group`) | Fan-out across workers |
-| Data ingestion | Celery Beat | Scheduled, long-running |
+| Single backtest | Huey | Seconds to minutes, needs progress tracking |
+| Parameter sweep | Huey (parallel dispatch via list comprehension) | Fan-out across workers |
+| Data ingestion | Huey crontab | Scheduled, long-running |
 
-To avoid conflicts with Gunicorn's `--workers` flag, use `ProcessPoolExecutor(max_workers=2)` (not 4) so that the total process count (Gunicorn workers + executor processes) stays within CPU core count. Alternatively, offload all CPU work to Celery and remove the executor entirely for a simpler architecture.
+To avoid conflicts with Gunicorn's `--workers` flag, use `ProcessPoolExecutor(max_workers=2)` (not 4) so that the total process count (Gunicorn workers + executor processes) stays within CPU core count. Alternatively, offload all CPU work to Huey and remove the executor entirely for a simpler architecture.
 
 ---
 
@@ -94,10 +94,10 @@ Each pool is configured independently (different pool sizes, timeouts). No abstr
 
 #### 5.1 Data ingestion service — 🟠
 
-**Recommendation: For MVP, data ingestion is a Celery Beat scheduled task running within the unified Gunicorn+Uvicorn stack.**
+**Recommendation: For MVP, data ingestion is a Huey crontab scheduled task running within the unified Gunicorn+Uvicorn stack.**
 
 MVP data flow:
-1. Celery Beat triggers periodic data ingestion tasks (nightly Tiingo EOD, weekly Alpaca intraday backfill).
+1. Huey's built-in crontab triggers periodic data ingestion tasks — nightly Tiingo EOD, weekly Alpaca intraday backfill. No separate Beat process is needed.
 2. Ingestion tasks write to QuestDB via ILP over TCP.
 3. No real-time streaming ingestion in MVP — backtest data is batch-loaded.
 
@@ -133,12 +133,12 @@ This is a natural fit for QuestDB's architecture and avoids pre-aggregation comp
 
 #### 7.1 Sandboxing mechanism — 🟡
 
-**Recommendation: For MVP (single-user local app), rely on Celery worker resource limits — no full sandboxing.**
+**Recommendation: For MVP (single-user local app), rely on Huey worker resource limits — no full sandboxing.**
 
 The threat model for a local-first single-user app is **accidental harm** (infinite loops, excessive memory), not malicious code. MVP mitigations:
-- `task_time_limit=3600` and `task_soft_time_limit=3000` in Celery config (already specified).
-- `worker_max_tasks_per_child=50` to restart workers and reclaim leaked memory.
-- `resource.setrlimit()` in the Celery worker to cap memory usage per process.
+- `huey_consumer --workers 4 --worker-type process` with OS signal handlers for task time limits.
+- Docker restart policy or OS supervisor for worker recycling (reclaim leaked memory).
+- `resource.setrlimit()` in the Huey worker to cap memory usage per process.
 
 Full sandboxing (RestrictedPython, nsjail, Pyodide server-side) should be deferred to the platform app where multi-tenant execution requires stronger isolation. Label this as "Future — Platform" in `ARCHITECTURE.md`.
 
@@ -148,15 +148,15 @@ Full sandboxing (RestrictedPython, nsjail, Pyodide server-side) should be deferr
 
 #### 11.1 API assignment — 🔴
 
-**Recommendation: `BacktestNode` in Celery workers for all backtests. `BacktestEngine` is not used in production — it's a reference for understanding the low-level API.**
+**Recommendation: `BacktestNode` in Huey workers for all backtests. `BacktestEngine` is not used in production — it's a reference for understanding the low-level API.**
 
 Rationale:
 - `BacktestNode` with `BacktestRunConfig` is NautilusTrader's recommended production API.
-- `task_queue.md` and `core_engine.md` Celery examples both use `BacktestNode`.
-- `BacktestEngine.reset()` could theoretically reuse engines within prefork workers, but `worker_max_tasks_per_child=50` means workers restart frequently anyway. The complexity of engine reuse is not worth the marginal benefit.
+- `task_queue.md`'s Huey example uses `BacktestNode`.
+- `BacktestEngine.reset()` could theoretically reuse engines within process workers, but Docker restart policy or OS supervisor means workers restart periodically anyway. The complexity of engine reuse is not worth the marginal benefit.
 - Update `ARCHITECTURE.md`'s class diagram to show `BacktestNode` instead of `BacktestEngine` in `NautilusBacktestService`.
 
-For strategy validation (dry-run), do **not** use `BacktestEngine` in the Raw ASGI API process. Instead, validate in a short-lived Celery task that imports the user's strategy class and checks for required method signatures (`on_bar`, `on_start`, etc.) without running a simulation.
+For strategy validation (dry-run), do **not** use `BacktestEngine` in the Raw ASGI API process. Instead, validate in a short-lived Huey task that imports the user's strategy class and checks for required method signatures (`on_bar`, `on_start`, etc.) without running a simulation.
 
 ---
 
@@ -168,15 +168,15 @@ For strategy validation (dry-run), do **not** use `BacktestEngine` in the Raw AS
 
 Flow:
 1. User submits a backtest request with symbols and date range.
-2. The Raw ASGI API enqueues a Celery chain: `export_to_parquet.s(symbols, start, end) | run_backtest.s(strategy_id, config)`.
+2. The Raw ASGI API enqueues a Huey pipeline: `export_to_parquet(symbols, start, end).then(run_backtest, strategy_id, config)`.
 3. The `export_to_parquet` task queries QuestDB via PGWire, converts to Parquet using PyArrow, and writes to the shared Parquet catalog directory.
 4. The `run_backtest` task reads from the Parquet catalog via `ParquetDataCatalog`.
 
-This ensures data is always fresh when a backtest starts, avoids stale Parquet files, and eliminates the need for Celery Beat scheduling or dual-write complexity. The export is fast (~seconds for typical date ranges) because QuestDB's columnar storage streams efficiently.
+This ensures data is always fresh when a backtest starts, avoids stale Parquet files, and eliminates the need for Huey crontab scheduling or dual-write complexity. The export is fast (~seconds for typical date ranges) because QuestDB's columnar storage streams efficiently.
 
 #### 12.2 Parquet catalog Docker volume — 🟠
 
-**Recommendation: Define a named Docker volume shared between the data export task and Celery workers.**
+**Recommendation: Define a named Docker volume shared between the data export task and Huey workers.**
 
 ```yaml
 volumes:
@@ -191,7 +191,7 @@ services:
       - parquet-catalog:/data/validated
 ```
 
-Both the Raw ASGI API service (which triggers exports via Celery) and Celery workers (which read from the catalog) mount the same volume at `/data/validated`. This maps directly to the `ParquetDataCatalog(path="/data/validated")` shown in `data_providers.md`.
+Both the Raw ASGI API service (which triggers exports via Huey) and Huey workers (which read from the catalog) mount the same volume at `/data/validated`. This maps directly to the `ParquetDataCatalog(path="/data/validated")` shown in `data_providers.md`.
 
 ---
 
@@ -203,7 +203,7 @@ Both the Raw ASGI API service (which triggers exports via Celery) and Celery wor
 
 With 4 workers and ~5s per backtest: 500 / 4 = 125 batches × 5s = ~10 minutes. This is acceptable for research iteration. Faster sweeps can be achieved by increasing `worker_concurrency` on machines with more cores.
 
-UI progress: The sweep Celery group should publish aggregate progress to a Redis channel (`sweep:{id}:progress`), and the Raw ASGI API should forward it via WebSocket: `"234/500 complete, ~4 min remaining"`. Use Celery's `GroupResult.completed_count()` to track.
+UI progress: The sweep should publish aggregate progress to a Redis channel (`sweep:{id}:progress`), and the Raw ASGI API should forward it via WebSocket: `"234/500 complete, ~4 min remaining"`. Track completion counts using Redis pub/sub.
 
 #### 13.2 Memory pressure — 🟡
 
@@ -211,7 +211,7 @@ UI progress: The sweep Celery group should publish aggregate progress to a Redis
 
 `ParquetDataCatalog` reads Parquet files via PyArrow, which supports memory-mapped I/O. Multiple workers reading the same Parquet files on the shared volume will share OS-level page cache, not duplicate data in each process's heap.
 
-For a 500-symbol × 20-year daily OHLCV dataset (~36M rows × ~48 bytes/row ≈ 1.7 GB on disk), expect ~200–500 MB per worker in practice (Arrow memory-maps lazily). With `worker_max_tasks_per_child=50`, workers restart and release memory periodically.
+For a 500-symbol × 20-year daily OHLCV dataset (~36M rows × ~48 bytes/row ≈ 1.7 GB on disk), expect ~200–500 MB per worker in practice (Arrow memory-maps lazily). With Docker restart policy or OS supervisor, workers restart and release memory periodically.
 
 ---
 
@@ -243,8 +243,8 @@ Monaco autocompletion: Register a `CompletionItemProvider` that suggests:
 
 Steps:
 1. Raw ASGI API receives `POST /api/strategies/validate` with Python source code.
-2. API enqueues a Celery task `validate_strategy(code)`.
-3. The Celery worker writes the code to a temp file, imports it in a subprocess with `importlib`, and checks:
+2. API enqueues a Huey task `validate_strategy(code)`.
+3. The Huey worker writes the code to a temp file, imports it in a subprocess with `importlib`, and checks:
    - Class inherits from `TradingStrategy`
    - Required methods exist (`on_start`, `on_bar` or `on_quote_tick`)
    - No syntax errors (already caught by Pyodide client-side, but double-checked)
@@ -254,15 +254,15 @@ This avoids executing arbitrary code in the API process and avoids instantiating
 
 #### 14.3 Strategy code serialization — 🔴
 
-**Recommendation: Store Python source in PostgreSQL (`STRATEGIES.python_code` column). Pass the strategy ID (not source code) to Celery. The worker loads the code from the database and `exec()`s it.**
+**Recommendation: Store Python source in PostgreSQL (`STRATEGIES.python_code` column). Pass the strategy ID (not source code) to Huey. The worker loads the code from the database and `exec()`s it.**
 
 Flow:
 1. Monaco editor → `POST /api/strategies` → Raw ASGI API stores source in PostgreSQL → returns `strategy_id`.
-2. `POST /api/backtest/run` → API enqueues `run_backtest.s(strategy_id, config)` (JSON-serializable).
-3. Celery worker receives `strategy_id`, queries PostgreSQL for the Python source, `exec()`s it to define the class, and registers it with `BacktestNode`.
+2. `POST /api/backtest/run` → API enqueues `run_backtest(strategy_id, config)` (JSON-serializable).
+3. Huey worker receives `strategy_id`, queries PostgreSQL for the Python source, `exec()`s it to define the class, and registers it with `BacktestNode`.
 
 ```python
-@shared_task
+@huey.task()
 def run_backtest(strategy_id: str, config: dict):
     code = db.fetch_strategy_code(strategy_id)  # From PostgreSQL
     namespace = {}
@@ -273,9 +273,9 @@ def run_backtest(strategy_id: str, config: dict):
     return node.get_results()
 ```
 
-**Security note:** `exec()` runs arbitrary Python in the Celery worker process. For the single-user local MVP, this is acceptable (the user is running their own code on their own machine). For the future multi-tenant platform, replace `exec()` with a sandboxed execution environment (see §7.1). As an interim measure, consider restricting built-ins: `exec(code, {"__builtins__": safe_builtins}, namespace)` to prevent accidental use of `os`, `subprocess`, etc.
+**Security note:** `exec()` runs arbitrary Python in the Huey worker process. For the single-user local MVP, this is acceptable (the user is running their own code on their own machine). For the future multi-tenant platform, replace `exec()` with a sandboxed execution environment (see §7.1). As an interim measure, consider restricting built-ins: `exec(code, {"__builtins__": safe_builtins}, namespace)` to prevent accidental use of `os`, `subprocess`, etc.
 
-This keeps Celery messages small (just IDs) and avoids passing Python source through the message queue.
+This keeps Huey task arguments small (just IDs) and avoids passing Python source through the message queue.
 
 ---
 
@@ -301,7 +301,7 @@ This approach:
 
 #### 17.1 NautilusTrader → skfolio handoff — 🟠
 
-**Recommendation: A Celery task converts NautilusTrader results to asset-return DataFrames for skfolio. The conversion is strategy-level, not asset-level.**
+**Recommendation: A Huey task converts NautilusTrader results to asset-return DataFrames for skfolio. The conversion is strategy-level, not asset-level.**
 
 Flow:
 1. User runs N backtests (one per strategy or parameter set), each producing an equity curve.
@@ -322,7 +322,7 @@ def backtest_results_to_returns(result_ids: list[str]) -> pd.DataFrame:
     return pd.DataFrame(returns)
 ```
 
-This runs in the Raw ASGI API process (via `ProcessPoolExecutor`) since it's a quick computation, or as a Celery task for large portfolios.
+This runs in the Raw ASGI API process (via `ProcessPoolExecutor`) since it's a quick computation, or as a Huey task for large portfolios.
 
 ---
 
@@ -364,7 +364,7 @@ Add a note to `core_engine.md`:
 
 **Recommendation: The Raw ASGI API runs inside Docker Compose, not managed by Tauri.**
 
-The `ARCHITECTURE.md` Deployment Architecture diagram is authoritative — the Raw ASGI API (Gunicorn+Uvicorn), Celery workers, PostgreSQL, QuestDB, and Redis all run as Docker Compose services. Tauri is a native desktop app that connects to these services over `localhost`.
+The `ARCHITECTURE.md` Deployment Architecture diagram is authoritative — the Raw ASGI API (Gunicorn+Uvicorn), Huey workers, PostgreSQL, QuestDB, and Redis all run as Docker Compose services. Tauri is a native desktop app that connects to these services over `localhost`.
 
 - **Port binding:** The Raw ASGI API exposes port 8000 on the host via Docker Compose `ports` mapping.
 - **Startup orchestration:** `docker compose up` starts all backend services. Tauri connects to them on launch.
